@@ -1,0 +1,25 @@
+# whisper-push configuration
+
+# Language: "auto" for auto-detection, or ISO code ("fr", "en", "de", ...)
+language = "auto"
+
+# Whisper model: tiny, base, small, medium, large-v3, large-v3-turbo
+model = "large-v3-turbo"
+
+# Precision: int8 (fast, low VRAM), float16 (balanced), float32 (CPU)
+compute_type = "int8"
+
+# Device: cuda (GPU), cpu, auto
+device = "cuda"
+
+# Notifications on start/stop
+notifications = true
+
+# Sound feedback on start/stop
+sound_feedback = true
+
+# Transcription beam size (higher = more accurate, slower)
+beam_size = 5
+
+# Debug mode: saves last recording to ~/.cache/whisper-push-last.wav
+debug = false

@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Runtime
+*.lock
+
+# Audio (but allow sounds/)
+*.wav
+!sounds/*.wav
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

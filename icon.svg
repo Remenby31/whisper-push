@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" rx="28" fill="#0a0a0a"/>
+
+  <!-- Flow waves - abstract voice -->
+  <path d="M32 64 Q48 44, 64 64 Q80 84, 96 64" fill="none" stroke="#8b7ce5" stroke-width="8" stroke-linecap="round"/>
+  <path d="M32 48 Q48 28, 64 48 Q80 68, 96 48" fill="none" stroke="#8b7ce5" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+  <path d="M32 80 Q48 60, 64 80 Q80 100, 96 80" fill="none" stroke="#8b7ce5" stroke-width="6" stroke-linecap="round" opacity="0.6"/>
+</svg>
