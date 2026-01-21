@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow microphone access -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Allow sending keystrokes to other applications -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- Allow JIT compilation (needed for some Python extensions) -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Allow unsigned executable memory (needed for faster-whisper/ctranslate2) -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Disable library validation (needed for bundled libraries) -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
