@@ -211,9 +211,11 @@ APP_PATH="/Applications/Whisper Push.app"
 mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 
-# Create executable script
+# Create executable script with absolute paths (evaluated at install time)
 cat > "$APP_PATH/Contents/MacOS/Whisper Push" << APPSCRIPT
 #!/bin/bash
+export HOME="$HOME"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\$PATH"
 source "$VENV_DIR/bin/activate"
 exec python3 "$SUPPORT_DIR/whisper-push-macos.py" "\$@"
 APPSCRIPT
@@ -346,7 +348,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 # Format: modifier+modifier+key
 # Modifiers: cmd, shift, alt (option), ctrl
 # Keys: a-z, 0-9, space, return, tab, escape, f1-f12
-hotkey = "cmd+shift+space"
+hotkey = "ctrl+shift+space"
 
 # Language: "auto" for auto-detection, or ISO code ("fr", "en", "de", ...)
 language = "auto"
@@ -480,7 +482,7 @@ echo "=========================================="
 echo ""
 echo "Look for the Whisper Push icon in your menu bar (top right)."
 echo ""
-echo -e "  ${BLUE}Hotkey:${NC}  ⌘⇧Space (Cmd+Shift+Space)"
+echo -e "  ${BLUE}Hotkey:${NC}  ⌃⇧Space (Ctrl+Shift+Space)"
 echo -e "  ${BLUE}Config:${NC}  $CONFIG_FILE"
 echo -e "  ${BLUE}Logs:${NC}    $SUPPORT_DIR/daemon.log"
 echo ""
@@ -490,9 +492,9 @@ echo "  Red    → Recording"
 echo "  Orange → Processing"
 echo ""
 echo "Usage:"
-echo "  1. Press ⌘⇧Space to start recording"
+echo "  1. Press ⌃⇧Space to start recording"
 echo "  2. Speak"
-echo "  3. Press ⌘⇧Space again → text is typed at cursor"
+echo "  3. Press ⌃⇧Space again → text is typed at cursor"
 echo ""
 echo "To uninstall: $SCRIPT_DIR/uninstall.sh"
 echo ""
