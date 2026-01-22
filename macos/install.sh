@@ -201,7 +201,61 @@ chmod +x "$SUPPORT_DIR/whisper-push"
 log "whisper-push installed"
 
 # =============================================================================
-# Step 7: Install menu bar daemon
+# Step 7: Create Spotlight-visible app in /Applications
+# =============================================================================
+
+echo ""
+info "Creating Whisper Push app for Spotlight..."
+
+APP_PATH="/Applications/Whisper Push.app"
+mkdir -p "$APP_PATH/Contents/MacOS"
+mkdir -p "$APP_PATH/Contents/Resources"
+
+# Create executable script
+cat > "$APP_PATH/Contents/MacOS/Whisper Push" << APPSCRIPT
+#!/bin/bash
+source "$VENV_DIR/bin/activate"
+exec python3 "$SUPPORT_DIR/whisper-push-macos.py" "\$@"
+APPSCRIPT
+chmod +x "$APP_PATH/Contents/MacOS/Whisper Push"
+
+# Create Info.plist
+cat > "$APP_PATH/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Whisper Push</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.whisper-push.app</string>
+    <key>CFBundleName</key>
+    <string>Whisper Push</string>
+    <key>CFBundleDisplayName</key>
+    <string>Whisper Push</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Whisper Push needs microphone access to record your voice.</string>
+</dict>
+</plist>
+PLIST
+
+# Force Spotlight to index the app
+mdimport "$APP_PATH" 2>/dev/null || true
+
+log "Whisper Push.app created (searchable via Spotlight)"
+
+# =============================================================================
+# Step 8: Install menu bar daemon
 # =============================================================================
 
 echo ""
