@@ -345,20 +345,74 @@ else
 fi
 
 # =============================================================================
-# Step 12: Request permissions
+# Step 12: Request permissions (Accessibility)
 # =============================================================================
 
 echo ""
-warn "═══════════════════════════════════════════════════════════════"
-warn "  IMPORTANT: Grant Accessibility permission when prompted!"
-warn "═══════════════════════════════════════════════════════════════"
-echo ""
-info "The menu bar icon should now appear."
-info "If prompted for Accessibility access, please allow it."
-info ""
-info "If no prompt appears, manually enable in:"
-info "  System Settings → Privacy & Security → Accessibility"
-info "  → Enable 'python3' or 'Python'"
+info "Configuring permissions..."
+
+# Function to check if we have accessibility permission
+check_accessibility() {
+    # Try to use osascript to check accessibility - this will prompt if needed
+    osascript -e 'tell application "System Events" to return true' &>/dev/null
+    return $?
+}
+
+# Function to show macOS notification
+show_notification() {
+    local title="$1"
+    local message="$2"
+    osascript -e "display notification \"$message\" with title \"$title\" sound name \"default\"" 2>/dev/null || true
+}
+
+# Check if we already have accessibility permission
+if check_accessibility; then
+    log "Accessibility permission already granted"
+else
+    # Show notification and open System Settings
+    show_notification "Whisper Push" "Please enable Accessibility permission for Python"
+
+    warn "═══════════════════════════════════════════════════════════════"
+    warn "  ACTION REQUIRED: Enable Accessibility permission"
+    warn "═══════════════════════════════════════════════════════════════"
+    echo ""
+    info "Opening System Settings → Accessibility..."
+
+    # Open System Settings directly to Accessibility pane
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+
+    echo ""
+    info "Please enable 'Python' or 'python3.12' in the list."
+    info "You may need to click the lock 🔒 to make changes."
+    echo ""
+
+    # Wait for user to grant permission (with timeout)
+    info "Waiting for permission to be granted..."
+    TIMEOUT=60
+    ELAPSED=0
+    while ! check_accessibility && [[ $ELAPSED -lt $TIMEOUT ]]; do
+        sleep 2
+        ELAPSED=$((ELAPSED + 2))
+        echo -n "."
+    done
+    echo ""
+
+    if check_accessibility; then
+        log "Accessibility permission granted!"
+        show_notification "Whisper Push" "Setup complete! Press Cmd+Shift+Space to use."
+
+        # Restart daemon to pick up new permissions
+        info "Restarting daemon with new permissions..."
+        launchctl kickstart -k gui/$(id -u)/com.whisper-push.hotkey 2>/dev/null || true
+        sleep 1
+    else
+        warn "Permission not yet granted. Hotkey won't work until you enable it."
+        warn "Go to: System Settings → Privacy & Security → Accessibility"
+        warn "Then enable 'Python' and restart with:"
+        warn "  launchctl kickstart -k gui/\$(id -u)/com.whisper-push.hotkey"
+    fi
+fi
+
 echo ""
 
 # =============================================================================

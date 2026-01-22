@@ -181,6 +181,21 @@ def load_icon(state):
     return None
 
 
+# Global reference for hotkey handler (outside class to avoid PyObjC selector issues)
+_app_instance = None
+
+
+def _handle_global_hotkey(event):
+    """Handle global key events - must be outside NSObject class."""
+    global _app_instance
+    if _app_instance is None:
+        return
+    if event.keyCode() == _app_instance.key_code:
+        current_modifiers = event.modifierFlags()
+        if (current_modifiers & _app_instance.modifiers) == _app_instance.modifiers:
+            _app_instance.trigger_whisper_push()
+
+
 class MenuBarApp(NSObject):
     """Menu bar application with status icon and hotkey handling."""
 
@@ -222,9 +237,12 @@ class MenuBarApp(NSObject):
         self.status_item.setMenu_(self.menu)
 
         # Set up global hotkey monitor
+        # Store reference for global handler function
+        global _app_instance
+        _app_instance = self
         NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSKeyDownMask,
-            self.handle_global_event_
+            _handle_global_hotkey
         )
 
         # Start state polling timer
@@ -359,13 +377,6 @@ class MenuBarApp(NSObject):
                 threading.Timer(0.5, lambda: self.set_state(State.IDLE)).start()
             elif self.state != State.IDLE:
                 self.set_state(State.IDLE)
-
-    def handle_global_event_(self, event):
-        """Handle global key events."""
-        if event.keyCode() == self.key_code:
-            current_modifiers = event.modifierFlags()
-            if (current_modifiers & self.modifiers) == self.modifiers:
-                self.trigger_whisper_push()
 
     def trigger_whisper_push(self):
         """Trigger whisper-push toggle."""
