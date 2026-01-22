@@ -12,6 +12,12 @@ venv/
 *.wav
 !sounds/*.wav
 
+# Build
+build/
+dist/
+*.dmg
+*.spec.bak
+
 # IDE
 .idea/
 .vscode/
@@ -19,3 +25,4 @@ venv/
 
 # OS
 .DS_Store
+Thumbs.db

@@ -7,11 +7,13 @@ Compatible with Apple Silicon (M1/M2/M3/M4).
 """
 
 import argparse
+import atexit
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -49,6 +51,17 @@ DEFAULT_CONFIG = {
 _model: Optional[object] = None
 
 
+def _cleanup_model() -> None:
+    """Cleanup model on exit to free memory."""
+    global _model
+    if _model is not None:
+        del _model
+        _model = None
+
+
+atexit.register(_cleanup_model)
+
+
 def load_config() -> dict:
     """Load configuration from file, with defaults."""
     config = DEFAULT_CONFIG.copy()
@@ -83,14 +96,18 @@ def play_sound(sound_type: str) -> None:
     """Play feedback sound using afplay (macOS native)."""
     sound_file = SOUNDS_DIR / f"{sound_type}.wav"
     if sound_file.exists():
-        try:
-            subprocess.Popen(
-                ["afplay", str(sound_file)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+        def _play():
+            try:
+                subprocess.run(
+                    ["afplay", str(sound_file)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        # Run in daemon thread to avoid blocking and prevent zombie processes
+        thread = threading.Thread(target=_play, daemon=True)
+        thread.start()
 
 
 def is_recording() -> bool:

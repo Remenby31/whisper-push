@@ -16,8 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Linux-blue" alt="Platform">
-  <img src="https://img.shields.io/badge/display-Wayland-green" alt="Wayland">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue" alt="Platform">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
 </p>
 
@@ -46,7 +45,20 @@ Tested with `large-v3-turbo` + `int8` on RTX 3070:
 
 A 10-second recording transcribes in ~2.7s.
 
-## Requirements
+## macOS
+
+For macOS (Apple Silicon & Intel), see **[macos/README.md](macos/README.md)**.
+
+Quick install:
+```bash
+./macos/install.sh
+```
+
+---
+
+## Linux
+
+### Requirements
 
 | Dependency | Purpose |
 |------------|---------|
@@ -56,9 +68,9 @@ A 10-second recording transcribes in ~2.7s.
 | ydotool | Keyboard simulation |
 | NVIDIA GPU | CUDA acceleration (or CPU fallback) |
 
-## Installation
+### Installation
 
-### 1. Install system dependencies
+#### 1. Install system dependencies
 
 ```bash
 # Arch Linux
@@ -69,7 +81,7 @@ sudo usermod -aG input $USER
 # Log out and back in for this to take effect
 ```
 
-### 2. Clone and install
+#### 2. Clone and install
 
 ```bash
 git clone https://github.com/Remenby31/whisper-push.git
@@ -77,7 +89,7 @@ cd whisper-push
 ./install.sh
 ```
 
-### 3. Set up keyboard shortcut
+#### 3. Set up keyboard shortcut
 
 Bind `whisper-push` to a hotkey in your desktop settings (e.g., `Super+V`).
 

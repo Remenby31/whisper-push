@@ -1,134 +1,133 @@
-# Whisper Push - macOS Build Guide
+# Whisper Push - macOS
 
-## Compatibility
+Push-to-talk voice dictation using Whisper, optimized for Apple Silicon.
 
-- **macOS 11.0 (Big Sur)** or later
-- **Apple Silicon (M1/M2/M3/M4)** - Native ARM64 support
-- **Intel Macs** - x86_64 support
-
-## Prerequisites
-
-Install required tools on your Mac:
+## Quick Install
 
 ```bash
-# Install Homebrew (if not already installed)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# Install runtime dependency
-brew install sox
-
-# Optional: for icon conversion from SVG
-brew install librsvg
-```
-
-## Building the DMG
-
-1. Clone the repository:
-```bash
+# Clone and install
 git clone <repository-url>
 cd whisper-push
+./macos/install.sh
 ```
 
-2. Run the build script:
-```bash
-./macos/build-dmg.sh
-```
+That's it! The installer will:
+- Install dependencies (sox, Python packages)
+- Add a **menu bar icon** (🎤) for status and control
+- Set up auto-start on login
+- Configure default hotkey: **Cmd+Shift+Space**
+- Request necessary permissions
 
-3. The DMG will be created in `dist/`:
-   - Apple Silicon: `Whisper-Push-macOS-arm64.dmg`
-   - Intel: `Whisper-Push-macOS-x86_64.dmg`
+## Menu Bar
 
-## Installation
+After installation, you'll see the Whisper Push icon in your menu bar. The icon changes color based on status:
 
-1. Open the DMG file
-2. Drag "Whisper Push" to Applications
-3. First launch: Right-click → Open (to bypass Gatekeeper)
-4. Grant permissions when prompted:
-   - **Microphone**: Required for voice recording
-   - **Accessibility**: Required for typing transcribed text
+| Color | Status |
+|-------|--------|
+| Purple | Idle - ready to record |
+| Red | Recording in progress |
+| Orange | Processing transcription |
+
+Click the icon to access:
+- Start/Stop Recording
+- Cancel Recording
+- Open Config
+- View Logs
+- Quit
 
 ## Usage
 
-### As CLI Tool
-```bash
-# Toggle recording (run once to start, again to stop and transcribe)
-/Applications/Whisper\ Push.app/Contents/MacOS/whisper-push
-
-# Check status
-/Applications/Whisper\ Push.app/Contents/MacOS/whisper-push --status
-
-# Force stop
-/Applications/Whisper\ Push.app/Contents/MacOS/whisper-push --stop
-
-# Override language
-/Applications/Whisper\ Push.app/Contents/MacOS/whisper-push --language fr
-```
-
-### Keyboard Shortcut Setup
-
-1. Open **System Settings** → **Keyboard** → **Keyboard Shortcuts**
-2. Click **Services** → **General**
-3. Add a new service or use Automator to create a Quick Action that runs:
-   ```bash
-   /Applications/Whisper\ Push.app/Contents/MacOS/whisper-push
-   ```
-4. Assign your preferred hotkey (e.g., `⌘⇧Space`)
-
-Alternatively, use a tool like **Hammerspoon** or **Karabiner-Elements** for global hotkeys.
+1. Press **Cmd+Shift+Space** (or click 🎤 → Start Recording)
+2. Speak your text
+3. Press **Cmd+Shift+Space** again to stop
+4. Text is automatically typed at cursor position
 
 ## Configuration
 
-Configuration file location: `~/Library/Application Support/whisper-push/config.toml`
+Edit `~/Library/Application Support/whisper-push/config.toml`:
 
 ```toml
-# Language: "auto" for auto-detection, or ISO code ("fr", "en", "de", ...)
+# Global hotkey to toggle recording
+# Modifiers: cmd, shift, alt (option), ctrl
+# Keys: a-z, 0-9, space, return, f1-f12
+hotkey = "cmd+shift+space"
+
+# Language: "auto" or ISO code ("fr", "en", "de", ...)
 language = "auto"
 
 # Whisper model: tiny, base, small, medium, large-v3, large-v3-turbo
 model = "large-v3-turbo"
 
-# Precision: int8 (recommended for Apple Silicon), float32
+# Precision: int8 (recommended), float32
 compute_type = "int8"
 
-# Device: cpu (recommended), auto
-device = "cpu"
-
-# Notifications on start/stop
+# Notifications and sound feedback
 notifications = true
-
-# Sound feedback on start/stop
 sound_feedback = true
-
-# Transcription beam size (higher = more accurate, slower)
-beam_size = 5
 ```
 
-## Apple Silicon Performance
+After changing the hotkey, restart the daemon:
+```bash
+launchctl kickstart -k gui/$(id -u)/com.whisper-push.hotkey
+```
 
-On M1/M2/M3/M4 Macs, the application uses CPU inference with int8 quantization, which provides excellent performance thanks to Apple's efficient ARM cores. The first transcription will download the Whisper model (~1.5GB for large-v3-turbo).
+## Permissions
 
-**Expected performance on M4:**
-- Model loading: ~2-3 seconds (first run only)
-- Transcription speed: ~10-20x real-time (10s audio → <1s processing)
+The app requires two permissions:
+
+1. **Microphone** - For voice recording
+2. **Accessibility** - For global hotkeys and typing text
+
+Go to **System Settings → Privacy & Security** to grant these permissions to Terminal or Python.
+
+## Uninstall
+
+```bash
+./macos/uninstall.sh
+```
+
+## Manual Installation (DMG)
+
+If you prefer to build a standalone app:
+
+```bash
+./macos/build-dmg.sh
+```
+
+Then:
+1. Open `dist/Whisper-Push-macOS-*.dmg`
+2. Drag to Applications
+3. Run `./macos/install.sh` to set up hotkey daemon
+
+## Compatibility
+
+- **macOS 11.0+** (Big Sur or later)
+- **Apple Silicon** (M1/M2/M3/M4) - Native ARM64
+- **Intel Macs** - x86_64 support
+
+## Performance (Apple Silicon)
+
+- First run downloads Whisper model (~1.5GB)
+- Model loading: ~2-3 seconds (first transcription only)
+- Transcription: ~10-20x real-time
 
 ## Troubleshooting
 
-### "whisper-push" cannot be opened because the developer cannot be verified
+### Hotkey not working
 
-Right-click the app → Open → Open
+1. Check Accessibility permission in System Settings
+2. View logs: `cat ~/Library/Application\ Support/whisper-push/hotkey.log`
+3. Restart daemon: `launchctl kickstart -k gui/$(id -u)/com.whisper-push.hotkey`
 
-Or remove quarantine attribute:
+### "Cannot be opened because the developer cannot be verified"
+
 ```bash
 xattr -d com.apple.quarantine /Applications/Whisper\ Push.app
 ```
 
-### Microphone permission denied
+### Microphone not recording
 
-Go to **System Settings** → **Privacy & Security** → **Microphone** and enable "Whisper Push"
-
-### Keyboard simulation not working
-
-Go to **System Settings** → **Privacy & Security** → **Accessibility** and enable "Whisper Push"
+Grant Microphone permission in System Settings → Privacy & Security → Microphone
 
 ### sox/rec not found
 
@@ -136,25 +135,11 @@ Go to **System Settings** → **Privacy & Security** → **Accessibility** and e
 brew install sox
 ```
 
-## Code Signing (Optional)
+## Files
 
-To distribute the DMG, sign it with your Developer ID:
-
-```bash
-# Set your Developer ID
-export DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)"
-
-# Run build script (will auto-sign)
-./macos/build-dmg.sh
-```
-
-For notarization (required for distribution outside App Store):
-```bash
-xcrun notarytool submit dist/Whisper-Push-macOS-arm64.dmg \
-    --apple-id "your@email.com" \
-    --team-id "TEAMID" \
-    --password "@keychain:AC_PASSWORD" \
-    --wait
-
-xcrun stapler staple dist/Whisper-Push-macOS-arm64.dmg
-```
+| Path | Description |
+|------|-------------|
+| `~/Library/Application Support/whisper-push/config.toml` | Configuration |
+| `~/Library/Application Support/whisper-push/hotkey.log` | Daemon logs |
+| `~/Library/LaunchAgents/com.whisper-push.hotkey.plist` | Auto-start config |
+| `~/.cache/huggingface/` | Whisper models |

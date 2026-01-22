@@ -6,11 +6,13 @@ Toggle mode: press hotkey to start recording, press again to transcribe and type
 """
 
 import argparse
+import atexit
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -39,6 +41,17 @@ DEFAULT_CONFIG = {
 
 # Lazy-loaded model
 _model: Optional[object] = None
+
+
+def _cleanup_model() -> None:
+    """Cleanup model on exit to free memory."""
+    global _model
+    if _model is not None:
+        del _model
+        _model = None
+
+
+atexit.register(_cleanup_model)
 
 
 def load_config() -> dict:
@@ -70,14 +83,18 @@ def play_sound(sound_type: str) -> None:
     """Play feedback sound (start/stop)."""
     sound_file = SOUNDS_DIR / f"{sound_type}.wav"
     if sound_file.exists():
-        try:
-            subprocess.Popen(
-                ["paplay", str(sound_file)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
+        def _play():
+            try:
+                subprocess.run(
+                    ["paplay", str(sound_file)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception:
+                pass
+        # Run in daemon thread to avoid blocking and prevent zombie processes
+        thread = threading.Thread(target=_play, daemon=True)
+        thread.start()
 
 
 def is_recording() -> bool:
@@ -176,10 +193,11 @@ def transcribe_segments(config: dict) -> Iterator[str]:
 
 def _paste_text(text: str) -> None:
     """Copy text to clipboard and paste with Ctrl+Shift+V."""
-    subprocess.Popen(
+    subprocess.run(
         ["wl-copy", "--", text],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=2,
     )
     time.sleep(0.1)
 
@@ -217,12 +235,13 @@ def transcribe_and_type(config: dict) -> str:
         # Restore previous clipboard
         if old_clipboard:
             time.sleep(0.1)
-            subprocess.Popen(
+            subprocess.run(
                 ["wl-copy", "--"],
-                stdin=subprocess.PIPE,
+                input=old_clipboard,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-            ).communicate(input=old_clipboard, timeout=2)
+                timeout=2,
+            )
 
     return " ".join(typed_segments)
 
