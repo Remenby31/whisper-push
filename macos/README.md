@@ -15,7 +15,7 @@ That's it! The installer will:
 - Install dependencies (sox, Python packages)
 - Add a **menu bar icon** (🎤) for status and control
 - Set up auto-start on login
-- Configure default hotkey: **Cmd+Shift+Space**
+- Configure default hotkey: **Hold Control (ctrl)**
 - Request necessary permissions
 
 ## Menu Bar
@@ -37,9 +37,9 @@ Click the icon to access:
 
 ## Usage
 
-1. Press **Cmd+Shift+Space** (or click 🎤 → Start Recording)
+1. Hold **Control** (or click 🎤 → Start Recording)
 2. Speak your text
-3. Press **Cmd+Shift+Space** again to stop
+3. Release **Control** to stop
 4. Text is automatically typed at cursor position
 
 ## Configuration
@@ -47,10 +47,16 @@ Click the icon to access:
 Edit `~/Library/Application Support/whisper-push/config.toml`:
 
 ```toml
-# Global hotkey to toggle recording
+# Global hotkey (toggle or hold)
 # Modifiers: cmd, shift, alt (option), ctrl
 # Keys: a-z, 0-9, space, return, f1-f12
-hotkey = "cmd+shift+space"
+hotkey = "ctrl"
+
+# Hotkey mode: "toggle" or "hold"
+# For hold-to-talk with Control only, use:
+# hotkey_mode = "hold"
+# hotkey = "rctrl"  # right control recommended to avoid conflicts
+hotkey_mode = "hold"
 
 # Language: "auto" or ISO code ("fr", "en", "de", ...)
 language = "auto"

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-whisper-push - Push-to-talk dictation using faster-whisper (macOS version)
+whisper-push - Push-to-talk dictation using faster-whisper
 
 Toggle mode: press hotkey to start recording, press again to transcribe and type.
-Compatible with Apple Silicon (M1/M2/M3/M4).
 """
 
 import argparse
@@ -15,30 +14,29 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 from pathlib import Path
 from typing import Iterator, Optional
 
-# Paths - macOS conventions
-SCRIPT_DIR = Path(__file__).resolve().parent
-if getattr(sys, 'frozen', False):
-    # Running as app bundle
-    SCRIPT_DIR = Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS') else SCRIPT_DIR
-    RESOURCES_DIR = SCRIPT_DIR
-else:
-    RESOURCES_DIR = SCRIPT_DIR
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # Python 3.10 fallback
+    import tomli as tomllib
 
-CONFIG_DIR = Path.home() / "Library" / "Application Support" / "whisper-push"
+# Paths
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_DIR = Path.home() / ".config" / "whisper-push"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
-RUNTIME_DIR = Path(os.environ.get("TMPDIR", "/tmp"))
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
 LOCK_FILE = RUNTIME_DIR / "whisper-push.lock"
 AUDIO_FILE = RUNTIME_DIR / "whisper-push.wav"
-SOUNDS_DIR = RESOURCES_DIR / "sounds"
+SOUNDS_DIR = SCRIPT_DIR / "sounds"
 
-# Default configuration (macOS optimized for mlx-whisper)
+# Default configuration
 DEFAULT_CONFIG = {
     "language": "auto",
     "model": "large-v3-turbo",
+    "compute_type": "int8",
+    "device": "cuda",
     "notifications": True,
     "sound_feedback": True,
     "beam_size": 5,
@@ -74,15 +72,10 @@ def load_config() -> dict:
 
 
 def notify(message: str, urgency: str = "normal") -> None:
-    """Send macOS notification via osascript."""
+    """Send desktop notification."""
     try:
-        # Map urgency to sound
-        sound = "Basso" if urgency == "critical" else "default"
-        script = f'''
-        display notification "{message}" with title "Whisper Push" sound name "{sound}"
-        '''
         subprocess.run(
-            ["osascript", "-e", script],
+            ["notify-send", "-u", urgency, "-a", "whisper-push", "Whisper Push", message],
             capture_output=True,
             timeout=5,
         )
@@ -91,21 +84,28 @@ def notify(message: str, urgency: str = "normal") -> None:
 
 
 def play_sound(sound_type: str) -> None:
-    """Play feedback sound using afplay (macOS native)."""
+    """Play feedback sound (start/stop)."""
     sound_file = SOUNDS_DIR / f"{sound_type}.wav"
-    if sound_file.exists():
-        def _play():
-            try:
-                subprocess.run(
-                    ["afplay", str(sound_file)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
-                pass
-        # Run in daemon thread to avoid blocking and prevent zombie processes
-        thread = threading.Thread(target=_play, daemon=True)
-        thread.start()
+    if not sound_file.exists():
+        return
+
+    def _play() -> None:
+        players = ["paplay", "pw-play", "aplay"]
+        for player in players:
+            if shutil.which(player):
+                try:
+                    subprocess.run(
+                        [player, str(sound_file)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    return
+                except Exception:
+                    return
+
+    # Run in daemon thread to avoid blocking and prevent zombie processes
+    thread = threading.Thread(target=_play, daemon=True)
+    thread.start()
 
 
 def is_recording() -> bool:
@@ -121,38 +121,12 @@ def is_recording() -> bool:
         return False
 
 
-def find_sox() -> str:
-    """Find sox/rec binary (Homebrew or bundled)."""
-    # Check common Homebrew locations for Apple Silicon and Intel
-    candidates = [
-        "/opt/homebrew/bin/rec",  # Apple Silicon Homebrew
-        "/usr/local/bin/rec",      # Intel Homebrew
-        shutil.which("rec"),
-    ]
-    for path in candidates:
-        if path and Path(path).exists():
-            return path
-    raise RuntimeError(
-        "sox not found. Install with: brew install sox"
-    )
-
-
 def start_recording(config: dict) -> None:
-    """Start audio recording with sox/rec."""
+    """Start audio recording with pw-record."""
     AUDIO_FILE.unlink(missing_ok=True)
 
-    rec_path = find_sox()
-
-    # Record with sox: 16kHz mono WAV
     process = subprocess.Popen(
-        [
-            rec_path,
-            "-q",  # Quiet
-            "-r", "16000",  # Sample rate
-            "-c", "1",  # Mono
-            "-b", "16",  # 16-bit
-            str(AUDIO_FILE),
-        ],
+        ["pw-record", "--format=s16", "--rate=16000", "--channels=1", str(AUDIO_FILE)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -201,52 +175,52 @@ def load_model(config: dict):
     """Load Whisper model (lazy loading, cached)."""
     global _model
     if _model is None:
-        _model = config["model"]
+        from faster_whisper import WhisperModel
+
+        _model = WhisperModel(
+            config["model"],
+            device=config["device"],
+            compute_type=config["compute_type"],
+        )
     return _model
 
 
 def transcribe_segments(config: dict) -> Iterator[str]:
     """Transcribe audio file and yield text segments as they are processed."""
-    import mlx_whisper
-
-    model_name = load_model(config)
+    model = load_model(config)
     language = None if config["language"] == "auto" else config["language"]
 
-    result = mlx_whisper.transcribe(
+    segments, _ = model.transcribe(
         str(AUDIO_FILE),
-        path_or_hf_repo=f"mlx-community/whisper-{model_name}",
+        beam_size=config["beam_size"],
         language=language,
+        vad_filter=True,
     )
 
-    text = result.get("text", "").strip()
-    if text:
-        yield text
+    for segment in segments:
+        text = segment.text.strip()
+        if text:
+            yield text
 
 
 def _paste_text(text: str) -> None:
-    """Copy text to clipboard and paste with Cmd+V via AppleScript."""
-    # Copy to clipboard using pbcopy
-    process = subprocess.Popen(
-        ["pbcopy"],
-        stdin=subprocess.PIPE,
+    """Copy text to clipboard and paste with Ctrl+Shift+V."""
+    subprocess.run(
+        ["wl-copy", "--", text],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=2,
     )
-    process.communicate(input=text.encode("utf-8"))
-    time.sleep(0.05)
+    time.sleep(0.1)
 
-    # Paste with Cmd+V using AppleScript
-    script = '''
-    tell application "System Events"
-        keystroke "v" using command down
-    end tell
-    '''
+    # Paste with Ctrl+Shift+V via ydotool
+    # Keycodes: 29=Ctrl, 42=Shift, 47=V
     subprocess.run(
-        ["osascript", "-e", script],
+        ["ydotool", "key", "-d", "20", "29:1", "42:1", "47:1", "47:0", "42:0", "29:0"],
         capture_output=True,
         timeout=2,
     )
-    time.sleep(0.05)
+    time.sleep(0.1)
 
 
 def transcribe_and_type(config: dict) -> str:
@@ -256,7 +230,7 @@ def transcribe_and_type(config: dict) -> str:
     """
     # Save clipboard before we start
     old_clipboard = subprocess.run(
-        ["pbpaste"], capture_output=True, timeout=2
+        ["wl-paste", "-n"], capture_output=True, timeout=2
     ).stdout
 
     typed_segments: list[str] = []
@@ -273,71 +247,113 @@ def transcribe_and_type(config: dict) -> str:
         # Restore previous clipboard
         if old_clipboard:
             time.sleep(0.1)
-            process = subprocess.Popen(
-                ["pbcopy"],
-                stdin=subprocess.PIPE,
+            subprocess.run(
+                ["wl-copy", "--"],
+                input=old_clipboard,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=2,
             )
-            process.communicate(input=old_clipboard, timeout=2)
 
     return " ".join(typed_segments)
 
 
-def check_accessibility_permissions() -> bool:
-    """Check if app has accessibility permissions (needed for keystroke simulation)."""
-    # This is a basic check - the actual permission prompt is handled by macOS
-    script = '''
-    tell application "System Events"
-        return true
-    end tell
-    '''
+def _format_check(label: str, ok: bool, detail: str = "") -> None:
+    status = "OK" if ok else "MISSING"
+    tail = f" - {detail}" if detail else ""
+    print(f"[{status}] {label}{tail}")
+
+
+def doctor() -> int:
+    """Run environment checks and print a quick diagnostic report."""
+    print("whisper-push doctor")
+    print(f"Python: {sys.version.split()[0]}")
+    print(f"Config: {CONFIG_FILE}")
+    print(f"Runtime dir: {RUNTIME_DIR}")
+
+    required_cmds = ["pw-record", "wl-copy", "wl-paste", "ydotool"]
+    optional_cmds = ["notify-send", "paplay", "pw-play", "aplay"]
+    missing_required = []
+
+    for cmd in required_cmds:
+        ok = shutil.which(cmd) is not None
+        _format_check(cmd, ok)
+        if not ok:
+            missing_required.append(cmd)
+
+    for cmd in optional_cmds:
+        _format_check(cmd, shutil.which(cmd) is not None)
+
+    # ydotool socket
+    ydotool_socket = os.environ.get("YDOTOOL_SOCKET", "/tmp/.ydotool_socket")
+    _format_check("ydotool socket", os.path.exists(ydotool_socket), ydotool_socket)
+
+    # input group membership (needed by ydotool)
     try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            timeout=5,
-        )
-        return result.returncode == 0
+        import grp
+
+        groups = {grp.getgrgid(g).gr_name for g in os.getgroups()}
+        _format_check("input group", "input" in groups, "logout/login required")
     except Exception:
-        return False
+        _format_check("input group", False, "could not determine")
+
+    # faster-whisper import
+    try:
+        import faster_whisper  # noqa: F401
+
+        _format_check("faster-whisper", True)
+    except Exception as e:
+        _format_check("faster-whisper", False, str(e))
+        missing_required.append("faster-whisper (python package)")
+
+    # config parse
+    if CONFIG_FILE.exists():
+        try:
+            load_config()
+            _format_check("config parse", True)
+        except Exception as e:
+            _format_check("config parse", False, str(e))
+    else:
+        _format_check("config file", False, "missing")
+
+    # runtime dir write access
+    _format_check("runtime writable", os.access(RUNTIME_DIR, os.W_OK), str(RUNTIME_DIR))
+
+    if missing_required:
+        print("")
+        print("Missing required dependencies:")
+        for item in missing_required:
+            print(f"- {item}")
+        return 1
+
+    print("")
+    print("All required dependencies look present.")
+    return 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Push-to-talk dictation with Whisper (macOS)"
+        description="Push-to-talk dictation with Whisper"
     )
     parser.add_argument("--config", "-c", type=Path, help="Config file path")
     parser.add_argument("--language", "-l", help="Override language (auto, fr, en, ...)")
     parser.add_argument("--status", "-s", action="store_true", help="Show status")
     parser.add_argument("--stop", action="store_true", help="Force stop recording")
-    parser.add_argument("--check-permissions", action="store_true",
-                       help="Check accessibility permissions")
+    parser.add_argument("--doctor", action="store_true", help="Run dependency checks")
     args = parser.parse_args()
-
-    # Permission check
-    if args.check_permissions:
-        if check_accessibility_permissions():
-            print("Accessibility permissions: OK")
-            sys.exit(0)
-        else:
-            print("Accessibility permissions: DENIED")
-            print("Go to System Settings > Privacy & Security > Accessibility")
-            print("and enable whisper-push or Terminal.")
-            sys.exit(1)
 
     # Load config
     global CONFIG_FILE
     if args.config:
         CONFIG_FILE = args.config
 
+    if args.doctor:
+        sys.exit(doctor())
+
     config = load_config()
 
     if args.language:
         config["language"] = args.language
-
-    # Ensure config directory exists
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     # Status check
     if args.status:
@@ -370,7 +386,7 @@ def main() -> None:
                 sys.exit(1)
             finally:
                 if config.get("debug"):
-                    debug_file = Path.home() / "Library" / "Caches" / "whisper-push-last.wav"
+                    debug_file = Path.home() / ".cache" / "whisper-push-last.wav"
                     debug_file.parent.mkdir(exist_ok=True)
                     shutil.copy2(AUDIO_FILE, debug_file)
                 AUDIO_FILE.unlink(missing_ok=True)

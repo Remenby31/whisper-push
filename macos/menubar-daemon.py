@@ -2,6 +2,7 @@
 """
 Whisper Push - Menu Bar App for macOS
 Shows status icon in menu bar, handles global hotkey, and manages recording.
+Model stays loaded in RAM for instant transcription.
 """
 
 import os
@@ -11,8 +12,19 @@ import signal
 import tomllib
 import threading
 import time
+import tempfile
 from pathlib import Path
 from enum import Enum
+from queue import Queue
+
+# Audio imports
+try:
+    import numpy as np
+    import sounddevice as sd
+    import soundfile as sf
+except ImportError:
+    print("Error: Audio libraries not installed. Run: pip3 install sounddevice soundfile numpy")
+    sys.exit(1)
 
 # PyObjC imports
 try:
@@ -26,10 +38,12 @@ try:
         NSMenu,
         NSMenuItem,
         NSImage,
+        NSSound,
     )
     from Cocoa import (
         NSEvent,
         NSKeyDownMask,
+        NSFlagsChangedMask,
         NSCommandKeyMask,
         NSShiftKeyMask,
         NSAlternateKeyMask,
@@ -48,6 +62,7 @@ except ImportError:
 
 class State(Enum):
     IDLE = "idle"
+    LOADING = "loading"
     RECORDING = "recording"
     PROCESSING = "processing"
 
@@ -56,9 +71,8 @@ class State(Enum):
 SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "whisper-push"
 CONFIG_FILE = SUPPORT_DIR / "config.toml"
 ICONS_DIR = SUPPORT_DIR / "icons"
-LOCK_FILE = Path(os.environ.get("TMPDIR", "/tmp")) / "whisper-push.lock"
-APP_PATH = Path("/Applications/Whisper Push.app/Contents/MacOS/whisper-push")
-SOURCE_PATH = SUPPORT_DIR / "whisper-push"
+SOUNDS_DIR = SUPPORT_DIR / "sounds"
+AUDIO_FILE = Path(tempfile.gettempdir()) / "whisper-push-recording.wav"
 
 # Key code mapping (US keyboard layout)
 KEY_CODES = {
@@ -71,12 +85,34 @@ KEY_CODES = {
     'f6': 97, 'f7': 98, 'f8': 100, 'f9': 101, 'f10': 109, 'f11': 103, 'f12': 111,
 }
 
+# Modifier-only key codes (left/right)
+MODIFIER_KEYCODES = {
+    'lctrl': 59,
+    'rctrl': 62,
+    'lshift': 56,
+    'rshift': 60,
+    'lalt': 58,
+    'ralt': 61,
+    'lcmd': 55,
+    'rcmd': 54,
+}
+
+# Global model reference (stays in RAM)
+_whisper_model = None
+_model_loading = False
+
 
 def load_config():
     """Load configuration from file."""
     config = {
-        "hotkey": "cmd+shift+space",
+        "hotkey": "ctrl",
+        "hotkey_mode": "hold",  # toggle | hold
+        "hold_delay": 0.3,  # seconds to wait before activating (avoids triggering on shortcuts)
         "language": "auto",
+        "model": "large-v3-turbo",
+        "beam_size": 5,
+        "notifications": True,
+        "sound_feedback": True,
     }
     if CONFIG_FILE.exists():
         try:
@@ -88,11 +124,78 @@ def load_config():
     return config
 
 
+def load_whisper_model(model_name: str, callback=None):
+    """Load Whisper model into RAM (background thread)."""
+    global _whisper_model, _model_loading
+
+    if _whisper_model is not None or _model_loading:
+        return
+
+    _model_loading = True
+    print(f"Loading Whisper model '{model_name}'...")
+
+    try:
+        # Just import mlx_whisper - actual model loading happens on first transcription
+        import mlx_whisper
+
+        # Store model name for later use
+        _whisper_model = model_name
+        _model_loading = False
+
+        print(f"Model '{model_name}' ready! (will load weights on first use)")
+
+        if callback:
+            callback()
+
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        _model_loading = False
+        _whisper_model = None
+
+
+def transcribe_audio(audio_path: str, config: dict) -> str:
+    """Transcribe audio file using mlx-whisper."""
+    global _whisper_model
+
+    if _whisper_model is None:
+        print("Model not loaded yet!")
+        return ""
+
+    try:
+        import mlx_whisper
+
+        print(f"Transcribing: {audio_path}")
+
+        language = None if config["language"] == "auto" else config["language"]
+
+        result = mlx_whisper.transcribe(
+            audio_path,
+            path_or_hf_repo=f"mlx-community/whisper-{_whisper_model}",
+            language=language,
+        )
+
+        text = result.get("text", "").strip()
+        print(f"Transcription result: '{text}'")
+        return text
+
+    except Exception as e:
+        print(f"Transcription error: {e}")
+        import traceback
+        traceback.print_exc()
+        return ""
+
+
 def parse_hotkey(hotkey_str):
-    """Parse hotkey string like 'cmd+shift+space' into modifiers and key code."""
+    """Parse hotkey string into modifiers and key code.
+
+    Returns (modifiers, key_code, modifier_keycode)
+    - key_code is for non-modifier keys (toggle mode)
+    - modifier_keycode is for modifier-only hold mode (lctrl/rctrl/etc)
+    """
     parts = hotkey_str.lower().split('+')
     modifiers = 0
     key_code = None
+    modifier_keycode = None
 
     for part in parts:
         part = part.strip()
@@ -104,12 +207,22 @@ def parse_hotkey(hotkey_str):
             modifiers |= NSAlternateKeyMask
         elif part in ('ctrl', 'control'):
             modifiers |= NSControlKeyMask
+        elif part in MODIFIER_KEYCODES:
+            modifier_keycode = MODIFIER_KEYCODES[part]
+            if 'ctrl' in part:
+                modifiers |= NSControlKeyMask
+            elif 'shift' in part:
+                modifiers |= NSShiftKeyMask
+            elif 'alt' in part:
+                modifiers |= NSAlternateKeyMask
+            elif 'cmd' in part:
+                modifiers |= NSCommandKeyMask
         elif part in KEY_CODES:
             key_code = KEY_CODES[part]
         else:
             print(f"Warning: Unknown key '{part}' in hotkey")
 
-    return modifiers, key_code
+    return modifiers, key_code, modifier_keycode
 
 
 def format_hotkey_display(hotkey_str):
@@ -119,6 +232,10 @@ def format_hotkey_display(hotkey_str):
         'shift': '⇧',
         'alt': '⌥', 'option': '⌥',
         'ctrl': '⌃', 'control': '⌃',
+        'lctrl': '⌃(L)', 'rctrl': '⌃(R)',
+        'lshift': '⇧(L)', 'rshift': '⇧(R)',
+        'lalt': '⌥(L)', 'ralt': '⌥(R)',
+        'lcmd': '⌘(L)', 'rcmd': '⌘(R)',
         'space': 'Space',
         'return': '↩',
         'tab': '⇥',
@@ -138,33 +255,11 @@ def format_hotkey_display(hotkey_str):
     return ''.join(result)
 
 
-def get_whisper_push_command():
-    """Get the command to run whisper-push."""
-    if APP_PATH.exists():
-        return [str(APP_PATH)]
-    elif SOURCE_PATH.exists():
-        return [str(SOURCE_PATH)]
-    else:
-        print("Error: whisper-push not found!")
-        return None
-
-
-def is_recording():
-    """Check if recording is in progress."""
-    if not LOCK_FILE.exists():
-        return False
-    try:
-        pid = int(LOCK_FILE.read_text().strip())
-        os.kill(pid, 0)
-        return True
-    except (ValueError, ProcessLookupError, PermissionError, FileNotFoundError):
-        return False
-
-
 def load_icon(state):
     """Load icon for the given state."""
     icon_files = {
         State.IDLE: ICONS_DIR / "icon-idle.png",
+        State.LOADING: ICONS_DIR / "icon-processing.png",
         State.RECORDING: ICONS_DIR / "icon-recording.png",
         State.PROCESSING: ICONS_DIR / "icon-processing.png",
     }
@@ -173,15 +268,71 @@ def load_icon(state):
     if icon_path and icon_path.exists():
         image = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
         if image:
-            # Resize for menu bar (18x18 is standard)
             image.setSize_(NSMakeSize(18, 18))
             return image
 
-    # Fallback to None (will use text)
     return None
 
 
-# Global reference for hotkey handler (outside class to avoid PyObjC selector issues)
+def play_sound(name: str):
+    """Play a sound file."""
+    sound_file = SOUNDS_DIR / f"{name}.wav"
+    if sound_file.exists():
+        sound = NSSound.alloc().initWithContentsOfFile_byReference_(str(sound_file), True)
+        if sound:
+            sound.play()
+
+
+def paste_text(text: str):
+    """Copy text to clipboard and try to paste with Cmd+V."""
+    if not text:
+        return
+
+    # Copy to clipboard using pasteboard
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+    pasteboard = NSPasteboard.generalPasteboard()
+    pasteboard.clearContents()
+    pasteboard.setString_forType_(text, NSPasteboardTypeString)
+
+    # Try to paste with Cmd+V using Quartz CGEvent
+    try:
+        from Quartz import (
+            CGEventCreateKeyboardEvent,
+            CGEventSetFlags,
+            CGEventPost,
+            kCGHIDEventTap,
+            kCGEventFlagMaskCommand,
+        )
+
+        time.sleep(0.05)
+
+        # Key code for 'v' is 9
+        v_keycode = 9
+
+        # Press Cmd+V
+        event_down = CGEventCreateKeyboardEvent(None, v_keycode, True)
+        if event_down:
+            CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, event_down)
+
+            # Release
+            event_up = CGEventCreateKeyboardEvent(None, v_keycode, False)
+            CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
+            CGEventPost(kCGHIDEventTap, event_up)
+            print("Pasted via CGEvent")
+        else:
+            print("CGEvent failed - text copied to clipboard, press Cmd+V")
+    except Exception as e:
+        print(f"Paste error: {e} - text copied to clipboard")
+
+
+def notify(title: str, message: str = ""):
+    """Show macOS notification."""
+    script = f'display notification "{message}" with title "{title}"'
+    subprocess.run(["osascript", "-e", script], capture_output=True)
+
+
+# Global reference for hotkey handler
 _app_instance = None
 
 
@@ -190,10 +341,118 @@ def _handle_global_hotkey(event):
     global _app_instance
     if _app_instance is None:
         return
-    if event.keyCode() == _app_instance.key_code:
-        current_modifiers = event.modifierFlags()
-        if (current_modifiers & _app_instance.modifiers) == _app_instance.modifiers:
-            _app_instance.trigger_whisper_push()
+
+    # Cancel any pending hold-to-talk activation (user is pressing a shortcut like Ctrl+C)
+    if _app_instance.hold_pending:
+        print("Key pressed during hold delay - cancelling hold activation")
+        _app_instance.hold_pending = False
+        _app_instance.hold_active = False
+        if _app_instance._hold_timer is not None:
+            _app_instance._hold_timer.cancel()
+            _app_instance._hold_timer = None
+        return
+
+    # Debug: log all key events
+    key_code = event.keyCode()
+    modifiers = event.modifierFlags()
+
+    # Only log if modifiers are pressed (to avoid spam)
+    if modifiers & (NSCommandKeyMask | NSShiftKeyMask | NSControlKeyMask | NSAlternateKeyMask):
+        print(f"Key event: code={key_code}, modifiers={modifiers:#x}, expected_code={_app_instance.key_code}, expected_mods={_app_instance.modifiers:#x}")
+
+    if key_code == _app_instance.key_code:
+        if (modifiers & _app_instance.modifiers) == _app_instance.modifiers:
+            print("Hotkey matched! Triggering recording...")
+            _app_instance.toggle_recording()
+
+
+def _handle_flags_changed(event):
+    """Handle modifier-only hold-to-talk hotkey with activation delay."""
+    global _app_instance
+    if _app_instance is None or _app_instance.hotkey_mode != "hold":
+        return
+
+    key_code = event.keyCode()
+    modifiers = event.modifierFlags()
+
+    if _app_instance.hold_keycode is not None and key_code != _app_instance.hold_keycode:
+        return
+
+    is_pressed = (modifiers & _app_instance.hold_modifiers) == _app_instance.hold_modifiers
+
+    if is_pressed and not _app_instance.hold_active:
+        _app_instance.hold_active = True
+        if _app_instance.state == State.IDLE:
+            # Start a delayed activation to avoid triggering on keyboard shortcuts
+            _app_instance.hold_pending = True
+            delay = _app_instance.config.get("hold_delay", 0.3)
+            _app_instance._hold_timer = threading.Timer(delay, _app_instance._delayed_start_recording)
+            _app_instance._hold_timer.daemon = True
+            _app_instance._hold_timer.start()
+    elif not is_pressed and _app_instance.hold_active:
+        _app_instance.hold_active = False
+        # Cancel pending delayed start if still waiting
+        if _app_instance.hold_pending:
+            _app_instance.hold_pending = False
+            if _app_instance._hold_timer is not None:
+                _app_instance._hold_timer.cancel()
+                _app_instance._hold_timer = None
+        elif _app_instance.state == State.RECORDING:
+            _app_instance.stop_and_transcribe()
+
+
+class AudioRecorder:
+    """Records audio using sounddevice."""
+
+    def __init__(self, sample_rate=16000):
+        self.sample_rate = sample_rate
+        self.recording = False
+        self.audio_data = []
+        self._lock = threading.Lock()
+
+    def start(self):
+        """Start recording."""
+        with self._lock:
+            self.audio_data = []
+            self.recording = True
+
+        def callback(indata, frames, time_info, status):
+            if self.recording:
+                self.audio_data.append(indata.copy())
+
+        self.stream = sd.InputStream(
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype=np.float32,
+            callback=callback,
+        )
+        self.stream.start()
+
+    def stop(self) -> str:
+        """Stop recording and save to file."""
+        with self._lock:
+            self.recording = False
+
+        self.stream.stop()
+        self.stream.close()
+
+        if not self.audio_data:
+            return None
+
+        audio = np.concatenate(self.audio_data, axis=0)
+        sf.write(str(AUDIO_FILE), audio, self.sample_rate)
+
+        return str(AUDIO_FILE)
+
+    def cancel(self):
+        """Cancel recording without saving."""
+        with self._lock:
+            self.recording = False
+            self.audio_data = []
+
+        if hasattr(self, 'stream'):
+            self.stream.stop()
+            self.stream.close()
 
 
 class MenuBarApp(NSObject):
@@ -205,30 +464,44 @@ class MenuBarApp(NSObject):
             return None
 
         self.config = load_config()
-        self.modifiers, self.key_code = parse_hotkey(self.config.get("hotkey", "cmd+shift+space"))
-        self.command = get_whisper_push_command()
-        self.state = State.IDLE
-        self._processing = False
+        self.hotkey_mode = self.config.get("hotkey_mode", "toggle").lower()
+        self.modifiers, self.key_code, self.hold_keycode = parse_hotkey(
+            self.config.get("hotkey", "ctrl+shift+space")
+        )
+        self.hold_modifiers = self.modifiers
+        self.hold_active = False
+        self.hold_pending = False
+        self._hold_timer = None
+        self.state = State.LOADING
+        self.recorder = AudioRecorder()
 
         # Load icons
         self.icons = {
             State.IDLE: load_icon(State.IDLE),
+            State.LOADING: load_icon(State.LOADING),
             State.RECORDING: load_icon(State.RECORDING),
             State.PROCESSING: load_icon(State.PROCESSING),
         }
 
-        if self.key_code is None:
+        if self.hotkey_mode == "hold":
+            if self.key_code is not None:
+                print("Hold mode supports modifier-only hotkeys. Falling back to toggle.")
+                self.hotkey_mode = "toggle"
+            if self.hotkey_mode == "hold" and self.hold_modifiers == 0:
+                print("Error: Invalid hotkey for hold mode")
+                sys.exit(1)
+            if self.hotkey_mode == "hold" and self.hold_keycode is None:
+                print("Warning: Hold mode with generic modifier may conflict with other shortcuts.")
+                print("Tip: use 'rctrl' or another right-side modifier for fewer conflicts.")
+        if self.hotkey_mode == "toggle" and self.key_code is None:
             print("Error: Invalid hotkey configuration")
-            sys.exit(1)
-
-        if self.command is None:
             sys.exit(1)
 
         # Create status bar item
         self.status_bar = NSStatusBar.systemStatusBar()
         self.status_item = self.status_bar.statusItemWithLength_(NSVariableStatusItemLength)
 
-        # Set initial icon
+        # Set initial icon (loading state)
         self.update_icon()
 
         # Create menu
@@ -237,26 +510,33 @@ class MenuBarApp(NSObject):
         self.status_item.setMenu_(self.menu)
 
         # Set up global hotkey monitor
-        # Store reference for global handler function
         global _app_instance
         _app_instance = self
         NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSKeyDownMask,
             _handle_global_hotkey
         )
-
-        # Start state polling timer
-        self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            0.5,  # Check every 500ms for responsive UI
-            self,
-            "checkState:",
-            None,
-            True
+        NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            NSFlagsChangedMask,
+            _handle_flags_changed
         )
-        NSRunLoop.currentRunLoop().addTimer_forMode_(self.timer, NSDefaultRunLoopMode)
 
-        hotkey_display = format_hotkey_display(self.config.get("hotkey", "cmd+shift+space"))
-        print(f"Menu bar app started. Hotkey: {hotkey_display}")
+        hotkey_display = format_hotkey_display(self.config.get("hotkey", "ctrl+shift+space"))
+        if self.hotkey_mode == "hold":
+            hotkey_display = f"Hold {hotkey_display}"
+        print(f"Menu bar app starting. Hotkey: {hotkey_display}")
+
+        # Load model in background thread
+        def on_model_loaded():
+            self.set_state(State.IDLE)
+            if self.config.get("notifications"):
+                notify("Whisper Push", "Model loaded and ready!")
+
+        threading.Thread(
+            target=load_whisper_model,
+            args=(self.config.get("model", "large-v3-turbo"), on_model_loaded),
+            daemon=True
+        ).start()
 
         return self
 
@@ -264,7 +544,9 @@ class MenuBarApp(NSObject):
         """Set up the dropdown menu."""
         self.menu.removeAllItems()
 
-        hotkey_display = format_hotkey_display(self.config.get("hotkey", "cmd+shift+space"))
+        hotkey_display = format_hotkey_display(self.config.get("hotkey", "ctrl+shift+space"))
+        if self.hotkey_mode == "hold":
+            hotkey_display = f"Hold {hotkey_display}"
         status_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             f"Whisper Push ({hotkey_display})",
             None,
@@ -276,11 +558,12 @@ class MenuBarApp(NSObject):
         self.menu.addItem_(NSMenuItem.separatorItem())
 
         self.toggle_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Start Recording",
-            "toggleRecording:",
+            "Loading model...",
+            "toggleRecordingMenu:",
             ""
         )
         self.toggle_item.setTarget_(self)
+        self.toggle_item.setEnabled_(False)
         self.menu.addItem_(self.toggle_item)
 
         self.cancel_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -327,9 +610,9 @@ class MenuBarApp(NSObject):
             self.status_item.setImage_(icon)
             self.status_item.setTitle_("")
         else:
-            # Fallback to text if no icon
             fallback = {
                 State.IDLE: "◆",
+                State.LOADING: "◐",
                 State.RECORDING: "●",
                 State.PROCESSING: "◐",
             }
@@ -337,7 +620,11 @@ class MenuBarApp(NSObject):
             self.status_item.setTitle_(fallback.get(self.state, "◆"))
 
         if hasattr(self, 'toggle_item'):
-            if self.state == State.IDLE:
+            if self.state == State.LOADING:
+                self.toggle_item.setTitle_("Loading model...")
+                self.toggle_item.setEnabled_(False)
+                self.cancel_item.setHidden_(True)
+            elif self.state == State.IDLE:
                 self.toggle_item.setTitle_("Start Recording")
                 self.toggle_item.setEnabled_(True)
                 self.cancel_item.setHidden_(True)
@@ -363,77 +650,99 @@ class MenuBarApp(NSObject):
     def updateIconOnMainThread_(self, _):
         self.update_icon()
 
-    def checkState_(self, timer):
-        """Periodically check the recording state."""
-        if self._processing:
+    def toggle_recording(self):
+        """Toggle recording on/off."""
+        if self.state == State.LOADING:
+            print("Model still loading, please wait...")
             return
 
-        if is_recording():
-            if self.state != State.RECORDING:
-                self.set_state(State.RECORDING)
+        if self.state == State.PROCESSING:
+            return
+
+        if self.state == State.IDLE:
+            self.start_recording()
+        elif self.state == State.RECORDING:
+            self.stop_and_transcribe()
+
+    def _delayed_start_recording(self):
+        """Called after hold delay expires - start recording if still holding."""
+        if self.hold_pending and self.hold_active and self.state == State.IDLE:
+            self.hold_pending = False
+            self._hold_timer = None
+            print("Hold delay passed - starting recording")
+            self.start_recording()
         else:
-            if self.state == State.RECORDING:
-                self.set_state(State.PROCESSING)
-                threading.Timer(0.5, lambda: self.set_state(State.IDLE)).start()
-            elif self.state != State.IDLE:
-                self.set_state(State.IDLE)
+            self.hold_pending = False
+            self._hold_timer = None
 
-    def trigger_whisper_push(self):
-        """Trigger whisper-push toggle."""
-        if self._processing:
+    def start_recording(self):
+        """Start audio recording."""
+        self.set_state(State.RECORDING)
+
+        if self.config.get("sound_feedback"):
+            play_sound("start")
+
+        self.recorder.start()
+        print("Recording started...")
+
+    def stop_and_transcribe(self):
+        """Stop recording and transcribe."""
+        self.set_state(State.PROCESSING)
+
+        if self.config.get("sound_feedback"):
+            play_sound("stop")
+
+        # Stop recording
+        audio_path = self.recorder.stop()
+
+        if not audio_path:
+            print("No audio recorded")
+            self.set_state(State.IDLE)
             return
 
-        try:
-            was_recording = is_recording()
+        print("Recording stopped, transcribing...")
 
-            subprocess.Popen(
-                self.command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        # Transcribe in background thread
+        def do_transcribe():
+            text = transcribe_audio(audio_path, self.config)
 
-            if was_recording:
-                self.set_state(State.PROCESSING)
-                self._processing = True
-                def reset_processing():
-                    time.sleep(30)
-                    self._processing = False
-                    if self.state == State.PROCESSING:
-                        self.set_state(State.IDLE)
-                threading.Thread(target=reset_processing, daemon=True).start()
+            if text:
+                print(f"Transcribed: {text}")
+                paste_text(text)
+                if self.config.get("notifications"):
+                    notify("Whisper Push", f"Transcribed {len(text)} characters")
             else:
-                self.set_state(State.RECORDING)
+                print("No transcription result")
+                if self.config.get("notifications"):
+                    notify("Whisper Push", "No speech detected")
 
-        except Exception as e:
-            print(f"Error triggering whisper-push: {e}")
+            self.set_state(State.IDLE)
 
-    def toggleRecording_(self, sender):
-        self.trigger_whisper_push()
+        threading.Thread(target=do_transcribe, daemon=True).start()
+
+    def toggleRecordingMenu_(self, sender):
+        self.toggle_recording()
 
     def cancelRecording_(self, sender):
-        try:
-            subprocess.run(
-                self.command + ["--stop"],
-                capture_output=True,
-                timeout=5,
-            )
+        if self.state == State.RECORDING:
+            self.recorder.cancel()
             self.set_state(State.IDLE)
-        except Exception as e:
-            print(f"Error canceling: {e}")
+            print("Recording cancelled")
 
     def openConfig_(self, sender):
         config_path = str(CONFIG_FILE)
         if not CONFIG_FILE.exists():
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
             CONFIG_FILE.write_text('''# Whisper Push Configuration
-hotkey = "cmd+shift+space"
+hotkey_mode = "hold"
+hotkey = "ctrl"
 language = "auto"
 model = "large-v3-turbo"
 ''')
         subprocess.run(["open", config_path])
 
     def viewLogs_(self, sender):
-        log_path = SUPPORT_DIR / "hotkey.log"
+        log_path = SUPPORT_DIR / "daemon.log"
         if log_path.exists():
             subprocess.run(["open", "-a", "Console", str(log_path)])
         else:
@@ -443,7 +752,47 @@ model = "large-v3-turbo"
         NSApp.terminate_(None)
 
 
+def check_accessibility_permission():
+    """Check and request accessibility permission - will show system prompt if needed."""
+    import ctypes
+    from Foundation import NSMutableDictionary, NSNumber
+    import objc
+
+    try:
+        # Load HIServices framework
+        hi_services = ctypes.cdll.LoadLibrary(
+            '/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/HIServices'
+        )
+
+        # Setup function
+        AXIsProcessTrustedWithOptions = hi_services.AXIsProcessTrustedWithOptions
+        AXIsProcessTrustedWithOptions.restype = ctypes.c_bool
+        AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+
+        # Create options with prompt=True (this triggers the system dialog!)
+        options = NSMutableDictionary.alloc().init()
+        options.setObject_forKey_(NSNumber.numberWithBool_(True), "AXTrustedCheckOptionPrompt")
+
+        # Call - this will show permission dialog if not trusted
+        result = AXIsProcessTrustedWithOptions(objc.pyobjc_id(options))
+
+        if result:
+            print("Accessibility permission: GRANTED")
+        else:
+            print("Accessibility permission: NOT GRANTED - dialog shown to user")
+            notify("Whisper Push", "Please grant Accessibility permission, then restart the app")
+
+        return result
+
+    except Exception as e:
+        print(f"Accessibility check error: {e}")
+        return False
+
+
 def main():
+    # Check accessibility permission first (will prompt user if needed)
+    check_accessibility_permission()
+
     # Create application
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)

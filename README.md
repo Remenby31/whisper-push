@@ -70,6 +70,18 @@ Quick install:
 
 ### Installation
 
+#### One-file installer (recommended)
+
+If you want a single script for non-technical users, run:
+```bash
+./installer.sh
+```
+
+The installer can also auto-install system packages and configure a GNOME hotkey:
+```bash
+WHISPER_PUSH_AUTO_DEPS=1 WHISPER_PUSH_HOTKEY="Super+V" ./installer.sh
+```
+
 #### 1. Install system dependencies
 
 ```bash
@@ -89,9 +101,20 @@ cd whisper-push
 ./install.sh
 ```
 
+Installer options:
+- `WHISPER_PUSH_AUTO_DEPS=1` auto-installs system packages (apt/dnf/pacman)
+- `WHISPER_PUSH_USE_CUDA=1` forces CUDA libs install
+- `WHISPER_PUSH_HOTKEY="Super+V"` configures GNOME hotkey
+- `WHISPER_PUSH_REPO` and `WHISPER_PUSH_DIR` customize `installer.sh`
+
 #### 3. Set up keyboard shortcut
 
 Bind `whisper-push` to a hotkey in your desktop settings (e.g., `Super+V`).
+
+GNOME auto-setup:
+```bash
+./setup-hotkey.sh "Super+V"
+```
 
 **KDE Plasma:**
 1. System Settings → Shortcuts → Custom Shortcuts
@@ -111,6 +134,7 @@ whisper-push              # Toggle recording/transcription
 whisper-push --status     # Show current status
 whisper-push --stop       # Force stop recording
 whisper-push -l fr        # Override language to French
+whisper-push --doctor     # Check dependencies and environment
 ```
 
 ## Configuration
