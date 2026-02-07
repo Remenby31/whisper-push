@@ -44,6 +44,13 @@ if [[ -f "$LAUNCH_AGENTS_DIR/$PLIST_NAME" ]]; then
     log "LaunchAgent removed"
 fi
 
+# Remove app from /Applications
+APP_PATH="/Applications/Whisper Push.app"
+if [[ -d "$APP_PATH" ]]; then
+    rm -rf "$APP_PATH"
+    log "Whisper Push.app removed from /Applications"
+fi
+
 # Remove temp files
 rm -f "$TMPDIR/whisper-push.wav" 2>/dev/null || true
 rm -f "$TMPDIR/whisper-push.lock" 2>/dev/null || true

@@ -2,8 +2,18 @@
 # Wrapper script to set up CUDA libs before launching Python
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-SITE_PACKAGES="$SCRIPT_DIR/.venv/lib/python3.12/site-packages"
+PYTHON_BIN="$SCRIPT_DIR/.venv/bin/python"
 
-export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "Error: virtual environment not found. Run ./install.sh first." >&2
+  exit 1
+fi
 
-exec "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/whisper-push.py" "$@"
+PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+SITE_PACKAGES="$SCRIPT_DIR/.venv/lib/python$PY_VERSION/site-packages"
+
+if [ -d "$SITE_PACKAGES/nvidia/cublas/lib" ] || [ -d "$SITE_PACKAGES/nvidia/cudnn/lib" ]; then
+  export LD_LIBRARY_PATH="$SITE_PACKAGES/nvidia/cublas/lib:$SITE_PACKAGES/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
+fi
+
+exec "$PYTHON_BIN" "$SCRIPT_DIR/whisper_push.py" "$@"

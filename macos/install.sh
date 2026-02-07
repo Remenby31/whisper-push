@@ -90,12 +90,12 @@ fi
 echo ""
 info "Checking system dependencies..."
 
-# sox (for audio recording)
-if ! command -v rec &> /dev/null; then
-    info "Installing sox (audio recording)..."
-    brew install sox
+# ffmpeg (required by mlx-whisper for audio processing)
+if ! command -v ffmpeg &> /dev/null; then
+    info "Installing ffmpeg (audio processing)..."
+    brew install ffmpeg
 fi
-log "sox installed"
+log "ffmpeg installed"
 
 # Python 3 (prefer Homebrew Python for consistency)
 PYTHON_CMD=""
@@ -163,9 +163,13 @@ pip install --quiet --upgrade pip
 info "Installing PyObjC (this may take a minute)..."
 pip install --quiet pyobjc-framework-Cocoa pyobjc-framework-Quartz
 
-# Install faster-whisper for transcription
-info "Installing faster-whisper..."
-pip install --quiet faster-whisper
+# Install mlx-whisper for transcription (optimized for Apple Silicon GPU)
+info "Installing mlx-whisper (Apple Silicon optimized)..."
+pip install --quiet mlx-whisper
+
+# Install sounddevice for audio recording (uses CoreAudio natively)
+info "Installing audio dependencies..."
+pip install --quiet sounddevice soundfile numpy
 
 deactivate
 
@@ -201,7 +205,87 @@ chmod +x "$SUPPORT_DIR/whisper-push"
 log "whisper-push installed"
 
 # =============================================================================
-# Step 7: Install menu bar daemon
+# Step 7: Create Spotlight-visible app in /Applications
+# =============================================================================
+
+echo ""
+info "Creating Whisper Push app for Spotlight..."
+
+APP_PATH="/Applications/Whisper Push.app"
+
+# Remove old app if exists
+rm -rf "$APP_PATH" 2>/dev/null || true
+
+# Create app bundle structure
+mkdir -p "$APP_PATH/Contents/MacOS"
+mkdir -p "$APP_PATH/Contents/Resources"
+
+# Create the launcher script that uses Terminal (for Accessibility permissions)
+cat > "$APP_PATH/Contents/MacOS/Whisper Push" << 'LAUNCHER'
+#!/bin/bash
+# Check if daemon already running
+if pgrep -f 'hotkey-daemon.py' > /dev/null 2>&1; then
+    exit 0
+fi
+
+# Check if Terminal is already running
+TERMINAL_WAS_RUNNING=$(pgrep -x "Terminal" > /dev/null && echo "yes" || echo "no")
+
+# Run daemon via Terminal (inherits Terminal's Accessibility permissions)
+osascript << 'APPLESCRIPT'
+tell application "Terminal"
+    activate
+    do script "'__VENV_PYTHON__' '__HOTKEY_SCRIPT__' > /dev/null 2>&1 & disown && exit"
+end tell
+APPLESCRIPT
+
+# Wait for daemon to start
+sleep 1.5
+
+# If Terminal wasn't running before, quit it
+if [ "$TERMINAL_WAS_RUNNING" = "no" ]; then
+    osascript -e 'tell application "Terminal" to quit' &
+fi
+LAUNCHER
+
+# Replace placeholders with actual paths
+sed -i '' "s|__VENV_PYTHON__|${VENV_DIR}/bin/python3|g" "$APP_PATH/Contents/MacOS/Whisper Push"
+sed -i '' "s|__HOTKEY_SCRIPT__|${HOTKEY_SCRIPT}|g" "$APP_PATH/Contents/MacOS/Whisper Push"
+
+chmod +x "$APP_PATH/Contents/MacOS/Whisper Push"
+
+# Create Info.plist
+cat > "$APP_PATH/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Whisper Push</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.whisper-push.app</string>
+    <key>CFBundleName</key>
+    <string>Whisper Push</string>
+    <key>CFBundleDisplayName</key>
+    <string>Whisper Push</string>
+    <key>CFBundleVersion</key>
+    <string>1.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+# Force Spotlight to index the app
+touch "$APP_PATH"
+mdimport "$APP_PATH" 2>/dev/null || true
+
+log "Whisper Push.app created (searchable via Spotlight)"
+
+# =============================================================================
+# Step 8: Install menu bar daemon
 # =============================================================================
 
 echo ""
@@ -271,6 +355,13 @@ cat > "$LAUNCH_AGENTS_DIR/$PLIST_NAME" << PLIST
     <string>${SUPPORT_DIR}/daemon.log</string>
     <key>StandardErrorPath</key>
     <string>${SUPPORT_DIR}/daemon.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>
@@ -287,33 +378,32 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     info "Creating default configuration..."
     cat > "$CONFIG_FILE" << 'CONFIG'
 # Whisper Push Configuration
+# Uses mlx-whisper (optimized for Apple Silicon GPU)
 
-# Global hotkey to toggle recording
+# Global hotkey (toggle or hold)
 # Format: modifier+modifier+key
 # Modifiers: cmd, shift, alt (option), ctrl
 # Keys: a-z, 0-9, space, return, tab, escape, f1-f12
-hotkey = "cmd+shift+space"
+hotkey = "ctrl"
+
+# Hotkey mode: "toggle" or "hold"
+# For hold-to-talk with Control only, use:
+# hotkey_mode = "hold"
+# hotkey = "rctrl"  # right control recommended to avoid conflicts
+hotkey_mode = "hold"
 
 # Language: "auto" for auto-detection, or ISO code ("fr", "en", "de", ...)
 language = "auto"
 
 # Whisper model: tiny, base, small, medium, large-v3, large-v3-turbo
+# Model stays loaded in RAM for instant transcription
 model = "large-v3-turbo"
-
-# Precision: int8 (recommended for Apple Silicon), float32
-compute_type = "int8"
-
-# Device: cpu (recommended for macOS)
-device = "cpu"
 
 # Notifications on start/stop
 notifications = true
 
 # Sound feedback on start/stop
 sound_feedback = true
-
-# Transcription beam size (higher = more accurate, slower)
-beam_size = 5
 CONFIG
     log "Configuration created"
 else
@@ -321,44 +411,50 @@ else
 fi
 
 # =============================================================================
-# Step 11: Start the daemon
+# Step 11: Start the daemon via app (uses Terminal for Accessibility permissions)
 # =============================================================================
 
 echo ""
 info "Starting menu bar daemon..."
 
-# Unload if already running
+# Unload LaunchAgent if already running
 launchctl bootout gui/$(id -u)/com.whisper-push.hotkey 2>/dev/null || true
 
-# Small delay to ensure clean unload
+# Kill any existing daemon
+pkill -f 'hotkey-daemon.py' 2>/dev/null || true
 sleep 0.5
 
-# Load the agent
-launchctl bootstrap gui/$(id -u) "$LAUNCH_AGENTS_DIR/$PLIST_NAME"
+# Launch via the app (opens Terminal briefly for Accessibility permissions)
+info "Opening Whisper Push via Terminal (for permissions)..."
+open "$APP_PATH"
+
+# Wait for daemon to start
+sleep 3
+
+# Wait a bit more for Terminal to launch daemon
+sleep 2
 
 # Verify it started
-sleep 1
-if launchctl print gui/$(id -u)/com.whisper-push.hotkey &>/dev/null; then
+if pgrep -f 'hotkey-daemon.py' > /dev/null; then
     log "Daemon started successfully"
 else
-    warn "Daemon may not have started. Check: $SUPPORT_DIR/daemon.log"
+    warn "Daemon may not have started. Try launching 'Whisper Push' from Spotlight."
+    warn "Check logs: $SUPPORT_DIR/daemon.log"
 fi
 
+# Note: LaunchAgent plist is already in place, will auto-load on next login
+# We don't bootstrap it now because we want the app (via Terminal) to be the primary launcher
+
 # =============================================================================
-# Step 12: Request permissions
+# Step 12: Verify permissions
 # =============================================================================
 
 echo ""
-warn "═══════════════════════════════════════════════════════════════"
-warn "  IMPORTANT: Grant Accessibility permission when prompted!"
-warn "═══════════════════════════════════════════════════════════════"
-echo ""
-info "The menu bar icon should now appear."
-info "If prompted for Accessibility access, please allow it."
-info ""
-info "If no prompt appears, manually enable in:"
+# Terminal should already have Accessibility permissions
+# If not, macOS will prompt the user when Terminal tries to monitor keystrokes
+info "Whisper Push uses Terminal's Accessibility permissions for hotkey detection."
+info "If the hotkey doesn't work, ensure Terminal has Accessibility permission in:"
 info "  System Settings → Privacy & Security → Accessibility"
-info "  → Enable 'python3' or 'Python'"
 echo ""
 
 # =============================================================================
@@ -372,7 +468,7 @@ echo "=========================================="
 echo ""
 echo "Look for the Whisper Push icon in your menu bar (top right)."
 echo ""
-echo -e "  ${BLUE}Hotkey:${NC}  ⌘⇧Space (Cmd+Shift+Space)"
+echo -e "  ${BLUE}Hotkey:${NC}  Hold Control (ctrl)"
 echo -e "  ${BLUE}Config:${NC}  $CONFIG_FILE"
 echo -e "  ${BLUE}Logs:${NC}    $SUPPORT_DIR/daemon.log"
 echo ""
@@ -382,9 +478,9 @@ echo "  Red    → Recording"
 echo "  Orange → Processing"
 echo ""
 echo "Usage:"
-echo "  1. Press ⌘⇧Space to start recording"
+echo "  1. Press ⌃⇧Space to start recording"
 echo "  2. Speak"
-echo "  3. Press ⌘⇧Space again → text is typed at cursor"
+echo "  3. Press ⌃⇧Space again → text is typed at cursor"
 echo ""
 echo "To uninstall: $SCRIPT_DIR/uninstall.sh"
 echo ""
