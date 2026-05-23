@@ -5,58 +5,96 @@
 <h1 align="center">whisper-push</h1>
 
 <p align="center">
-  <strong>Push-to-talk voice dictation powered by Whisper</strong>
+  <strong>Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is.</strong>
 </p>
 
 <p align="center">
-  <a href="#installation">Installation</a> •
+  <a href="#quick-start">Quick start</a> •
+  <a href="#platform-support">Platforms</a> •
   <a href="#usage">Usage</a> •
   <a href="#configuration">Configuration</a> •
-  <a href="#models">Models</a>
+  <a href="#how-it-works">How it works</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple" alt="macOS Apple Silicon">
+  <img src="https://img.shields.io/badge/Linux-supported-blue?logo=linux&logoColor=white" alt="Linux">
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
 </p>
 
 ---
 
-Press a hotkey to start recording, press again to transcribe and type. Local processing with [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — no cloud, no latency.
+No cloud, no account, no latency. Everything runs on your machine. On macOS it lives
+in the menu bar and transcribes in **~0.15 s** with NVIDIA Parakeet via Apple MLX; on
+Linux it's a CLI you bind to a hotkey, powered by faster-whisper.
 
-## Features
+## Quick start
 
-- **Toggle mode** — Press to record, press again to transcribe
-- **Local & private** — Runs entirely on your machine
-- **Fast** — Uses faster-whisper with INT8 quantization
-- **Streaming output** — Text appears segment by segment as it's transcribed
-- **Multilingual** — Auto-detects language or use a fixed one
-- **Clipboard restore** — Preserves your clipboard content
+### macOS (Apple Silicon — M1/M2/M3/M4)
 
-## Performance
+**Option A — App (easiest):**
+1. Download `Whisper-Push-macOS-arm64.dmg` from the [Releases](../../releases) page.
+2. Open it and drag **Whisper Push** to **Applications**.
+3. First launch is blocked because the app isn't notarized — clear the quarantine flag once:
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"
+   ```
+   (or right-click the app → **Open** → **Open**)
+4. Grant **Microphone**, **Accessibility**, and **Input Monitoring** when asked
+   (System Settings → Privacy & Security).
+5. Hold **Control**, speak, release. The first run downloads the model (~600 MB).
 
-Tested with `large-v3-turbo` + `int8` on RTX 3070:
-
-| Metric | Value |
-|--------|-------|
-| VRAM usage | **~1.2 GB** |
-| Transcription speed | **3.7x real-time** |
-| First load | ~1.8s (model cached after) |
-
-A 10-second recording transcribes in ~2.7s.
-
-## macOS
-
-For macOS (Apple Silicon & Intel), see **[macos/README.md](macos/README.md)**.
-
-Quick install:
+**Option B — From source:**
 ```bash
+git clone https://github.com/Remenby31/whisper-push.git
+cd whisper-push
 ./macos/install.sh
 ```
 
----
+→ Full macOS docs: **[macos/README.md](macos/README.md)**
+
+### Linux
+
+```bash
+git clone https://github.com/Remenby31/whisper-push.git
+cd whisper-push
+./install.sh
+```
+
+Then bind `whisper-push` to a hotkey (see [Linux setup](#linux-setup)).
+
+## Platform support
+
+| Platform | Status | Engine | Interface |
+|----------|--------|--------|-----------|
+| **macOS — Apple Silicon** | ✅ Supported | Parakeet (MLX) | Menu-bar app, hold-to-talk |
+| **Linux** | ✅ Supported | faster-whisper | CLI + hotkey, toggle |
+| macOS — Intel | ❌ Not supported | — | MLX requires an M-series chip |
+| Windows | ❌ Not yet | — | Contributions welcome |
+
+The macOS and Linux versions are independent implementations that share the same idea
+and a TOML config format; they use different speech engines.
+
+## macOS (Apple Silicon)
+
+A menu-bar app — no terminal needed once installed.
+
+- **Engine:** [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (`parakeet-tdt-0.6b-v3`) running on Apple MLX.
+- **Latency:** ~0.15 s per phrase, kept warm in RAM (re-warms after sleep).
+- **Languages:** auto-detects 25 European languages (incl. FR, EN, ES, DE, IT…).
+- **Clipboard-safe:** your clipboard is restored after each paste.
+- **Settings in the menu bar:** input/output device, hotkey, idle-unload, notifications,
+  sounds — all written to a self-documenting `config.toml`.
+
+Default hotkey: **hold Control**, speak, release. Configure everything from the 🎙 menu
+bar icon or `Open Config (TOML)`.
+
+See **[macos/README.md](macos/README.md)** for details, troubleshooting, and building the DMG.
 
 ## Linux
+
+The original faster-whisper CLI. Press a hotkey to start recording, press again to
+transcribe and type.
 
 ### Requirements
 
@@ -66,103 +104,67 @@ Quick install:
 | PipeWire | Audio recording (`pw-record`) |
 | wl-clipboard | Clipboard access |
 | ydotool | Keyboard simulation |
-| NVIDIA GPU | CUDA acceleration (or CPU fallback) |
+| NVIDIA GPU | CUDA acceleration (CPU fallback otherwise) |
 
-### Installation
+### Linux setup
 
-#### One-file installer (recommended)
-
-If you want a single script for non-technical users, run:
+**One-file installer (recommended):**
 ```bash
 ./installer.sh
-```
-
-The installer can also auto-install system packages and configure a GNOME hotkey:
-```bash
+# or, auto-install deps + configure a GNOME hotkey:
 WHISPER_PUSH_AUTO_DEPS=1 WHISPER_PUSH_HOTKEY="Super+V" ./installer.sh
 ```
 
-#### 1. Install system dependencies
-
+**Manual:**
 ```bash
-# Arch Linux
+# 1. System dependencies (Arch example)
 sudo pacman -S pipewire wl-clipboard ydotool
+sudo usermod -aG input $USER   # required for ydotool; log out/in afterwards
 
-# Add yourself to the input group (required for ydotool)
-sudo usermod -aG input $USER
-# Log out and back in for this to take effect
-```
-
-#### 2. Clone and install
-
-```bash
+# 2. Install
 git clone https://github.com/Remenby31/whisper-push.git
 cd whisper-push
 ./install.sh
 ```
 
-Installer options:
-- `WHISPER_PUSH_AUTO_DEPS=1` auto-installs system packages (apt/dnf/pacman)
-- `WHISPER_PUSH_USE_CUDA=1` forces CUDA libs install
-- `WHISPER_PUSH_HOTKEY="Super+V"` configures GNOME hotkey
-- `WHISPER_PUSH_REPO` and `WHISPER_PUSH_DIR` customize `installer.sh`
+Installer options: `WHISPER_PUSH_AUTO_DEPS=1` (auto deps), `WHISPER_PUSH_USE_CUDA=1`
+(force CUDA), `WHISPER_PUSH_HOTKEY="Super+V"` (GNOME hotkey).
 
-#### 3. Set up keyboard shortcut
-
-Bind `whisper-push` to a hotkey in your desktop settings (e.g., `Super+V`).
-
-GNOME auto-setup:
-```bash
-./setup-hotkey.sh "Super+V"
-```
-
-**KDE Plasma:**
-1. System Settings → Shortcuts → Custom Shortcuts
-2. Edit → New → Global Shortcut → Command/URL
-3. Set trigger key and command: `/home/YOUR_USER/.local/bin/whisper-push`
+**Bind a hotkey:**
+- GNOME: `./setup-hotkey.sh "Super+V"`
+- KDE: System Settings → Shortcuts → Custom Shortcuts → command `~/.local/bin/whisper-push`
 
 ## Usage
 
-1. **Press** the hotkey → recording starts (you'll hear a beep)
-2. **Speak**
-3. **Press again** → transcribes and types the text
+**macOS:** hold the hotkey (default Control), speak, release → text is typed at the cursor.
 
-### CLI
+**Linux:** press the hotkey to start (beep), speak, press again to transcribe and type.
 
 ```bash
-whisper-push              # Toggle recording/transcription
-whisper-push --status     # Show current status
-whisper-push --stop       # Force stop recording
-whisper-push -l fr        # Override language to French
-whisper-push --doctor     # Check dependencies and environment
+whisper-push              # toggle recording/transcription (Linux)
+whisper-push --status     # show status
+whisper-push --stop       # force stop
+whisper-push -l fr        # override language
+whisper-push --doctor     # check dependencies
 ```
 
 ## Configuration
 
-Edit `~/.config/whisper-push/config.toml`:
+**macOS:** use the menu bar, or edit `~/Library/Application Support/whisper-push/config.toml`
+(every option is documented inline).
+
+**Linux:** edit `~/.config/whisper-push/config.toml`:
 
 ```toml
-# Language: "auto" or ISO code ("fr", "en", "de", ...)
-language = "auto"
-
-# Model: tiny, base, small, medium, large-v3, large-v3-turbo
-model = "large-v3-turbo"
-
-# Precision: int8 (fast), float16 (balanced), float32 (CPU)
-compute_type = "int8"
-
-# Device: cuda, cpu, auto
-device = "cuda"
-
-# Feedback
+language = "auto"          # "auto" or ISO code ("fr", "en", "de", ...)
+model = "large-v3-turbo"   # tiny, base, small, medium, large-v3, large-v3-turbo
+compute_type = "int8"      # int8 (fast), float16, float32 (CPU)
+device = "cuda"            # cuda, cpu, auto
 notifications = true
 sound_feedback = true
-
-# Debug: save recordings to ~/.cache/whisper-push-last.wav
-debug = false
 ```
 
-## Models
+### Linux models (faster-whisper)
 
 | Model | VRAM | Speed | Quality |
 |:------|:----:|:-----:|:-------:|
@@ -173,52 +175,49 @@ debug = false
 | `large-v3-turbo` | ~3 GB | ⚡⚡⚡ | ★★★★ |
 | `large-v3` | ~5 GB | ⚡ | ★★★★★ |
 
-**Recommended:** `large-v3-turbo` + `int8`
+**Recommended:** `large-v3-turbo` + `int8`. (macOS uses Parakeet and needs no model choice.)
 
-## Troubleshooting
+## How it works
+
+1. A global hotkey starts/stops capture (hold-to-talk on macOS, toggle on Linux).
+2. Audio is recorded locally and fed straight to the speech model — no files, no network.
+3. The transcript is placed at your cursor by simulating paste (clipboard restored on macOS).
+
+Everything is offline after the one-time model download.
+
+## Building the macOS DMG
+
+```bash
+brew install create-dmg          # optional, for a nicer DMG layout
+./macos/build-dmg.sh             # → dist/Whisper-Push-macOS-arm64.dmg
+```
+
+The app is unsigned (no Apple Developer ID), so users de-quarantine it on first launch.
+
+## Troubleshooting (Linux)
 
 <details>
 <summary><strong>ydotool not working</strong></summary>
 
-1. Ensure you're in the `input` group:
-   ```bash
-   groups | grep input
-   ```
-2. If not, add yourself and **log out/in**:
-   ```bash
-   sudo usermod -aG input $USER
-   ```
-3. Check the daemon is running:
-   ```bash
-   systemctl --user status ydotool
-   ```
+Ensure you're in the `input` group (`groups | grep input`); if not, `sudo usermod -aG input $USER` and log out/in. Check the daemon: `systemctl --user status ydotool`.
 </details>
 
 <details>
 <summary><strong>No sound recorded</strong></summary>
 
-Check that `pw-record` works:
-```bash
-pw-record test.wav  # Ctrl+C to stop
-pw-play test.wav
-```
+Verify `pw-record test.wav` (Ctrl+C to stop) then `pw-play test.wav`.
 </details>
 
 <details>
 <summary><strong>CUDA errors</strong></summary>
 
-Try CPU mode in config:
-```toml
-device = "cpu"
-compute_type = "float32"
-```
+Switch to CPU in config: `device = "cpu"`, `compute_type = "float32"`.
 </details>
 
 ## Uninstall
 
-```bash
-./uninstall.sh
-```
+- **macOS:** `./macos/uninstall.sh` (or drag the app to the Trash).
+- **Linux:** `./uninstall.sh`
 
 ## License
 

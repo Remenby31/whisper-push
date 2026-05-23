@@ -5,17 +5,36 @@ Shows status icon in menu bar, handles global hotkey, and manages recording.
 Model stays loaded in RAM for instant transcription.
 """
 
-import os
 import subprocess
 import sys
 import signal
+import fcntl
 import tomllib
 import threading
 import time
-import tempfile
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from enum import Enum
-from queue import Queue
+
+# Application logger. Owns the rotating daemon.log file (the launcher redirects
+# native stdout/stderr to a separate crash sink). Per-keystroke traces are at
+# DEBUG level and off by default.
+logger = logging.getLogger("whisper_push")
+
+
+def setup_logging(debug: bool = False):
+    """Configure rotating file logging. Idempotent."""
+    logger.setLevel(logging.DEBUG if debug else logging.INFO)
+    logger.propagate = False
+    if logger.handlers:
+        return
+    SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logger.addHandler(handler)
 
 # Audio imports
 try:
@@ -23,7 +42,7 @@ try:
     import sounddevice as sd
     import soundfile as sf
 except ImportError:
-    print("Error: Audio libraries not installed. Run: pip3 install sounddevice soundfile numpy")
+    print("Error: Audio libraries not installed. Run: pip3 install sounddevice soundfile numpy", file=sys.stderr)
     sys.exit(1)
 
 # PyObjC imports
@@ -38,7 +57,8 @@ try:
         NSMenu,
         NSMenuItem,
         NSImage,
-        NSSound,
+        NSOnState,
+        NSOffState,
     )
     from Cocoa import (
         NSEvent,
@@ -50,13 +70,11 @@ try:
         NSControlKeyMask,
         NSObject,
         NSTimer,
-        NSRunLoop,
-        NSDefaultRunLoopMode,
         NSMakeSize,
     )
     from PyObjCTools import AppHelper
 except ImportError:
-    print("Error: PyObjC not installed. Run: pip3 install pyobjc-framework-Cocoa pyobjc-framework-Quartz")
+    print("Error: PyObjC not installed. Run: pip3 install pyobjc-framework-Cocoa pyobjc-framework-Quartz", file=sys.stderr)
     sys.exit(1)
 
 
@@ -68,11 +86,20 @@ class State(Enum):
 
 
 # Paths
+# User data (writable) always lives in Application Support.
 SUPPORT_DIR = Path.home() / "Library" / "Application Support" / "whisper-push"
 CONFIG_FILE = SUPPORT_DIR / "config.toml"
-ICONS_DIR = SUPPORT_DIR / "icons"
-SOUNDS_DIR = SUPPORT_DIR / "sounds"
-AUDIO_FILE = Path(tempfile.gettempdir()) / "whisper-push-recording.wav"
+LOG_FILE = SUPPORT_DIR / "daemon.log"
+LOCK_FILE = SUPPORT_DIR / "daemon.lock"
+
+# Read-only resources: bundled inside the .app when frozen (PyInstaller), else
+# installed into SUPPORT_DIR by install.sh.
+if getattr(sys, "frozen", False):
+    RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+else:
+    RESOURCE_DIR = SUPPORT_DIR
+ICONS_DIR = RESOURCE_DIR / "icons"
+SOUNDS_DIR = RESOURCE_DIR / "sounds"
 
 # Key code mapping (US keyboard layout)
 KEY_CODES = {
@@ -97,9 +124,35 @@ MODIFIER_KEYCODES = {
     'rcmd': 54,
 }
 
-# Global model reference (stays in RAM)
-_whisper_model = None
+# Global model reference (stays in RAM). Holds a parakeet-mlx model instance.
+_asr_model = None
+_model_name = None  # repo short name, kept so we can reload after an idle unload
 _model_loading = False
+# MLX/Metal is not safe for concurrent GPU work across threads. Serialize every
+# model inference (transcribe / warmup / unload) through this lock.
+_model_lock = threading.Lock()
+
+# Bound the MLX GPU buffer cache so idle footprint stays ~weights-only (~1.3GB).
+# Clearing/limiting this cache has no measured latency cost on the next call.
+GPU_CACHE_LIMIT_BYTES = 256 * 1024 * 1024  # 256 MB
+
+# Settings exposed in the menu bar (label, value). All write the portable
+# config.toml so the Linux/Windows daemons read the same settings.
+IDLE_PRESETS = [("Never", 0), ("After 5 min", 5), ("After 15 min", 15), ("After 30 min", 30)]
+# (label, hotkey, mode) -- each preset pairs a key with a compatible mode.
+HOTKEY_PRESETS = [
+    ("Hold — Control", "ctrl", "hold"),
+    ("Hold — Right Control", "rctrl", "hold"),
+    ("Hold — Right Command", "rcmd", "hold"),
+    ("Hold — Right Option", "ralt", "hold"),
+    ("Toggle — ⌘⇧Space", "cmd+shift+space", "toggle"),
+    ("Toggle — ⌃⇧Space", "ctrl+shift+space", "toggle"),
+]
+BOOL_SETTINGS = [
+    ("Notifications", "notifications"),
+    ("Sound feedback", "sound_feedback"),
+    ("Debug logging", "debug"),
+]
 
 
 def load_config():
@@ -107,12 +160,15 @@ def load_config():
     config = {
         "hotkey": "ctrl",
         "hotkey_mode": "hold",  # toggle | hold
-        "hold_delay": 0.3,  # seconds to wait before activating (avoids triggering on shortcuts)
-        "language": "auto",
-        "model": "large-v3-turbo",
-        "beam_size": 5,
+        "hold_delay": 0.15,  # confirm window before committing (audio is pre-rolled, not lost)
+        "language": "auto",  # Parakeet v3 auto-detects among 25 European languages
+        "model": "parakeet-tdt-0.6b-v3",
+        "idle_unload_minutes": 0,  # free the model after N min idle (0 = always resident)
+        "debug": False,  # verbose per-keystroke logging
         "notifications": True,
         "sound_feedback": True,
+        "input_device": "auto",
+        "output_device": "auto",
     }
     if CONFIG_FILE.exists():
         try:
@@ -120,66 +176,207 @@ def load_config():
                 user_config = tomllib.load(f)
                 config.update(user_config)
         except Exception as e:
-            print(f"Warning: Could not load config: {e}")
+            logger.warning(f"Warning: Could not load config: {e}")
     return config
 
 
-def load_whisper_model(model_name: str, callback=None):
-    """Load Whisper model into RAM (background thread)."""
-    global _whisper_model, _model_loading
+def render_config(config: dict) -> str:
+    """Render a fully self-documenting config.toml from the current values.
 
-    if _whisper_model is not None or _model_loading:
+    Every option is written with its valid values as a comment, so the file is
+    a living reference. Internal keys (leading underscore) are never written.
+    """
+    def s(key):  # quoted string value
+        return f'"{config.get(key, "")}"'
+
+    def n(key):  # numeric value
+        return config.get(key, 0)
+
+    def b(key):  # bool value
+        return "true" if config.get(key) else "false"
+
+    return f'''# Whisper Push Configuration
+# Use the menu bar icon (changes apply live and rewrite this file, keeping these
+# comments), or edit here directly -- direct edits apply on the next restart.
+
+# --- Hotkey ---
+# Keys: a-z, 0-9, space, return, tab, escape, f1-f12
+# Modifiers: ctrl, shift, alt (option), cmd  |  left/right: lctrl, rctrl, lcmd, rcmd, lalt, ralt
+# Examples: "ctrl"  "rctrl"  "cmd+shift+space"
+hotkey = {s("hotkey")}
+
+# "hold"   = push-to-talk: hold the hotkey while speaking (modifier-only keys OK)
+# "toggle" = press once to start, again to stop (needs a real key, e.g. cmd+shift+space)
+hotkey_mode = {s("hotkey_mode")}
+
+# Confirm window (seconds). Audio is captured the instant you press (pre-roll),
+# so nothing is lost -- this only filters quick taps / shortcuts before showing
+# the recording state. 0 = instant feedback (ideal with a dedicated key like rctrl).
+hold_delay = {n("hold_delay")}
+
+# --- Transcription ---
+# Language: Parakeet v3 auto-detects 25 European languages. Leave as "auto".
+language = {s("language")}
+
+# Model (mlx-community Parakeet). Stays warm in RAM for instant transcription.
+model = {s("model")}
+
+# Free the model from RAM (~1.3GB) after N minutes idle (0 = always resident).
+# It reloads while you record, so the reload time stays hidden.
+idle_unload_minutes = {n("idle_unload_minutes")}
+
+# --- Audio devices ---
+# "auto" or an exact device name. Easiest: pick from the menu bar submenus.
+input_device = {s("input_device")}
+output_device = {s("output_device")}
+
+# --- Feedback ---
+notifications = {b("notifications")}     # macOS notification after each transcription
+sound_feedback = {b("sound_feedback")}    # start/stop sounds
+
+# --- Debugging ---
+debug = {b("debug")}             # verbose per-keystroke logging in daemon.log
+'''
+
+
+def save_config(config: dict):
+    """Persist the config as a self-documenting TOML (internal keys excluded)."""
+    try:
+        CONFIG_FILE.write_text(render_config(config))
+        logger.info(f"Config saved to {CONFIG_FILE}")
+    except Exception as e:
+        logger.error(f"Error saving config: {e}")
+
+
+def load_asr_model(model_name: str, callback=None):
+    """Load the Parakeet ASR model into RAM and warm it up (background thread).
+
+    We never touch ffmpeg or the filesystem: weights are loaded from the HF
+    cache and warmed up with an in-memory silent buffer. This is what keeps
+    transcription instant and avoids the GUI-PATH ffmpeg crash.
+    """
+    global _asr_model, _model_name, _model_loading
+
+    if _asr_model is not None or _model_loading:
         return
 
     _model_loading = True
-    print(f"Loading Whisper model '{model_name}'...")
+    _model_name = model_name
+    repo = f"mlx-community/{model_name}"
+    logger.info(f"Loading ASR model '{repo}'...")
 
     try:
-        # Just import mlx_whisper - actual model loading happens on first transcription
-        import mlx_whisper
+        import mlx.core as mx
+        from parakeet_mlx import from_pretrained
 
-        # Store model name for later use
-        _whisper_model = model_name
+        mx.set_cache_limit(GPU_CACHE_LIMIT_BYTES)
+        model = from_pretrained(repo)
+
+        # Warm up (compile Metal kernels + page weights in) BEFORE publishing the
+        # model, so wait_for_model() only returns once it's fully ready -- this
+        # prevents a transcribe thread from racing the warmup on the GPU.
+        _warm(model)
+
+        _asr_model = model
         _model_loading = False
-
-        print(f"Model '{model_name}' ready! (will load weights on first use)")
+        logger.info(f"Model '{repo}' loaded and warm in GPU memory!")
 
         if callback:
             callback()
 
     except Exception as e:
-        print(f"Error loading model: {e}")
+        logger.error(f"Error loading model: {e}")
+        import traceback
+        traceback.print_exc()
         _model_loading = False
-        _whisper_model = None
+        _asr_model = None
 
 
-def transcribe_audio(audio_path: str, config: dict) -> str:
-    """Transcribe audio file using mlx-whisper."""
-    global _whisper_model
+def _warm(model):
+    """Run one inference on in-memory silence. Serialized via _model_lock."""
+    import mlx.core as mx
+    from parakeet_mlx.audio import get_logmel
+    with _model_lock:
+        silent = mx.zeros((1, 16000), dtype=mx.float32)
+        mel = get_logmel(silent, model.preprocessor_config)
+        mx.eval(model.generate(mel))
 
-    if _whisper_model is None:
-        print("Model not loaded yet!")
+
+def warm_model():
+    """Re-warm the resident model (used after wake-from-sleep)."""
+    model = _asr_model
+    if model is None:
+        return
+    try:
+        _warm(model)
+    except Exception as e:
+        logger.warning(f"Warmup error: {e}")
+
+
+def unload_asr_model():
+    """Free the model and reclaim GPU memory (called after an idle period)."""
+    global _asr_model
+    if _asr_model is None:
+        return
+    with _model_lock:
+        _asr_model = None
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except Exception:
+            pass
+    logger.info("Model unloaded to free memory (idle)")
+
+
+def ensure_model_loading():
+    """Kick off a background load if the model isn't resident. Non-blocking.
+
+    Safe to call from the hotkey path: recording starts immediately while the
+    model loads in parallel, so an idle unload costs nothing perceptible.
+    """
+    if _asr_model is None and not _model_loading and _model_name:
+        threading.Thread(
+            target=load_asr_model, args=(_model_name,), daemon=True
+        ).start()
+
+
+def wait_for_model(timeout=15.0):
+    """Block until the model is resident (or timeout). Used right before transcribe."""
+    deadline = time.time() + timeout
+    while _asr_model is None and time.time() < deadline:
+        time.sleep(0.05)
+    return _asr_model is not None
+
+
+def transcribe_audio(audio: "np.ndarray") -> str:
+    """Transcribe an in-memory 16kHz mono float32 array with Parakeet.
+
+    No file IO, no ffmpeg: the recorded samples go straight to the model.
+    Language is auto-detected (Parakeet v3 covers 25 European languages).
+    """
+    model = _asr_model  # snapshot: another thread may unload it
+    if model is None:
+        logger.info("Model not loaded yet!")
+        return ""
+    if audio is None or len(audio) == 0:
         return ""
 
     try:
-        import mlx_whisper
+        import mlx.core as mx
+        from parakeet_mlx.audio import get_logmel
 
-        print(f"Transcribing: {audio_path}")
-
-        language = None if config["language"] == "auto" else config["language"]
-
-        result = mlx_whisper.transcribe(
-            audio_path,
-            path_or_hf_repo=f"mlx-community/whisper-{_whisper_model}",
-            language=language,
-        )
-
-        text = result.get("text", "").strip()
-        print(f"Transcription result: '{text}'")
+        with _model_lock:
+            mel = get_logmel(mx.array(audio)[None], model.preprocessor_config)
+            results = model.generate(mel)
+            text = (results[0].text if results else "").strip()
+            # Release the GPU buffer cache so idle footprint drops back to
+            # weights only. Verified to have no latency cost on the next call.
+            mx.clear_cache()
+        logger.info(f"Transcription result: '{text}'")
         return text
 
     except Exception as e:
-        print(f"Transcription error: {e}")
+        logger.error(f"Transcription error: {e}")
         import traceback
         traceback.print_exc()
         return ""
@@ -220,7 +417,7 @@ def parse_hotkey(hotkey_str):
         elif part in KEY_CODES:
             key_code = KEY_CODES[part]
         else:
-            print(f"Warning: Unknown key '{part}' in hotkey")
+            logger.warning(f"Warning: Unknown key '{part}' in hotkey")
 
     return modifiers, key_code, modifier_keycode
 
@@ -274,23 +471,48 @@ def load_icon(state):
     return None
 
 
-def play_sound(name: str):
-    """Play a sound file."""
-    sound_file = SOUNDS_DIR / f"{name}.wav"
-    if sound_file.exists():
-        sound = NSSound.alloc().initWithContentsOfFile_byReference_(str(sound_file), True)
-        if sound:
-            sound.play()
+# Pre-loaded sound buffers (filled at startup)
+_sound_cache = {}
+
+def preload_sounds():
+    """Load sound files into RAM for instant playback."""
+    for name in ("start", "stop"):
+        sound_file = SOUNDS_DIR / f"{name}.wav"
+        if sound_file.exists():
+            try:
+                data, sr = sf.read(str(sound_file), dtype='float32')
+                _sound_cache[name] = (data, sr)
+            except Exception as e:
+                logger.warning(f"Failed to preload {name}: {e}")
+
+
+def play_sound(name: str, config=None):
+    """Play a pre-loaded sound non-blocking via sounddevice."""
+    cached = _sound_cache.get(name)
+    if cached is None:
+        return
+    try:
+        data, sample_rate = cached
+        output_device = None
+        if config:
+            configured = config.get("output_device", "auto")
+            if configured != "auto":
+                output_device = config.get("_output_device_idx")
+        sd.play(data, samplerate=sample_rate, device=output_device)
+    except Exception as e:
+        logger.warning(f"Sound error: {e}")
 
 
 def paste_text(text: str):
-    """Copy text to clipboard and try to paste with Cmd+V."""
+    """Copy text to clipboard and paste with Cmd+V into the focused input."""
     if not text:
         return
 
-    # Copy to clipboard using pasteboard
+    # Copy to clipboard, snapshotting the user's current clipboard so we can
+    # restore it afterwards (a dictation tool shouldn't clobber the clipboard).
     from AppKit import NSPasteboard, NSPasteboardTypeString
     pasteboard = NSPasteboard.generalPasteboard()
+    saved_items = _snapshot_pasteboard(pasteboard)
     pasteboard.clearContents()
     pasteboard.setString_forType_(text, NSPasteboardTypeString)
 
@@ -302,28 +524,76 @@ def paste_text(text: str):
             CGEventPost,
             kCGHIDEventTap,
             kCGEventFlagMaskCommand,
+            kCGEventSourceStateHIDSystemState,
+            CGEventSourceCreate,
         )
 
-        time.sleep(0.05)
+        # Wait for clipboard to be ready and any modifier keys to be fully released
+        time.sleep(0.15)
+
+        # Create a dedicated event source for clean modifier state
+        source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState)
 
         # Key code for 'v' is 9
         v_keycode = 9
 
         # Press Cmd+V
-        event_down = CGEventCreateKeyboardEvent(None, v_keycode, True)
+        event_down = CGEventCreateKeyboardEvent(source, v_keycode, True)
         if event_down:
+            # Set ONLY Command flag (clear any lingering ctrl/shift/alt)
             CGEventSetFlags(event_down, kCGEventFlagMaskCommand)
             CGEventPost(kCGHIDEventTap, event_down)
 
+            # Small delay between press and release for apps to register
+            time.sleep(0.05)
+
             # Release
-            event_up = CGEventCreateKeyboardEvent(None, v_keycode, False)
-            CGEventSetFlags(event_up, kCGEventFlagMaskCommand)
+            event_up = CGEventCreateKeyboardEvent(source, v_keycode, False)
+            CGEventSetFlags(event_up, 0)
             CGEventPost(kCGHIDEventTap, event_up)
-            print("Pasted via CGEvent")
+            logger.info("Pasted via CGEvent")
         else:
-            print("CGEvent failed - text copied to clipboard, press Cmd+V")
+            logger.warning("CGEvent failed - text copied to clipboard, press Cmd+V")
     except Exception as e:
-        print(f"Paste error: {e} - text copied to clipboard")
+        logger.warning(f"Paste error: {e} - text copied to clipboard")
+    finally:
+        _restore_pasteboard_later(saved_items)
+
+
+def _snapshot_pasteboard(pasteboard):
+    """Copy every item/type currently on the pasteboard so it can be restored."""
+    try:
+        from AppKit import NSPasteboardItem
+        items = []
+        for item in pasteboard.pasteboardItems() or []:
+            copy = NSPasteboardItem.alloc().init()
+            for t in item.types():
+                data = item.dataForType_(t)
+                if data is not None:
+                    copy.setData_forType_(data, t)
+            items.append(copy)
+        return items
+    except Exception as e:
+        logger.warning(f"Could not snapshot clipboard: {e}")
+        return None
+
+
+def _restore_pasteboard_later(saved_items, delay=0.3):
+    """Restore the snapshotted clipboard after the paste has been consumed."""
+    if not saved_items:
+        return
+
+    def restore():
+        time.sleep(delay)
+        try:
+            from AppKit import NSPasteboard
+            pb = NSPasteboard.generalPasteboard()
+            pb.clearContents()
+            pb.writeObjects_(saved_items)
+        except Exception as e:
+            logger.warning(f"Could not restore clipboard: {e}")
+
+    threading.Thread(target=restore, daemon=True).start()
 
 
 def notify(title: str, message: str = ""):
@@ -335,40 +605,47 @@ def notify(title: str, message: str = ""):
 # Global reference for hotkey handler
 _app_instance = None
 
+# Set by the SIGTERM/SIGINT handler; polled on the main thread by an NSTimer.
+_shutdown_requested = False
+
+
+def _request_shutdown(signum, frame):
+    """Signal handler: just flag it. A plain handler can't safely touch Cocoa,
+    and can't act while the run loop is blocked -- the NSTimer polls this flag."""
+    global _shutdown_requested
+    _shutdown_requested = True
+
 
 def _handle_global_hotkey(event):
     """Handle global key events - must be outside NSObject class."""
-    global _app_instance
     if _app_instance is None:
         return
 
-    # Cancel any pending hold-to-talk activation (user is pressing a shortcut like Ctrl+C)
+    # Another key during the delay -> it's a shortcut (e.g. Ctrl+C). Discard.
     if _app_instance.hold_pending:
-        print("Key pressed during hold delay - cancelling hold activation")
+        logger.debug("Key pressed during hold delay - discarding pre-roll")
         _app_instance.hold_pending = False
         _app_instance.hold_active = False
         if _app_instance._hold_timer is not None:
             _app_instance._hold_timer.cancel()
             _app_instance._hold_timer = None
+        _app_instance._discard_capture()
         return
 
-    # Debug: log all key events
     key_code = event.keyCode()
     modifiers = event.modifierFlags()
 
-    # Only log if modifiers are pressed (to avoid spam)
     if modifiers & (NSCommandKeyMask | NSShiftKeyMask | NSControlKeyMask | NSAlternateKeyMask):
-        print(f"Key event: code={key_code}, modifiers={modifiers:#x}, expected_code={_app_instance.key_code}, expected_mods={_app_instance.modifiers:#x}")
+        logger.debug(f"Key event: code={key_code}, modifiers={modifiers:#x}, expected_code={_app_instance.key_code}, expected_mods={_app_instance.modifiers:#x}")
 
     if key_code == _app_instance.key_code:
         if (modifiers & _app_instance.modifiers) == _app_instance.modifiers:
-            print("Hotkey matched! Triggering recording...")
+            logger.info("Hotkey matched! Triggering recording...")
             _app_instance.toggle_recording()
 
 
 def _handle_flags_changed(event):
     """Handle modifier-only hold-to-talk hotkey with activation delay."""
-    global _app_instance
     if _app_instance is None or _app_instance.hotkey_mode != "hold":
         return
 
@@ -379,33 +656,82 @@ def _handle_flags_changed(event):
         return
 
     is_pressed = (modifiers & _app_instance.hold_modifiers) == _app_instance.hold_modifiers
+    logger.debug(f"Flags changed: keycode={key_code}, mods={modifiers:#x}, is_pressed={is_pressed}, hold_active={_app_instance.hold_active}, state={_app_instance.state}")
 
     if is_pressed and not _app_instance.hold_active:
         _app_instance.hold_active = True
         if _app_instance.state == State.IDLE:
-            # Start a delayed activation to avoid triggering on keyboard shortcuts
-            _app_instance.hold_pending = True
-            delay = _app_instance.config.get("hold_delay", 0.3)
-            _app_instance._hold_timer = threading.Timer(delay, _app_instance._delayed_start_recording)
-            _app_instance._hold_timer.daemon = True
-            _app_instance._hold_timer.start()
+            delay = _app_instance.config.get("hold_delay", 0.15)
+            if delay <= 0:
+                # Instant: commit immediately (best with a dedicated key).
+                _app_instance.start_recording()
+            else:
+                # Pre-roll: start capturing NOW so no speech is lost. The delay
+                # only gates commit (real hold) vs discard (shortcut/quick tap).
+                _app_instance.hold_pending = True
+                _app_instance._begin_capture()
+                _app_instance._hold_timer = threading.Timer(delay, _app_instance._delayed_start_recording)
+                _app_instance._hold_timer.daemon = True
+                _app_instance._hold_timer.start()
     elif not is_pressed and _app_instance.hold_active:
         _app_instance.hold_active = False
-        # Cancel pending delayed start if still waiting
         if _app_instance.hold_pending:
+            logger.debug("Released during hold delay - discarding pre-roll")
             _app_instance.hold_pending = False
             if _app_instance._hold_timer is not None:
                 _app_instance._hold_timer.cancel()
                 _app_instance._hold_timer = None
+            _app_instance._discard_capture()
         elif _app_instance.state == State.RECORDING:
-            _app_instance.stop_and_transcribe()
+            # Kill audio stream + grab the buffer IMMEDIATELY in this callback
+            _app_instance.recorder.recording = False
+            _app_instance.recorder.stream.abort()
+            _app_instance.recorder.stream.close()
+            audio = _app_instance.recorder.get_audio()
+            logger.info("Released - stream killed and audio captured immediately")
+            _app_instance.stop_and_transcribe(audio)
+        else:
+            logger.debug(f"Released but state is {_app_instance.state}, not RECORDING")
+
+
+def find_input_device():
+    """Find the best input device (prefer built-in mic, avoid virtual/external display devices)."""
+    devices = sd.query_devices()
+    best = None
+    for i, d in enumerate(devices):
+        if d['max_input_channels'] < 1:
+            continue
+        name = d['name'].lower()
+        # Skip virtual audio devices
+        if 'teams' in name or 'zoom' in name or 'virtual' in name:
+            continue
+        # Prefer built-in MacBook mic
+        if 'macbook' in name or 'built-in' in name:
+            return i
+        if best is None:
+            best = i
+    return best
+
+
+def find_device_by_name(name, kind='input'):
+    """Find a device index by name. kind is 'input' or 'output'."""
+    devices = sd.query_devices()
+    channel_key = 'max_input_channels' if kind == 'input' else 'max_output_channels'
+    for i, d in enumerate(devices):
+        if d[channel_key] < 1:
+            continue
+        if d['name'] == name:
+            return i
+    logger.warning(f"Warning: device '{name}' not found, falling back to default")
+    return None
 
 
 class AudioRecorder:
     """Records audio using sounddevice."""
 
-    def __init__(self, sample_rate=16000):
-        self.sample_rate = sample_rate
+    def __init__(self, config=None, target_sample_rate=16000):
+        self.config = config or {}
+        self.target_sample_rate = target_sample_rate
         self.recording = False
         self.audio_data = []
         self._lock = threading.Lock()
@@ -416,33 +742,62 @@ class AudioRecorder:
             self.audio_data = []
             self.recording = True
 
+        # Resolve input device from config
+        configured = self.config.get("input_device", "auto")
+        if configured == "auto":
+            input_device = find_input_device()
+        else:
+            input_device = find_device_by_name(configured, kind='input')
+            if input_device is None:
+                input_device = find_input_device()  # fallback
+
+        if input_device is not None:
+            dev_info = sd.query_devices(input_device)
+            self.device_sample_rate = int(dev_info['default_samplerate'])
+            logger.info(f"Using input device: {dev_info['name']} @ {self.device_sample_rate}Hz")
+        else:
+            input_device = None  # use system default
+            self.device_sample_rate = self.target_sample_rate
+            logger.info("Using default input device")
+
         def callback(indata, frames, time_info, status):
             if self.recording:
                 self.audio_data.append(indata.copy())
 
         self.stream = sd.InputStream(
-            samplerate=self.sample_rate,
+            device=input_device,
+            samplerate=self.device_sample_rate,
             channels=1,
             dtype=np.float32,
             callback=callback,
         )
         self.stream.start()
 
-    def stop(self) -> str:
-        """Stop recording and save to file."""
-        with self._lock:
-            self.recording = False
+    def stop_array(self) -> "np.ndarray":
+        """Stop recording and return the recorded audio as a 16kHz mono array."""
+        self.recording = False
+        if hasattr(self, 'stream'):
+            self.stream.abort()
+            self.stream.close()
+        return self.get_audio()
 
-        self.stream.stop()
-        self.stream.close()
-
+    def get_audio(self) -> "np.ndarray":
+        """Return the recorded buffer as a 16kHz mono float32 array (no file IO)."""
         if not self.audio_data:
             return None
 
-        audio = np.concatenate(self.audio_data, axis=0)
-        sf.write(str(AUDIO_FILE), audio, self.sample_rate)
+        audio = np.concatenate(self.audio_data, axis=0).reshape(-1).astype(np.float32)
+        sample_rate = getattr(self, 'device_sample_rate', self.target_sample_rate)
 
-        return str(AUDIO_FILE)
+        # Resample to 16kHz if recorded at a different rate (the model expects 16kHz)
+        if sample_rate != self.target_sample_rate:
+            import scipy.signal
+            num_samples = int(len(audio) * self.target_sample_rate / sample_rate)
+            audio = scipy.signal.resample(audio, num_samples).astype(np.float32)
+            logger.info(f"Resampled {sample_rate}Hz -> {self.target_sample_rate}Hz")
+
+        logger.info(f"Captured audio ({len(audio)/self.target_sample_rate:.1f}s)")
+        return audio
 
     def cancel(self):
         """Cancel recording without saving."""
@@ -464,6 +819,7 @@ class MenuBarApp(NSObject):
             return None
 
         self.config = load_config()
+        preload_sounds()
         self.hotkey_mode = self.config.get("hotkey_mode", "toggle").lower()
         self.modifiers, self.key_code, self.hold_keycode = parse_hotkey(
             self.config.get("hotkey", "ctrl+shift+space")
@@ -473,7 +829,8 @@ class MenuBarApp(NSObject):
         self.hold_pending = False
         self._hold_timer = None
         self.state = State.LOADING
-        self.recorder = AudioRecorder()
+        self.recorder = AudioRecorder(config=self.config)
+        self._resolve_output_device_idx()
 
         # Load icons
         self.icons = {
@@ -485,16 +842,16 @@ class MenuBarApp(NSObject):
 
         if self.hotkey_mode == "hold":
             if self.key_code is not None:
-                print("Hold mode supports modifier-only hotkeys. Falling back to toggle.")
+                logger.info("Hold mode supports modifier-only hotkeys. Falling back to toggle.")
                 self.hotkey_mode = "toggle"
             if self.hotkey_mode == "hold" and self.hold_modifiers == 0:
-                print("Error: Invalid hotkey for hold mode")
+                logger.info("Error: Invalid hotkey for hold mode")
                 sys.exit(1)
             if self.hotkey_mode == "hold" and self.hold_keycode is None:
-                print("Warning: Hold mode with generic modifier may conflict with other shortcuts.")
-                print("Tip: use 'rctrl' or another right-side modifier for fewer conflicts.")
+                logger.warning("Warning: Hold mode with generic modifier may conflict with other shortcuts.")
+                logger.info("Tip: use 'rctrl' or another right-side modifier for fewer conflicts.")
         if self.hotkey_mode == "toggle" and self.key_code is None:
-            print("Error: Invalid hotkey configuration")
+            logger.info("Error: Invalid hotkey configuration")
             sys.exit(1)
 
         # Create status bar item
@@ -504,10 +861,15 @@ class MenuBarApp(NSObject):
         # Set initial icon (loading state)
         self.update_icon()
 
-        # Create menu
+        # Create menu (refs populated by setup_menu, used by the open-refresh)
+        self._title_item = None
+        self._hotkey_submenu = None
+        self._choice_submenus = []   # [(submenu, config_key)]
+        self._bool_items = []        # [item]
         self.menu = NSMenu.alloc().init()
         self.setup_menu()
         self.status_item.setMenu_(self.menu)
+        self.menu.setDelegate_(self)
 
         # Set up global hotkey monitor
         global _app_instance
@@ -524,7 +886,18 @@ class MenuBarApp(NSObject):
         hotkey_display = format_hotkey_display(self.config.get("hotkey", "ctrl+shift+space"))
         if self.hotkey_mode == "hold":
             hotkey_display = f"Hold {hotkey_display}"
-        print(f"Menu bar app starting. Hotkey: {hotkey_display}")
+        logger.info(f"Menu bar app starting. Hotkey: {hotkey_display}")
+
+        # Re-warm the model when the Mac wakes from sleep (its pages may have
+        # been compressed/swapped while asleep -> first call would be slow).
+        self._idle_timer = None
+        self._register_wake_observer()
+
+        # Poll for shutdown requests: ticking the run loop lets the Python
+        # signal handler run and lets us terminate cleanly on the main thread.
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            0.5, self, "checkShutdown:", None, True
+        )
 
         # Load model in background thread
         def on_model_loaded():
@@ -533,27 +906,156 @@ class MenuBarApp(NSObject):
                 notify("Whisper Push", "Model loaded and ready!")
 
         threading.Thread(
-            target=load_whisper_model,
-            args=(self.config.get("model", "large-v3-turbo"), on_model_loaded),
+            target=load_asr_model,
+            args=(self.config.get("model", "parakeet-tdt-0.6b-v3"), on_model_loaded),
             daemon=True
         ).start()
 
         return self
 
+    # --- Model lifecycle / resource management ---
+
+    def _register_wake_observer(self):
+        """Observe system wake so we can re-warm the model in the background."""
+        try:
+            from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
+            nc = NSWorkspace.sharedWorkspace().notificationCenter()
+            nc.addObserver_selector_name_object_(
+                self, "systemDidWake:", NSWorkspaceDidWakeNotification, None
+            )
+        except Exception as e:
+            logger.warning(f"Could not register wake observer: {e}")
+
+    def systemDidWake_(self, notification):
+        logger.info("System woke from sleep - re-warming model")
+        def rewarm():
+            if _asr_model is not None:
+                warm_model()
+                logger.info("Re-warm after wake done")
+        threading.Thread(target=rewarm, daemon=True).start()
+        self._schedule_idle_unload()
+
+    def _schedule_idle_unload(self):
+        """(Re)arm the idle-unload timer based on config. Debounced on activity."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        minutes = self.config.get("idle_unload_minutes", 0) or 0
+        if minutes <= 0:
+            return  # 0 = always resident
+        self._idle_timer = threading.Timer(minutes * 60, self._idle_unload_fired)
+        self._idle_timer.daemon = True
+        self._idle_timer.start()
+
+    def _idle_unload_fired(self):
+        # Only unload if truly idle (not mid-recording/processing).
+        if self.state == State.IDLE:
+            unload_asr_model()
+
+    def checkShutdown_(self, timer):
+        """Terminate cleanly (removes the menu-bar icon) when a signal arrived."""
+        if _shutdown_requested:
+            logger.info("Shutdown requested, terminating")
+            NSApp.terminate_(None)
+
+    # --- Settings menu (all write the portable config.toml) ---
+
+    def _status_title(self):
+        disp = format_hotkey_display(self.config.get("hotkey", "ctrl"))
+        if self.hotkey_mode == "hold":
+            disp = f"Hold {disp}"
+        return f"Whisper Push ({disp})"
+
+    def _add_bool_item(self, menu, title, key):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "toggleSetting:", "")
+        item.setTarget_(self)
+        item.setRepresentedObject_(key)
+        item.setState_(NSOnState if self.config.get(key) else NSOffState)
+        menu.addItem_(item)
+        self._bool_items.append(item)
+
+    def toggleSetting_(self, sender):
+        key = sender.representedObject()
+        self.config[key] = not bool(self.config.get(key))
+        save_config(self.config)
+        sender.setState_(NSOnState if self.config[key] else NSOffState)
+        if key == "debug":
+            logger.setLevel(logging.DEBUG if self.config["debug"] else logging.INFO)
+        logger.info(f"Setting '{key}' = {self.config[key]}")
+
+    def _add_choice_submenu(self, title, key, choices):
+        """Add a radio-style submenu (label, value) bound to a config key."""
+        parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+        submenu = NSMenu.alloc().init()
+        current = self.config.get(key)
+        for label, value in choices:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, "selectChoice:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_([key, value])
+            item.setState_(NSOnState if current == value else NSOffState)
+            submenu.addItem_(item)
+        parent.setSubmenu_(submenu)
+        self.menu.addItem_(parent)
+        self._choice_submenus.append((submenu, key))
+
+    def selectChoice_(self, sender):
+        ro = sender.representedObject()
+        key, raw = str(ro[0]), ro[1]
+        value = int(raw) if str(raw).lstrip("-").isdigit() else str(raw)
+        if self.config.get(key) != value:
+            self.config[key] = value
+            save_config(self.config)
+            if key == "idle_unload_minutes":
+                self._schedule_idle_unload()
+            logger.info(f"Setting '{key}' = {value}")
+        for it in sender.menu().itemArray():  # move the radio checkmark
+            it.setState_(NSOffState)
+        sender.setState_(NSOnState)
+
+    def _add_hotkey_submenu(self):
+        """Submenu of hotkey presets (each implies a mode). Changing it re-parses
+        and re-binds live -- no restart needed."""
+        parent = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Hotkey", None, "")
+        self._hotkey_submenu = NSMenu.alloc().init()
+        self._fill_hotkey_submenu()
+        parent.setSubmenu_(self._hotkey_submenu)
+        self.menu.addItem_(parent)
+
+    def _fill_hotkey_submenu(self):
+        sub = self._hotkey_submenu
+        sub.removeAllItems()
+        h, m = self.config.get("hotkey"), self.config.get("hotkey_mode")
+        for label, hotkey, mode in HOTKEY_PRESETS:
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, "selectHotkey:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_([hotkey, mode])
+            item.setState_(NSOnState if (hotkey == h and mode == m) else NSOffState)
+            sub.addItem_(item)
+
+    def selectHotkey_(self, sender):
+        ro = sender.representedObject()
+        hotkey, mode = str(ro[0]), str(ro[1])
+        self.config["hotkey"], self.config["hotkey_mode"] = hotkey, mode
+        self.modifiers, self.key_code, self.hold_keycode = parse_hotkey(hotkey)
+        self.hold_modifiers = self.modifiers
+        self.hotkey_mode = mode
+        save_config(self.config)
+        self._fill_hotkey_submenu()
+        if self._title_item is not None:
+            self._title_item.setTitle_(self._status_title())
+        logger.info(f"Hotkey set to '{hotkey}' ({mode})")
+
     def setup_menu(self):
         """Set up the dropdown menu."""
         self.menu.removeAllItems()
+        self._choice_submenus = []
+        self._bool_items = []
 
-        hotkey_display = format_hotkey_display(self.config.get("hotkey", "ctrl+shift+space"))
-        if self.hotkey_mode == "hold":
-            hotkey_display = f"Hold {hotkey_display}"
-        status_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"Whisper Push ({hotkey_display})",
-            None,
-            ""
+        self._title_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            self._status_title(), None, ""
         )
-        status_item.setEnabled_(False)
-        self.menu.addItem_(status_item)
+        self._title_item.setEnabled_(False)
+        self.menu.addItem_(self._title_item)
 
         self.menu.addItem_(NSMenuItem.separatorItem())
 
@@ -577,8 +1079,38 @@ class MenuBarApp(NSObject):
 
         self.menu.addItem_(NSMenuItem.separatorItem())
 
+        # Input device submenu
+        self.input_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            self._input_menu_title(), None, ""
+        )
+        self.input_submenu = NSMenu.alloc().init()
+        self.input_menu_item.setSubmenu_(self.input_submenu)
+        self.menu.addItem_(self.input_menu_item)
+
+        # Output device submenu
+        self.output_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            self._output_menu_title(), None, ""
+        )
+        self.output_submenu = NSMenu.alloc().init()
+        self.output_menu_item.setSubmenu_(self.output_submenu)
+        self.menu.addItem_(self.output_menu_item)
+
+        self._rebuild_device_submenus()
+
+        # Settings submenus (write config.toml; applied live)
+        self._add_hotkey_submenu()
+        self._add_choice_submenu("Idle unload", "idle_unload_minutes", IDLE_PRESETS)
+
+        self.menu.addItem_(NSMenuItem.separatorItem())
+
+        # Boolean toggles
+        for title, key in BOOL_SETTINGS:
+            self._add_bool_item(self.menu, title, key)
+
+        self.menu.addItem_(NSMenuItem.separatorItem())
+
         config_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Open Config...",
+            "Open Config (TOML)...",
             "openConfig:",
             ","
         )
@@ -641,6 +1173,13 @@ class MenuBarApp(NSObject):
         """Set the current state and update UI."""
         if self.state != new_state:
             self.state = new_state
+            # Idle-unload timer: arm when idle, cancel while busy.
+            if getattr(self, '_idle_timer', None) is not None or new_state == State.IDLE:
+                if new_state == State.IDLE:
+                    self._schedule_idle_unload()
+                elif self._idle_timer is not None:
+                    self._idle_timer.cancel()
+                    self._idle_timer = None
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 "updateIconOnMainThread:",
                 None,
@@ -653,7 +1192,7 @@ class MenuBarApp(NSObject):
     def toggle_recording(self):
         """Toggle recording on/off."""
         if self.state == State.LOADING:
-            print("Model still loading, please wait...")
+            logger.info("Model still loading, please wait...")
             return
 
         if self.state == State.PROCESSING:
@@ -665,60 +1204,116 @@ class MenuBarApp(NSObject):
             self.stop_and_transcribe()
 
     def _delayed_start_recording(self):
-        """Called after hold delay expires - start recording if still holding."""
+        """Hold delay expired: confirm the pre-rolled capture (sound + UI)."""
         if self.hold_pending and self.hold_active and self.state == State.IDLE:
             self.hold_pending = False
             self._hold_timer = None
-            print("Hold delay passed - starting recording")
-            self.start_recording()
+            self._commit_recording()
         else:
             self.hold_pending = False
             self._hold_timer = None
 
-    def start_recording(self):
-        """Start audio recording."""
-        self.set_state(State.RECORDING)
+    def _begin_capture(self):
+        """Open the mic and start buffering IMMEDIATELY (zero-latency pre-roll).
 
-        if self.config.get("sound_feedback"):
-            play_sound("start")
-
+        No sound/UI yet -- in hold mode this runs on key-down so we never lose
+        the start of speech; the capture is committed or discarded after the
+        hold delay confirms it's a real hold (not a shortcut)."""
+        ensure_model_loading()
         self.recorder.start()
-        print("Recording started...")
+        self._recording_ready = True
 
-    def stop_and_transcribe(self):
-        """Stop recording and transcribe."""
+    def _discard_capture(self):
+        """Throw away a pre-rolled capture (it was a shortcut / quick tap)."""
+        self.recorder.cancel()
+        self._recording_ready = False
+
+    def _commit_recording(self):
+        """Promote a pre-rolled capture to an active recording (sound + UI)."""
+        if self.config.get("sound_feedback"):
+            play_sound("start", self.config)
+        self.set_state(State.RECORDING)
+        logger.info("Recording started...")
+
+    def start_recording(self):
+        """Immediate start (toggle mode): begin capturing and commit at once."""
+        self._begin_capture()
+        self._commit_recording()
+
+    def stop_and_transcribe(self, audio=None):
+        """Stop recording and transcribe an in-memory audio array.
+
+        In hold mode the caller passes the already-captured array; in toggle
+        mode we stop the recorder here.
+        """
+        if not getattr(self, '_recording_ready', False):
+            logger.info("Recording not ready yet, ignoring stop")
+            return
+        self._recording_ready = False
         self.set_state(State.PROCESSING)
 
         if self.config.get("sound_feedback"):
-            play_sound("stop")
+            play_sound("stop", self.config)
 
-        # Stop recording
-        audio_path = self.recorder.stop()
+        if audio is None:
+            audio = self.recorder.stop_array()
 
-        if not audio_path:
-            print("No audio recorded")
+        if audio is None or len(audio) == 0:
+            logger.info("No audio recorded")
             self.set_state(State.IDLE)
             return
 
-        print("Recording stopped, transcribing...")
+        # Fast-path: skip transcription for too-short or silent recordings
+        duration = len(audio) / self.recorder.target_sample_rate
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if duration < 0.3:
+            logger.info(f"Audio too short ({duration:.2f}s), skipping transcription")
+            self.set_state(State.IDLE)
+            return
+        if rms < 0.005:
+            logger.info(f"Audio is silence (RMS={rms:.5f}), skipping transcription")
+            self.set_state(State.IDLE)
+            return
 
-        # Transcribe in background thread
+        logger.info("Recording stopped, transcribing...")
+
+        # Only transcription in background thread
         def do_transcribe():
-            text = transcribe_audio(audio_path, self.config)
+            # If the model was idle-unloaded, it's reloading in parallel (kicked
+            # off in start_recording); wait for it before transcribing.
+            if _asr_model is None:
+                logger.info("Waiting for model to finish loading...")
+                if not wait_for_model():
+                    logger.error("Model load timed out")
+                    self.set_state(State.IDLE)
+                    return
+            text = transcribe_audio(audio)
 
             if text:
-                print(f"Transcribed: {text}")
-                paste_text(text)
+                logger.info(f"Transcribed: {text}")
+                # Paste on main thread for reliable CGEvent delivery
+                self._pending_text = text
+                self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    "pasteOnMainThread:",
+                    None,
+                    False
+                )
                 if self.config.get("notifications"):
                     notify("Whisper Push", f"Transcribed {len(text)} characters")
             else:
-                print("No transcription result")
+                logger.info("No transcription result")
                 if self.config.get("notifications"):
                     notify("Whisper Push", "No speech detected")
 
             self.set_state(State.IDLE)
 
         threading.Thread(target=do_transcribe, daemon=True).start()
+
+    def pasteOnMainThread_(self, _):
+        text = getattr(self, '_pending_text', None)
+        if text:
+            paste_text(text)
+            self._pending_text = None
 
     def toggleRecordingMenu_(self, sender):
         self.toggle_recording()
@@ -727,19 +1322,13 @@ class MenuBarApp(NSObject):
         if self.state == State.RECORDING:
             self.recorder.cancel()
             self.set_state(State.IDLE)
-            print("Recording cancelled")
+            logger.info("Recording cancelled")
 
     def openConfig_(self, sender):
-        config_path = str(CONFIG_FILE)
         if not CONFIG_FILE.exists():
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG_FILE.write_text('''# Whisper Push Configuration
-hotkey_mode = "hold"
-hotkey = "ctrl"
-language = "auto"
-model = "large-v3-turbo"
-''')
-        subprocess.run(["open", config_path])
+            save_config(load_config())  # write the fully-documented template
+        subprocess.run(["open", str(CONFIG_FILE)])
 
     def viewLogs_(self, sender):
         log_path = SUPPORT_DIR / "daemon.log"
@@ -750,6 +1339,105 @@ model = "large-v3-turbo"
 
     def quitApp_(self, sender):
         NSApp.terminate_(None)
+
+    # --- Device selection ---
+
+    def _input_menu_title(self):
+        name = self.config.get("input_device", "auto")
+        if name == "auto":
+            # Show which device auto resolves to
+            idx = find_input_device()
+            if idx is not None:
+                resolved = sd.query_devices(idx)['name']
+                return f"Input: {resolved} (Auto)"
+            return "Input: Auto"
+        return f"Input: {name}"
+
+    def _output_menu_title(self):
+        name = self.config.get("output_device", "auto")
+        if name == "auto":
+            try:
+                default_out = sd.query_devices(kind='output')
+                return f"Output: {default_out['name']} (Auto)"
+            except Exception:
+                return "Output: Auto"
+        return f"Output: {name}"
+
+    def _add_device_menu_item(self, submenu, title, represented, action, checked):
+        item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
+        item.setTarget_(self)
+        item.setRepresentedObject_(represented)
+        item.setState_(NSOnState if checked else NSOffState)
+        submenu.addItem_(item)
+
+    def _build_device_submenu(self, submenu, kind, current, auto_label, action):
+        """Populate one device submenu (kind is 'input' or 'output')."""
+        channel_key = 'max_input_channels' if kind == 'input' else 'max_output_channels'
+        submenu.removeAllItems()
+        self._add_device_menu_item(submenu, auto_label, "auto", action, current == "auto")
+        submenu.addItem_(NSMenuItem.separatorItem())
+
+        seen = set()
+        for d in sd.query_devices():
+            name = d['name']
+            if d[channel_key] < 1 or name in seen:
+                continue
+            seen.add(name)
+            self._add_device_menu_item(submenu, name, name, action, current == name)
+
+    def _rebuild_device_submenus(self):
+        """Rebuild input/output device submenus from current system devices."""
+        self._build_device_submenu(
+            self.input_submenu, 'input', self.config.get("input_device", "auto"),
+            "Auto (built-in mic heuristic)", "selectInputDevice:")
+        self._build_device_submenu(
+            self.output_submenu, 'output', self.config.get("output_device", "auto"),
+            "Auto (system default)", "selectOutputDevice:")
+        self.input_menu_item.setTitle_(self._input_menu_title())
+        self.output_menu_item.setTitle_(self._output_menu_title())
+
+    def selectInputDevice_(self, sender):
+        name = sender.representedObject()
+        self.config["input_device"] = name
+        save_config(self.config)
+        self._rebuild_device_submenus()
+        logger.info(f"Input device set to: {name}")
+
+    def selectOutputDevice_(self, sender):
+        name = sender.representedObject()
+        self.config["output_device"] = name
+        self._resolve_output_device_idx()
+        save_config(self.config)
+        self._rebuild_device_submenus()
+        logger.info(f"Output device set to: {name}")
+
+    def _resolve_output_device_idx(self):
+        """Cache the output device index for instant playback."""
+        configured = self.config.get("output_device", "auto")
+        if configured != "auto":
+            self.config["_output_device_idx"] = find_device_by_name(configured, kind='output')
+        else:
+            self.config.pop("_output_device_idx", None)
+
+    def menuNeedsUpdate_(self, menu):
+        """NSMenuDelegate: refresh dynamic state when the menu opens, so it
+        reflects external config.toml edits and current devices.
+
+        Only submenu contents and item states are touched -- rebuilding the
+        whole top menu here corrupts AppKit's in-progress presentation.
+        """
+        if menu != self.menu or not hasattr(self, 'input_submenu'):
+            return
+        self._rebuild_device_submenus()
+        self._fill_hotkey_submenu()
+        for submenu, key in self._choice_submenus:
+            current = self.config.get(key)
+            for it in submenu.itemArray():
+                ro = it.representedObject()
+                it.setState_(NSOnState if (ro is not None and ro[1] == current) else NSOffState)
+        for it in self._bool_items:
+            it.setState_(NSOnState if self.config.get(it.representedObject()) else NSOffState)
+        self._title_item.setTitle_(self._status_title())
 
 
 def check_accessibility_permission():
@@ -777,19 +1465,47 @@ def check_accessibility_permission():
         result = AXIsProcessTrustedWithOptions(objc.pyobjc_id(options))
 
         if result:
-            print("Accessibility permission: GRANTED")
+            logger.info("Accessibility permission: GRANTED")
         else:
-            print("Accessibility permission: NOT GRANTED - dialog shown to user")
+            logger.info("Accessibility permission: NOT GRANTED - dialog shown to user")
             notify("Whisper Push", "Please grant Accessibility permission, then restart the app")
 
         return result
 
     except Exception as e:
-        print(f"Accessibility check error: {e}")
+        logger.error(f"Accessibility check error: {e}")
+        return False
+
+
+_lock_fd = None  # kept alive for the process lifetime to hold the flock
+
+
+def acquire_single_instance_lock():
+    """Hold an exclusive lock so only one daemon runs (no duplicate icons)."""
+    global _lock_fd
+    try:
+        SUPPORT_DIR.mkdir(parents=True, exist_ok=True)
+        _lock_fd = open(LOCK_FILE, "w")
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
         return False
 
 
 def main():
+    setup_logging(load_config().get("debug", False))
+
+    if not acquire_single_instance_lock():
+        logger.info("Another instance is already running - exiting")
+        sys.exit(0)
+
+    logger.info("Whisper Push daemon starting")
+
+    # Flag-and-poll shutdown: the handler sets a flag (it can't safely act while
+    # the Cocoa run loop is blocked); the app's NSTimer polls it and terminates.
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
+
     # Check accessibility permission first (will prompt user if needed)
     check_accessibility_permission()
 
@@ -800,14 +1516,6 @@ def main():
     # Create and set delegate
     delegate = MenuBarApp.alloc().init()
     app.setDelegate_(delegate)
-
-    # Handle signals
-    def signal_handler(signum, frame):
-        print("\nShutting down...")
-        AppHelper.stopEventLoop()
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
 
     # Run
     AppHelper.runEventLoop()

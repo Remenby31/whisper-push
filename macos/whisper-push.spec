@@ -1,52 +1,49 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec file for whisper-push macOS app bundle.
-Supports Apple Silicon (M1/M2/M3/M4) and Intel Macs.
+PyInstaller spec for the Whisper Push menu-bar app (Parakeet / MLX).
+Apple Silicon only (MLX requires an M-series chip).
 """
 
-import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-# Paths
 PROJECT_ROOT = Path(SPECPATH).parent
-SCRIPT_PATH = PROJECT_ROOT / "whisper-push-macos.py"
-SOUNDS_DIR = PROJECT_ROOT / "sounds"
+SCRIPT_PATH = PROJECT_ROOT / "macos" / "menubar-daemon.py"
 ICON_PATH = PROJECT_ROOT / "macos" / "whisper-push.icns"
 
-# Data files to include
+# Bundled read-only resources (the daemon reads these from sys._MEIPASS when frozen)
 datas = [
-    (str(SOUNDS_DIR), "sounds"),
-    (str(PROJECT_ROOT / "config.toml"), "."),
+    (str(PROJECT_ROOT / "macos" / "icons"), "icons"),
+    (str(PROJECT_ROOT / "sounds"), "sounds"),
 ]
+binaries = []
+hiddenimports = []
 
-# Hidden imports for faster-whisper and its dependencies
-hiddenimports = [
-    "faster_whisper",
-    "ctranslate2",
-    "tokenizers",
-    "huggingface_hub",
-    "numpy",
-    "av",
-    "tqdm",
+# Pull in everything for the native/runtime-heavy packages.
+for pkg in ("mlx", "parakeet_mlx", "sounddevice", "soundfile", "huggingface_hub"):
+    d, b, h = collect_all(pkg)
+    datas += d
+    binaries += b
+    hiddenimports += h
+
+# scipy (used for resampling) + PyObjC frameworks we import.
+hiddenimports += collect_submodules("scipy.signal")
+hiddenimports += [
+    "scipy", "numpy", "tomllib",
+    "objc", "Foundation", "AppKit", "Cocoa", "Quartz",
+    "PyObjCTools", "PyObjCTools.AppHelper",
 ]
 
 a = Analysis(
     [str(SCRIPT_PATH)],
     pathex=[str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        # Exclude CUDA libraries (not needed on macOS)
-        "nvidia",
-        "nvidia_cublas_cu12",
-        "nvidia_cudnn_cu12",
-        "torch",
-        "tensorflow",
-    ],
+    excludes=["torch", "tensorflow", "nvidia", "matplotlib", "tkinter", "PIL"],
     noarchive=False,
     optimize=0,
 )
@@ -58,15 +55,15 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="whisper-push",
+    name="Whisper Push",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,  # Don't use UPX on macOS
-    console=False,  # No terminal window
+    upx=False,
+    console=False,
     disable_windowed_traceback=False,
-    argv_emulation=True,  # Enable argv emulation for macOS
-    target_arch=None,  # Build for current architecture (arm64 on M1+)
+    argv_emulation=False,
+    target_arch=None,  # use the host arch as-is (arm64); avoids lipo thinning
     codesign_identity=None,
     entitlements_file=None,
 )
@@ -78,7 +75,7 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="whisper-push",
+    name="Whisper Push",
 )
 
 app = BUNDLE(
@@ -92,13 +89,12 @@ app = BUNDLE(
         "CFBundleDisplayName": "Whisper Push",
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1.0.0",
-        "CFBundleIdentifier": "com.whisper-push.app",
-        "CFBundlePackageType": "APPL",
-        "CFBundleSignature": "????",
-        "LSMinimumSystemVersion": "11.0",  # macOS Big Sur minimum
+        "LSMinimumSystemVersion": "13.0",
         "NSHighResolutionCapable": True,
-        "NSMicrophoneUsageDescription": "Whisper Push needs microphone access to record your voice for transcription.",
-        "NSAppleEventsUsageDescription": "Whisper Push needs accessibility permissions to type transcribed text.",
-        "LSUIElement": True,  # Run as background app (no dock icon)
+        "LSUIElement": True,  # menu-bar app, no Dock icon
+        "NSMicrophoneUsageDescription":
+            "Whisper Push records your voice to transcribe it into text.",
+        "NSAppleEventsUsageDescription":
+            "Whisper Push uses accessibility to paste transcribed text.",
     },
 )

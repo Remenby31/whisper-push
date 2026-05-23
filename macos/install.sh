@@ -90,12 +90,12 @@ fi
 echo ""
 info "Checking system dependencies..."
 
-# ffmpeg (required by mlx-whisper for audio processing)
+# ffmpeg is optional: the daemon feeds recorded audio to the model in-memory
+# and never shells out to ffmpeg. We only install it as a convenience.
 if ! command -v ffmpeg &> /dev/null; then
-    info "Installing ffmpeg (audio processing)..."
-    brew install ffmpeg
+    info "Installing ffmpeg (optional convenience)..."
+    brew install ffmpeg || warn "ffmpeg install skipped (not required)"
 fi
-log "ffmpeg installed"
 
 # Python 3 (prefer Homebrew Python for consistency)
 PYTHON_CMD=""
@@ -163,46 +163,32 @@ pip install --quiet --upgrade pip
 info "Installing PyObjC (this may take a minute)..."
 pip install --quiet pyobjc-framework-Cocoa pyobjc-framework-Quartz
 
-# Install mlx-whisper for transcription (optimized for Apple Silicon GPU)
-info "Installing mlx-whisper (Apple Silicon optimized)..."
-pip install --quiet mlx-whisper
+# Install parakeet-mlx for transcription (NVIDIA Parakeet on Apple Silicon GPU)
+info "Installing parakeet-mlx (Apple Silicon optimized)..."
+pip install --quiet parakeet-mlx
 
 # Install sounddevice for audio recording (uses CoreAudio natively)
 info "Installing audio dependencies..."
-pip install --quiet sounddevice soundfile numpy
+pip install --quiet sounddevice soundfile numpy scipy
 
 deactivate
 
 log "Python environment ready"
 
 # =============================================================================
-# Step 6: Install whisper-push script
+# Step 6: Install sound effects
 # =============================================================================
 
 echo ""
-info "Installing whisper-push..."
+info "Installing sound effects..."
 
-# Copy the main Python script
-if [[ -f "$PROJECT_ROOT/whisper-push-macos.py" ]]; then
-    cp "$PROJECT_ROOT/whisper-push-macos.py" "$SUPPORT_DIR/"
-else
-    error "whisper-push-macos.py not found in $PROJECT_ROOT"
-fi
-
-# Copy sounds
+# Copy sounds (start/stop feedback)
 if [[ -d "$PROJECT_ROOT/sounds" ]]; then
     cp -r "$PROJECT_ROOT/sounds" "$SUPPORT_DIR/"
+    log "Sounds installed"
+else
+    warn "sounds/ not found in $PROJECT_ROOT, sound feedback disabled"
 fi
-
-# Create launcher script that uses the venv
-cat > "$SUPPORT_DIR/whisper-push" << LAUNCHER
-#!/bin/bash
-source "$VENV_DIR/bin/activate"
-exec python3 "$SUPPORT_DIR/whisper-push-macos.py" "\$@"
-LAUNCHER
-chmod +x "$SUPPORT_DIR/whisper-push"
-
-log "whisper-push installed"
 
 # =============================================================================
 # Step 7: Create Spotlight-visible app in /Applications
@@ -220,37 +206,19 @@ rm -rf "$APP_PATH" 2>/dev/null || true
 mkdir -p "$APP_PATH/Contents/MacOS"
 mkdir -p "$APP_PATH/Contents/Resources"
 
-# Create the launcher script that uses Terminal (for Accessibility permissions)
-cat > "$APP_PATH/Contents/MacOS/Whisper Push" << 'LAUNCHER'
+# Create the launcher script (runs Python directly as a GUI app)
+cat > "$APP_PATH/Contents/MacOS/Whisper Push" << LAUNCHER
 #!/bin/bash
-# Check if daemon already running
-if pgrep -f 'hotkey-daemon.py' > /dev/null 2>&1; then
+# Check if daemon already running (match python process only, not shell scripts)
+if pgrep -xf '.*[Pp]ython.* hotkey-daemon.py' > /dev/null 2>&1; then
     exit 0
 fi
 
-# Check if Terminal is already running
-TERMINAL_WAS_RUNNING=$(pgrep -x "Terminal" > /dev/null && echo "yes" || echo "no")
-
-# Run daemon via Terminal (inherits Terminal's Accessibility permissions)
-osascript << 'APPLESCRIPT'
-tell application "Terminal"
-    activate
-    do script "'__VENV_PYTHON__' '__HOTKEY_SCRIPT__' > /dev/null 2>&1 & disown && exit"
-end tell
-APPLESCRIPT
-
-# Wait for daemon to start
-sleep 1.5
-
-# If Terminal wasn't running before, quit it
-if [ "$TERMINAL_WAS_RUNNING" = "no" ]; then
-    osascript -e 'tell application "Terminal" to quit' &
-fi
+export PYTHONUNBUFFERED=1
+# The daemon owns daemon.log (rotating). Native stdout/stderr (uncaught
+# exceptions, Metal/native crashes) go to a separate, small crash sink.
+exec "${VENV_DIR}/bin/python3" -u "${HOTKEY_SCRIPT}" >> "${SUPPORT_DIR}/daemon-stderr.log" 2>&1
 LAUNCHER
-
-# Replace placeholders with actual paths
-sed -i '' "s|__VENV_PYTHON__|${VENV_DIR}/bin/python3|g" "$APP_PATH/Contents/MacOS/Whisper Push"
-sed -i '' "s|__HOTKEY_SCRIPT__|${HOTKEY_SCRIPT}|g" "$APP_PATH/Contents/MacOS/Whisper Push"
 
 chmod +x "$APP_PATH/Contents/MacOS/Whisper Push"
 
@@ -270,6 +238,8 @@ cat > "$APP_PATH/Contents/Info.plist" << 'PLIST'
     <string>Whisper Push</string>
     <key>CFBundleVersion</key>
     <string>1.0.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
@@ -277,6 +247,14 @@ cat > "$APP_PATH/Contents/Info.plist" << 'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Copy app icon
+if [[ -f "$SCRIPT_DIR/whisper-push.icns" ]]; then
+    cp "$SCRIPT_DIR/whisper-push.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
+    log "App icon installed"
+else
+    warn "whisper-push.icns not found, app will use default icon"
+fi
 
 # Force Spotlight to index the app
 touch "$APP_PATH"
@@ -352,9 +330,9 @@ cat > "$LAUNCH_AGENTS_DIR/$PLIST_NAME" << PLIST
         <false/>
     </dict>
     <key>StandardOutPath</key>
-    <string>${SUPPORT_DIR}/daemon.log</string>
+    <string>${SUPPORT_DIR}/daemon-stderr.log</string>
     <key>StandardErrorPath</key>
-    <string>${SUPPORT_DIR}/daemon.log</string>
+    <string>${SUPPORT_DIR}/daemon-stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONUNBUFFERED</key>
@@ -378,7 +356,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     info "Creating default configuration..."
     cat > "$CONFIG_FILE" << 'CONFIG'
 # Whisper Push Configuration
-# Uses mlx-whisper (optimized for Apple Silicon GPU)
+# Uses parakeet-mlx (NVIDIA Parakeet, optimized for Apple Silicon GPU)
 
 # Global hotkey (toggle or hold)
 # Format: modifier+modifier+key
@@ -392,18 +370,30 @@ hotkey = "ctrl"
 # hotkey = "rctrl"  # right control recommended to avoid conflicts
 hotkey_mode = "hold"
 
-# Language: "auto" for auto-detection, or ISO code ("fr", "en", "de", ...)
+# Language: Parakeet v3 auto-detects the language automatically.
+# It covers 25 European languages: bg, hr, cs, da, nl, en, et, fi, fr, de,
+# el, hu, it, lv, lt, mt, pl, pt, ro, sk, sl, es, sv, ru, uk
 language = "auto"
 
-# Whisper model: tiny, base, small, medium, large-v3, large-v3-turbo
-# Model stays loaded in RAM for instant transcription
-model = "large-v3-turbo"
+# Model (stays loaded in RAM for instant transcription):
+#   parakeet-tdt-0.6b-v3  - multilingual (25 EU langs), fastest, recommended
+model = "parakeet-tdt-0.6b-v3"
+
+# Free the model from memory (~1.3GB) after N minutes of inactivity.
+# 0 = always resident (instant). If set, the model reloads while you record,
+# so the only cost is a slightly longer first transcription after a long pause.
+idle_unload_minutes = 0
 
 # Notifications on start/stop
 notifications = true
 
 # Sound feedback on start/stop
 sound_feedback = true
+
+# Audio device selection: "auto" or exact device name (e.g. "MacBook Pro Microphone")
+# Use the menu bar dropdown to pick devices interactively
+input_device = "auto"
+output_device = "auto"
 CONFIG
     log "Configuration created"
 else
@@ -487,5 +477,5 @@ echo ""
 
 # First run warning
 if [[ ! -d "$HOME/.cache/huggingface" ]] || [[ -z "$(ls -A "$HOME/.cache/huggingface" 2>/dev/null)" ]]; then
-    warn "First use will download the Whisper model (~1.5GB)."
+    warn "First use will download the Parakeet model (~600MB)."
 fi
