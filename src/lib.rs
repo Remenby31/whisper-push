@@ -1,0 +1,9 @@
+pub mod audio;
+pub mod config;
+pub mod hotkey;
+pub mod notify;
+pub mod paste;
+pub mod permissions;
+pub mod state;
+pub mod transcribe;
+pub mod tray;
