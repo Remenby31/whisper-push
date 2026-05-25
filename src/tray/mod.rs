@@ -130,12 +130,38 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
 
     let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
+    // Permissions section
+    let perms = crate::permissions::check_all();
+    let mic_label = format!("{} Microphone — {}", perms.microphone.symbol(), perms.microphone.label());
+    let acc_label = format!("{} Accessibility — {}", perms.accessibility.symbol(), perms.accessibility.label());
+    let mic_perm_item = MenuItem::new(&mic_label, perms.microphone != crate::permissions::PermState::Granted, None);
+    let acc_perm_item = MenuItem::new(&acc_label, perms.accessibility != crate::permissions::PermState::Granted, None);
+    let perms_submenu = Submenu::new(
+        if perms.all_granted() { "Permissions ✓" } else { "⚠ Permissions" },
+        true,
+    );
+    perms_submenu.append(&mic_perm_item)?;
+    perms_submenu.append(&acc_perm_item)?;
+
+    let mic_perm_id = mic_perm_item.id().clone();
+    let acc_perm_id = acc_perm_item.id().clone();
+
     // Assemble menu
     let menu = Menu::new();
     menu.append(&status_item)?;
+    if !perms.all_granted() {
+        // Show permissions warning prominently at the top
+        let warn_item = MenuItem::new(
+            &format!("⚠ {} permission(s) missing", perms.missing_count()),
+            false,
+            None,
+        );
+        menu.append(&warn_item)?;
+    }
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&toggle_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&perms_submenu)?;
     menu.append(&hotkey_submenu)?;
     menu.append(&input_submenu)?;
     menu.append(&idle_submenu)?;
@@ -145,6 +171,11 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
     menu.append(&debug_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit_item)?;
+
+    // Prompt for missing permissions at startup
+    if !perms.all_granted() {
+        crate::permissions::prompt_missing(&perms);
+    }
 
     // Collect IDs for event matching
     let toggle_id = toggle_item.id().clone();
@@ -196,7 +227,8 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
         toggle_id, quit_id, notif_id, sound_id, debug_id,
         notifications_item, sound_item, debug_item,
         hotkey_ids, hotkey_items, input_ids, input_device_items,
-        input_submenu, idle_ids, idle_items, rx,
+        input_submenu, idle_ids, idle_items,
+        mic_perm_id, acc_perm_id, rx,
     }));
 
     #[cfg(target_os = "macos")]
@@ -290,10 +322,26 @@ struct EventLoopCtx {
     input_submenu: Submenu,
     idle_ids: Vec<(String, u32)>,
     idle_items: Vec<(CheckMenuItem, u32)>,
+    mic_perm_id: tray_icon::menu::MenuId,
+    acc_perm_id: tray_icon::menu::MenuId,
     rx: Receiver<Event>,
 }
 
 fn handle_event_ctx(ctx: &EventLoopCtx, event: Event) {
+    // Check if it's a permission menu click first
+    if let Event::MenuClicked(ref id) = event {
+        if id == &ctx.mic_perm_id.0 {
+            #[cfg(target_os = "macos")]
+            crate::permissions::open_settings("Privacy_Microphone");
+            return;
+        }
+        if id == &ctx.acc_perm_id.0 {
+            #[cfg(target_os = "macos")]
+            crate::permissions::open_settings("Privacy_Accessibility");
+            return;
+        }
+    }
+
     handle_event(
         event, &ctx.state, &ctx.config, &ctx.tray, &ctx.capture,
         &ctx.hold_pending, ctx.hold_delay,

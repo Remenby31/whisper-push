@@ -157,9 +157,7 @@ mod app {
 
         tracing::info!("Starting whisper-push daemon");
 
-        // Check permissions on macOS
-        #[cfg(target_os = "macos")]
-        crate::permissions::check_and_prompt();
+        // Permissions are now checked in the tray menu setup
 
         // Init state machine
         let (tx, rx) = crossbeam_channel::unbounded();
