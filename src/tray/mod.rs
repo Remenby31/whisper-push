@@ -153,15 +153,15 @@ impl App {
         // Backend submenu (Whisper local vs Voxtral API)
         let backend_submenu = Submenu::new("Transcription Engine", true);
         let backend_parakeet = CheckMenuItem::new(
-            "\u{26a1} Parakeet TDT 0.6B (fastest \u{2014} ~27ms, 600MB)",
+            "Parakeet TDT 0.6B (fastest, 600MB)",
             cfg!(feature = "parakeet"), cfg.backend == "parakeet", None,
         );
         let backend_voxtral_local = CheckMenuItem::new(
-            "Voxtral Mini 4B (streaming \u{2014} ~400ms, 2.3GB)",
+            "Voxtral Mini 4B (streaming, 2.3GB)",
             cfg!(feature = "voxtral"), cfg.backend == "voxtral-local", None,
         );
         let backend_whisper = CheckMenuItem::new(
-            "Whisper large-v3-turbo (99 langs \u{2014} ~1.2s, 547MB)",
+            "Whisper large-v3-turbo (99 langs, 547MB)",
             true, cfg.backend == "whisper", None,
         );
         let _ = backend_submenu.append(&backend_parakeet);
@@ -187,8 +187,9 @@ impl App {
         let _ = perms_submenu.append(&mic_perm_item);
         let _ = perms_submenu.append(&acc_perm_item);
 
-        // Assemble
+        // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
+
         let _ = menu.append(&status_item);
         let warn_item = if !perms.all_granted() {
             let w = MenuItem::new(
@@ -202,16 +203,26 @@ impl App {
         };
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&toggle_item);
+
+        // Permissions (only show if something is missing)
+        if !perms.all_granted() {
+            let _ = menu.append(&PredefinedMenuItem::separator());
+            let _ = menu.append(&mic_perm_item);
+            let _ = menu.append(&acc_perm_item);
+        }
+
         let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&perms_submenu);
-        let _ = menu.append(&hotkey_submenu);
-        let _ = menu.append(&input_submenu);
-        let _ = menu.append(&idle_submenu);
-        let _ = menu.append(&backend_submenu);
+
+        // Engine selector
+        let _ = menu.append(&backend_parakeet);
+        let _ = menu.append(&backend_voxtral_local);
+        let _ = menu.append(&backend_whisper);
+
         let _ = menu.append(&PredefinedMenuItem::separator());
+
         let _ = menu.append(&notifications_item);
         let _ = menu.append(&sound_item);
-        let _ = menu.append(&debug_item);
+
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
 
@@ -532,12 +543,11 @@ impl ApplicationHandler<UserEvent> for App {
     ) {}
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
-        // Poll every 100ms via about_to_wait(). We can't use EventLoopProxy
-        // because wake-ups cause macOS Tahoe to close tray menus (Apple bug).
-        // 100ms is fast enough for hotkey response, slow enough to not lag menus.
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(100),
-        ));
+        // Pure Wait — absolutely NO periodic wake-ups.
+        // Any wake-up (even WaitUntil) causes macOS to close the tray menu.
+        // All hotkey/transcription logic runs in background threads.
+        // Menu events are handled in about_to_wait (called after menu closes).
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
         if cause == winit::event::StartCause::Init {
             // Load model SYNCHRONOUSLY before creating the tray,
@@ -567,16 +577,23 @@ impl ApplicationHandler<UserEvent> for App {
                 CFRunLoopWakeUp(&rl);
             }
 
-            // Start hotkey listener
-            let _ = crate::hotkey::start_listener(
-                &self.state.config.hotkey,
-                &self.state.config.hotkey_mode,
-                self.state.tx.clone(),
-            );
+            // Start hotkey listener + autonomous pipeline thread.
+            // The pipeline runs entirely in background threads — it never
+            // touches the winit event loop, so the tray menu stays open.
+            let hotkey_cfg = self.state.config.hotkey.clone();
+            let hotkey_mode = self.state.config.hotkey_mode.clone();
+            let pipeline_cfg = self.config.clone();
+            let (htx, hrx) = crossbeam_channel::unbounded();
+            let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, htx);
 
-            if self.config.lock().unwrap().notifications {
-                crate::notify::send("Whisper Push", "Ready! Hold Control to dictate.");
-            }
+            // Pipeline thread: hotkey events → capture → transcribe → paste
+            std::thread::spawn(move || {
+                pipeline_loop(hrx, pipeline_cfg);
+            });
+
+            // No startup notification — NSUserNotificationCenter delivery
+            // can disrupt the macOS run loop and close the tray menu.
+            info!("Ready! Hold Control to dictate.");
         }
 
         // Events arrive via user_event() from the EventLoopProxy forwarder.
@@ -628,6 +645,151 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
     event_loop.run_app(&mut app)?;
 
     Ok(())
+}
+
+/// Autonomous pipeline: listens for hotkey events, captures audio,
+/// transcribes, and pastes — all in background threads.
+/// Never touches the winit event loop or tray menu.
+fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let hold_pending = Arc::new(AtomicBool::new(false));
+    let recording = Arc::new(AtomicBool::new(false));
+    let capture: Arc<Mutex<Option<crate::audio::capture::AudioCapture>>> =
+        Arc::new(Mutex::new(None));
+
+    loop {
+        match rx.recv() {
+            Ok(Event::HotkeyDown) => {
+                if recording.load(Ordering::Relaxed) { continue; }
+                let cfg = config.lock().unwrap();
+                let device = cfg.input_device.clone();
+                let delay = cfg.hold_delay;
+                drop(cfg);
+
+                match crate::audio::capture::AudioCapture::start(&device) {
+                    Ok(cap) => {
+                        *capture.lock().unwrap() = Some(cap);
+                        hold_pending.store(true, Ordering::Relaxed);
+
+                        let pending = hold_pending.clone();
+                        let rec = recording.clone();
+                        let cfg2 = config.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_secs_f64(delay));
+                            if pending.load(Ordering::Relaxed) {
+                                pending.store(false, Ordering::Relaxed);
+                                rec.store(true, Ordering::Relaxed);
+                                if cfg2.lock().unwrap().sound_feedback {
+                                    crate::audio::playback::play_sound("start");
+                                }
+                                info!("Recording...");
+                            }
+                        });
+                    }
+                    Err(e) => warn!("Capture failed: {e}"),
+                }
+            }
+
+            Ok(Event::HotkeyUp) => {
+                if hold_pending.load(Ordering::Relaxed) {
+                    // Quick tap — discard
+                    hold_pending.store(false, Ordering::Relaxed);
+                    capture.lock().unwrap().take();
+                    continue;
+                }
+                if !recording.load(Ordering::Relaxed) { continue; }
+                recording.store(false, Ordering::Relaxed);
+
+                let cfg = config.lock().unwrap().clone();
+                if cfg.sound_feedback {
+                    crate::audio::playback::play_sound("stop");
+                }
+
+                let audio = capture.lock().unwrap().take()
+                    .map(|c| c.stop())
+                    .unwrap_or_default();
+
+                if audio.len() < 4800 {
+                    info!("Too short, skipping");
+                    continue;
+                }
+
+                info!("Processing {:.1}s of audio...", audio.len() as f32 / 16000.0);
+
+                let backend = match cfg.backend.as_str() {
+                    "parakeet" => crate::transcribe::Backend::Parakeet,
+                    "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
+                    _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
+                };
+
+                match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
+                    Ok(text) if !text.is_empty() => {
+                        info!("Pasting: '{}'", if text.len() > 80 { &text[..80] } else { &text });
+                        if let Err(e) = crate::paste::paste_text(&text) {
+                            tracing::error!("Paste failed: {e}");
+                        }
+                        if cfg.notifications {
+                            let preview = if text.len() > 50 {
+                                format!("{}...", &text[..50])
+                            } else { text };
+                            crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
+                        }
+                    }
+                    Ok(_) => info!("No speech detected"),
+                    Err(e) => tracing::error!("Transcription: {e}"),
+                }
+            }
+
+            Ok(Event::HotkeyToggle) => {
+                if !recording.load(Ordering::Relaxed) {
+                    // Start recording
+                    let device = config.lock().unwrap().input_device.clone();
+                    match crate::audio::capture::AudioCapture::start(&device) {
+                        Ok(cap) => {
+                            *capture.lock().unwrap() = Some(cap);
+                            recording.store(true, Ordering::Relaxed);
+                            if config.lock().unwrap().sound_feedback {
+                                crate::audio::playback::play_sound("start");
+                            }
+                            info!("Recording (toggle)...");
+                        }
+                        Err(e) => warn!("Capture failed: {e}"),
+                    }
+                } else {
+                    // Stop and transcribe (same as HotkeyUp)
+                    recording.store(false, Ordering::Relaxed);
+                    let cfg = config.lock().unwrap().clone();
+                    if cfg.sound_feedback {
+                        crate::audio::playback::play_sound("stop");
+                    }
+                    let audio = capture.lock().unwrap().take()
+                        .map(|c| c.stop())
+                        .unwrap_or_default();
+                    if audio.len() < 4800 { continue; }
+
+                    let backend = match cfg.backend.as_str() {
+                        "parakeet" => crate::transcribe::Backend::Parakeet,
+                        "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
+                        _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
+                    };
+                    match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
+                        Ok(text) if !text.is_empty() => {
+                            let _ = crate::paste::paste_text(&text);
+                            if cfg.notifications {
+                                crate::notify::send("Whisper Push", &format!("Typed: {}", &text));
+                            }
+                        }
+                        Ok(_) => info!("No speech"),
+                        Err(e) => tracing::error!("Transcription: {e}"),
+                    }
+                }
+            }
+
+            Ok(_) => {} // Ignore other events
+            Err(_) => break,
+        }
+    }
 }
 
 fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
