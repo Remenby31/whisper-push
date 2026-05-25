@@ -521,10 +521,10 @@ impl ApplicationHandler<UserEvent> for App {
     ) {}
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
-        // Always schedule a wake-up so we poll our channel regularly
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(50),
-        ));
+        // Wait for events — don't poll. Events arrive via EventLoopProxy
+        // from the crossbeam forwarding thread, menu handler, and tray handler.
+        // This prevents the menu from closing prematurely.
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
 
         if cause == winit::event::StartCause::Init {
             // Create tray icon AFTER the event loop is running (required on macOS)
@@ -559,10 +559,8 @@ impl ApplicationHandler<UserEvent> for App {
             );
         }
 
-        // Poll our event channel on every iteration
-        while let Ok(event) = self.rx.try_recv() {
-            self.process_event(event);
-        }
+        // Events arrive via user_event() from the EventLoopProxy forwarder.
+        // No polling needed — ControlFlow::Wait keeps the run loop clean.
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -593,11 +591,19 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
         let _ = proxy.send_event(UserEvent::Tray(event));
     }));
 
-    // Also forward our app events via proxy (so winit wakes up)
+    // Forward our crossbeam events → winit proxy (wakes the event loop)
     let proxy = event_loop.create_proxy();
-    let tx_forwarder = state.tx.clone();
-    // Replace the state's tx with one that also wakes winit
-    // We'll poll rx in new_events instead
+    let rx_clone = rx.clone();
+    std::thread::spawn(move || {
+        loop {
+            match rx_clone.recv() {
+                Ok(event) => {
+                    let _ = proxy.send_event(UserEvent::App(event));
+                }
+                Err(_) => break,
+            }
+        }
+    });
 
     let mut app = App::new(state, rx);
 
