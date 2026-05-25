@@ -113,7 +113,17 @@ impl AudioCapture {
         // Drop the stream to stop recording
         self.stream.take();
         let audio = std::mem::take(&mut *self.buffer.lock().unwrap());
-        info!("Captured {:.1}s of audio", audio.len() as f32 / TARGET_SAMPLE_RATE as f32);
+        let duration = audio.len() as f32 / TARGET_SAMPLE_RATE as f32;
+        let rms = if audio.is_empty() {
+            0.0
+        } else {
+            (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt()
+        };
+        let max = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        info!("Captured {:.1}s of audio ({} samples, RMS={:.6}, max={:.6})", duration, audio.len(), rms, max);
+        if rms < 0.001 {
+            warn!("Audio is silence — microphone may not be captured. Check permission in System Settings → Privacy → Microphone");
+        }
         audio
     }
 

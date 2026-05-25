@@ -10,6 +10,7 @@ use tray_icon::menu::{
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use tracing::{info, warn};
 
+
 const ICON_IDLE: &[u8] = include_bytes!("../../resources/icons/icon-idle.png");
 const ICON_RECORDING: &[u8] = include_bytes!("../../resources/icons/icon-recording.png");
 const ICON_PROCESSING: &[u8] = include_bytes!("../../resources/icons/icon-processing.png");
@@ -186,102 +187,123 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
     let hold_delay = state.config.hold_delay;
     let config = Arc::new(Mutex::new(state.config.clone()));
 
-    // ── Event loop (main thread) ────────────────────────────────
+    // ── Main thread event loop ────────────────────────────────
+    // Leak all the state into a 'static context for the CFRunLoopTimer callback.
+    // This is safe because the app runs until exit (the state is never freed).
+    let ctx = Box::leak(Box::new(EventLoopCtx {
+        state, config, tray, capture, hold_pending, hold_delay,
+        toggle_item, status_item,
+        toggle_id, quit_id, notif_id, sound_id, debug_id,
+        notifications_item, sound_item, debug_item,
+        hotkey_ids, hotkey_items, input_ids, input_device_items,
+        input_submenu, idle_ids, idle_items, rx,
+    }));
 
     #[cfg(target_os = "macos")]
     {
-        use objc2_app_kit::NSApplication;
-        use objc2_foundation::MainThreadMarker;
+        use core_foundation::runloop::{CFRunLoop, CFRunLoopTimer, kCFRunLoopCommonModes};
+        use core_foundation::date::CFAbsoluteTimeGetCurrent;
+        use std::ffi::c_void;
 
-        let poll_interval = std::time::Duration::from_millis(16);
-        let mtm = MainThreadMarker::new().expect("must be on main thread");
-        let app = NSApplication::sharedApplication(mtm);
-
-        loop {
-            while let Ok(event) = rx.try_recv() {
-                handle_event(
-                    event,
-                    &state,
-                    &config,
-                    &tray,
-                    &capture,
-                    &hold_pending,
-                    hold_delay,
-                    &toggle_item,
-                    &status_item,
-                    &toggle_id,
-                    &quit_id,
-                    &notif_id,
-                    &sound_id,
-                    &debug_id,
-                    &notifications_item,
-                    &sound_item,
-                    &debug_item,
-                    &hotkey_ids,
-                    &hotkey_items,
-                    &input_ids,
-                    &input_device_items,
-                    &input_submenu,
-                    &idle_ids,
-                    &idle_items,
-                );
-            }
-
-            unsafe {
-                let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(
-                    poll_interval.as_secs_f64(),
-                );
-                let evt = app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                    objc2_app_kit::NSEventMask::Any,
-                    Some(&until),
-                    objc2_foundation::NSDefaultRunLoopMode,
-                    true,
-                );
-                if let Some(ref e) = evt {
-                    app.sendEvent(e);
-                }
+        // C callback for CFRunLoopTimer — polls our event channel
+        extern "C" fn timer_callback(_timer: core_foundation::runloop::CFRunLoopTimerRef, info: *mut c_void) {
+            let ctx = unsafe { &*(info as *const EventLoopCtx) };
+            while let Ok(event) = ctx.rx.try_recv() {
+                handle_event_ctx(ctx, event);
             }
         }
+
+        // Create a CFRunLoopTimerContext pointing to our leaked ctx
+        let mut timer_ctx = core_foundation_sys::runloop::CFRunLoopTimerContext {
+            version: 0,
+            info: ctx as *mut EventLoopCtx as *mut c_void,
+            retain: None,
+            release: None,
+            copyDescription: None,
+        };
+
+        let timer = unsafe {
+            core_foundation::base::TCFType::wrap_under_create_rule(
+                core_foundation_sys::runloop::CFRunLoopTimerCreate(
+                    core_foundation::base::kCFAllocatorDefault,
+                    CFAbsoluteTimeGetCurrent(),
+                    0.016,  // 16ms interval
+                    0,
+                    0,
+                    timer_callback,
+                    &mut timer_ctx,
+                )
+            )
+        };
+
+        let run_loop = CFRunLoop::get_current();
+        unsafe { run_loop.add_timer(&timer, kCFRunLoopCommonModes) };
+
+        // Set activation policy (menu bar app, no dock icon)
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+        let mtm = MainThreadMarker::new().expect("must be on main thread");
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+
+        // NSApp.run() — blocks forever, handles tray menu popups, NSEvent monitors, etc.
+        unsafe { app.run() };
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         loop {
-            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                Ok(event) => {
-                    handle_event(
-                        event,
-                        &state,
-                        &config,
-                        &tray,
-                        &capture,
-                        &hold_pending,
-                        hold_delay,
-                        &toggle_item,
-                        &status_item,
-                        &toggle_id,
-                        &quit_id,
-                        &notif_id,
-                        &sound_id,
-                        &debug_id,
-                        &notifications_item,
-                        &sound_item,
-                        &debug_item,
-                        &hotkey_ids,
-                        &hotkey_items,
-                        &input_ids,
-                        &input_device_items,
-                        &input_submenu,
-                        &idle_ids,
-                        &idle_items,
-                    );
-                }
+            match ctx.rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(event) => handle_event_ctx(ctx, event),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                 Err(_) => break,
             }
         }
-        Ok(())
     }
+
+    Ok(())
+}
+
+/// All state needed by the event loop, packed into a single struct
+/// so we can leak it into a 'static CFRunLoopTimer callback.
+struct EventLoopCtx {
+    state: AppState,
+    config: Arc<Mutex<Config>>,
+    tray: TrayIcon,
+    capture: Arc<Mutex<Option<AudioCapture>>>,
+    hold_pending: Arc<std::sync::atomic::AtomicBool>,
+    hold_delay: f64,
+    toggle_item: MenuItem,
+    status_item: MenuItem,
+    toggle_id: tray_icon::menu::MenuId,
+    quit_id: tray_icon::menu::MenuId,
+    notif_id: tray_icon::menu::MenuId,
+    sound_id: tray_icon::menu::MenuId,
+    debug_id: tray_icon::menu::MenuId,
+    notifications_item: CheckMenuItem,
+    sound_item: CheckMenuItem,
+    debug_item: CheckMenuItem,
+    hotkey_ids: Vec<(String, String, String)>,
+    hotkey_items: Vec<(CheckMenuItem, String, String)>,
+    input_ids: Vec<(String, String)>,
+    input_device_items: Vec<(CheckMenuItem, String)>,
+    input_submenu: Submenu,
+    idle_ids: Vec<(String, u32)>,
+    idle_items: Vec<(CheckMenuItem, u32)>,
+    rx: Receiver<Event>,
+}
+
+fn handle_event_ctx(ctx: &EventLoopCtx, event: Event) {
+    handle_event(
+        event, &ctx.state, &ctx.config, &ctx.tray, &ctx.capture,
+        &ctx.hold_pending, ctx.hold_delay,
+        &ctx.toggle_item, &ctx.status_item,
+        &ctx.toggle_id, &ctx.quit_id, &ctx.notif_id, &ctx.sound_id, &ctx.debug_id,
+        &ctx.notifications_item, &ctx.sound_item, &ctx.debug_item,
+        &ctx.hotkey_ids, &ctx.hotkey_items,
+        &ctx.input_ids, &ctx.input_device_items, &ctx.input_submenu,
+        &ctx.idle_ids, &ctx.idle_items,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

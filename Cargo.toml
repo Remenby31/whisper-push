@@ -80,7 +80,8 @@ objc2-app-kit = { version = "0.3", features = [
 ] }
 block2 = "0.6"
 objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGRemoteOperation"] }
-core-foundation = "0.10"
+core-foundation = { version = "0.10", features = ["mac_os_10_7_support"] }
+core-foundation-sys = "0.8"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

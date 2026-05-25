@@ -2,6 +2,8 @@
 
 #[cfg(target_os = "macos")]
 pub fn check_and_prompt() {
+    check_microphone();
+
     if !is_accessibility_trusted() {
         tracing::warn!("Accessibility permission not granted — requesting...");
         request_accessibility();
@@ -9,8 +11,45 @@ pub fn check_and_prompt() {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn check_and_prompt() {
-    // No special permissions needed on Linux/Windows
+pub fn check_and_prompt() {}
+
+#[cfg(target_os = "macos")]
+fn check_microphone() {
+    use objc2::runtime::AnyClass;
+    use objc2::msg_send;
+    use objc2_foundation::NSString;
+
+    unsafe {
+        let cls = AnyClass::get(c"AVCaptureDevice").expect("AVCaptureDevice not found");
+        let media_type = NSString::from_str("soun");
+        let status: isize = msg_send![cls, authorizationStatusForMediaType: &*media_type];
+
+        match status {
+            3 => tracing::info!("Microphone: authorized"),
+            0 => {
+                tracing::info!("Microphone: not yet requested — opening Settings");
+                crate::notify::send(
+                    "Whisper Push",
+                    "Please grant Microphone access in System Settings.",
+                );
+                open_settings("Privacy_Microphone");
+            }
+            _ => {
+                tracing::warn!("Microphone: denied. Open System Settings → Privacy → Microphone");
+                crate::notify::send(
+                    "Whisper Push",
+                    "Microphone denied. Enable in System Settings → Privacy → Microphone.",
+                );
+                open_settings("Privacy_Microphone");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_settings(pane: &str) {
+    let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
+    let _ = std::process::Command::new("open").arg(&url).spawn();
 }
 
 #[cfg(target_os = "macos")]
