@@ -152,16 +152,23 @@ impl App {
 
         // Backend submenu (Whisper local vs Voxtral API)
         let backend_submenu = Submenu::new("Transcription Engine", true);
+        let models = crate::model_manager::list_models();
+        let parakeet_status = models.iter().find(|m| m.backend == "parakeet").map(|m| m.is_downloaded).unwrap_or(false);
+        let voxtral_status = models.iter().find(|m| m.backend == "voxtral-local").map(|m| m.is_downloaded).unwrap_or(false);
+        let whisper_status = models.iter().find(|m| m.backend == "whisper").map(|m| m.is_downloaded).unwrap_or(false);
+
+        let dl_icon = |downloaded: bool| if downloaded { "\u{2713}" } else { "\u{2913}" }; // ✓ or ⤓
+
         let backend_parakeet = CheckMenuItem::new(
-            "Parakeet TDT v3 (600 MB)",
+            &format!("{} Parakeet TDT v3 (600 MB)", dl_icon(parakeet_status)),
             true, cfg.backend == "parakeet", None,
         );
         let backend_voxtral_local = CheckMenuItem::new(
-            "Voxtral Realtime 2602 (2.3 GB, streaming)",
+            &format!("{} Voxtral Realtime 2602 (2.3 GB, streaming)", dl_icon(voxtral_status)),
             true, cfg.backend == "voxtral-local", None,
         );
         let backend_whisper = CheckMenuItem::new(
-            "Whisper large-v3-turbo (550 MB)",
+            &format!("{} Whisper large-v3-turbo (550 MB)", dl_icon(whisper_status)),
             true, cfg.backend == "whisper", None,
         );
         let _ = backend_submenu.append(&backend_parakeet);
