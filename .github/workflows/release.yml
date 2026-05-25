@@ -14,8 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
-        run: cargo build --release
+      - name: Build release (Metal GPU)
+        run: cargo build --release --features metal
       - name: Create app bundle
         run: make bundle
       - name: Upload artifact

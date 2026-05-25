@@ -10,6 +10,7 @@ keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
 
 [features]
 default = []
+metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
 
