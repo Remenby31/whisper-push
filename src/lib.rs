@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod config;
 pub mod hotkey;
+pub mod hardware;
 pub mod notify;
 pub mod overlay;
 pub mod paste;

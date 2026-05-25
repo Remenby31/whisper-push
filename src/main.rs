@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod hotkey;
+mod hardware;
 mod notify;
 mod overlay;
 mod paste;
@@ -107,17 +108,21 @@ mod doctor {
 
     pub fn run() -> Result<()> {
         println!("whisper-push doctor");
-        println!("Platform:  {} {}", std::env::consts::OS, std::env::consts::ARCH);
 
-        // GPU backend
-        #[cfg(target_os = "macos")]
-        println!("GPU:       Metal (Apple Silicon)");
-        #[cfg(all(not(target_os = "macos"), feature = "cuda"))]
-        println!("GPU:       CUDA");
-        #[cfg(all(not(target_os = "macos"), feature = "vulkan"))]
-        println!("GPU:       Vulkan");
-        #[cfg(all(not(target_os = "macos"), not(feature = "cuda"), not(feature = "vulkan")))]
-        println!("GPU:       CPU only");
+        // Hardware detection
+        let hw = crate::hardware::detect();
+        println!("Platform:  {} {}", hw.os, hw.arch);
+        println!("GPU:       {}", hw.gpu.label());
+        println!("Recommend: {}", crate::hardware::recommend_backend(&hw));
+
+        // Compiled features
+        let mut features = Vec::new();
+        if cfg!(feature = "metal") { features.push("metal"); }
+        if cfg!(feature = "cuda") { features.push("cuda"); }
+        if cfg!(feature = "vulkan") { features.push("vulkan"); }
+        if cfg!(feature = "parakeet") { features.push("parakeet"); }
+        if cfg!(feature = "voxtral") { features.push("voxtral"); }
+        println!("Features:  {}", if features.is_empty() { "none".into() } else { features.join(", ") });
 
         // Audio devices (with timeout — CoreAudio can hang without NSApp)
         println!("\nAudio devices:");
