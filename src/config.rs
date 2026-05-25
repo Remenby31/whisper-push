@@ -18,8 +18,6 @@ pub struct Config {
     pub model: String,
     /// Transcription backend: "parakeet", "whisper", or "voxtral-local"
     pub backend: String,
-    /// Free model from RAM after N minutes idle (0 = always resident)
-    pub idle_unload_minutes: u32,
     /// Show OS notifications
     pub notifications: bool,
     /// Play start/stop sounds
@@ -43,7 +41,6 @@ impl Default for Config {
             language: "auto".into(),
             model: "ggml-large-v3-turbo-q5_0.bin".into(),
             backend: "whisper".into(),
-            idle_unload_minutes: 0,
             notifications: true,
             sound_feedback: true,
             input_device: "auto".into(),

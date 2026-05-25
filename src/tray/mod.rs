@@ -31,9 +31,6 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Toggle \u{2014} \u{2303}\u{21e7}Space", "ctrl+shift+space", "toggle"),
 ];
 
-const IDLE_PRESETS: &[(&str, u32)] = &[
-    ("Never", 0), ("After 5 min", 5), ("After 15 min", 15), ("After 30 min", 30),
-];
 
 /// User events forwarded into winit's event loop.
 #[derive(Debug)]
@@ -72,8 +69,6 @@ struct MenuItems {
     input_ids: Vec<(String, String)>,
     input_device_items: Vec<(CheckMenuItem, String)>,
     input_submenu: Submenu,
-    idle_ids: Vec<(String, u32)>,
-    idle_items: Vec<(CheckMenuItem, u32)>,
     mic_perm_item: MenuItem,
     acc_perm_item: MenuItem,
     perms_submenu: Submenu,
@@ -140,15 +135,6 @@ impl App {
             }
         }
 
-        // Idle unload submenu
-        let idle_submenu = Submenu::new("Idle Unload", true);
-        let mut idle_items = Vec::new();
-        for (label, minutes) in IDLE_PRESETS {
-            let checked = *minutes == cfg.idle_unload_minutes;
-            let item = CheckMenuItem::new(*label, true, checked, None);
-            let _ = idle_submenu.append(&item);
-            idle_items.push((item, *minutes));
-        }
 
         // Backend submenu (Whisper local vs Voxtral API)
         let backend_submenu = Submenu::new("Transcription Engine", true);
@@ -236,7 +222,6 @@ impl App {
         // Collect IDs
         let hotkey_ids: Vec<_> = hotkey_items.iter().map(|(i, h, m)| (i.id().0.clone(), h.clone(), m.clone())).collect();
         let input_ids: Vec<_> = input_device_items.iter().map(|(i, n)| (i.id().0.clone(), n.clone())).collect();
-        let idle_ids: Vec<_> = idle_items.iter().map(|(i, m)| (i.id().0.clone(), *m)).collect();
 
         self.menu_items = Some(MenuItems {
             toggle_id: toggle_item.id().0.clone(),
@@ -256,7 +241,6 @@ impl App {
             notifications_item, sound_item, debug_item,
             hotkey_ids, hotkey_items,
             input_ids, input_device_items, input_submenu,
-            idle_ids, idle_items,
         });
 
         // Build tray
@@ -334,13 +318,6 @@ impl App {
                         return;
                     }
                 }
-                for (item_id, minutes) in &mi.idle_ids {
-                    if id == item_id {
-                        let mut c = self.config.lock().unwrap(); c.idle_unload_minutes = *minutes; let _ = c.save();
-                        for (item, m) in &mi.idle_items { item.set_checked(*m == *minutes); }
-                        return;
-                    }
-                }
                 // Backend selection
                 for (item, backend_value) in &mi.backend_items {
                     if id == &item.id().0 {
@@ -353,18 +330,29 @@ impl App {
                             bi.set_checked(bi.id() == item.id());
                         }
 
-                        // Auto-download model if needed, then notify
+                        // Auto-download + load model into RAM immediately
                         let bv = backend_value.clone();
                         std::thread::spawn(move || {
                             info!("Switching to {bv}...");
+                            crate::notify::send("Whisper Push", &format!("Loading {bv}..."));
                             match crate::model_manager::ensure_model(&bv) {
                                 Ok(()) => {
-                                    crate::notify::send("Whisper Push",
-                                        &format!("Switched to {bv}. Restart to apply."));
+                                    // Load the new model into RAM
+                                    let load_result = match bv.as_str() {
+                                        "parakeet" => crate::transcribe::parakeet::load_model(),
+                                        "voxtral-local" => {
+                                            let dir = crate::config::data_dir().join("models").join("voxtral");
+                                            crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
+                                        }
+                                        _ => crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin"),
+                                    };
+                                    match load_result {
+                                        Ok(()) => crate::notify::send("Whisper Push", &format!("{bv} ready!")),
+                                        Err(e) => crate::notify::send("Whisper Push", &format!("Failed to load {bv}: {e}")),
+                                    }
                                 }
                                 Err(e) => {
-                                    crate::notify::send("Whisper Push",
-                                        &format!("Failed to set up {bv}: {e}"));
+                                    crate::notify::send("Whisper Push", &format!("Failed: {e}"));
                                 }
                             }
                         });
