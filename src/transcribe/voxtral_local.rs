@@ -71,6 +71,10 @@ mod inner {
         Ok(())
     }
 
+    pub fn is_loaded() -> bool {
+        VOXTRAL.lock().unwrap().is_some()
+    }
+
     pub fn unload_model() {
         *VOXTRAL.lock().unwrap() = None;
         info!("Voxtral model unloaded");
@@ -118,12 +122,14 @@ mod inner {
 
 // Public API: delegates to inner when feature is enabled
 #[cfg(feature = "voxtral")]
-pub use inner::{load_model, unload_model, transcribe};
+pub use inner::{load_model, unload_model, is_loaded, transcribe};
 
 #[cfg(not(feature = "voxtral"))]
 pub fn load_model(_model_dir: &str) -> anyhow::Result<()> {
     anyhow::bail!("Voxtral not compiled. Build with --features voxtral")
 }
+#[cfg(not(feature = "voxtral"))]
+pub fn is_loaded() -> bool { false }
 #[cfg(not(feature = "voxtral"))]
 pub fn unload_model() {}
 #[cfg(not(feature = "voxtral"))]

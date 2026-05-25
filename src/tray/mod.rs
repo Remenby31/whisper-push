@@ -630,37 +630,30 @@ impl ApplicationHandler<UserEvent> for App {
             // so the menu starts in "Ready" state and never needs updating.
             // This avoids modifying menu items after creation (which closes
             // the menu on macOS Tahoe).
-            // Load the correct model based on config backend
+            // Load Whisper on main thread (always needed as fallback).
+            // Voxtral/Parakeet are loaded LAZILY in the transcription thread
+            // because WGPU/Metal doesn't support cross-thread model usage.
             let backend = self.state.config.backend.clone();
-            info!("Loading backend: {backend}...");
-            let load_result = match backend.as_str() {
-                "parakeet" => crate::transcribe::parakeet::load_model(),
-                "voxtral-local" => {
-                    let dir = crate::config::data_dir().join("models").join("voxtral");
-                    crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
-                }
-                _ => crate::transcribe::load_model(&self.state.config.model),
-            };
-            match load_result {
-                Ok(()) => {
-                    self.state.set(State::Idle);
-                    info!("{backend} model loaded");
-                }
-                Err(e) => {
-                    tracing::error!("{backend} model load failed: {e}");
-                    crate::notify::send("Whisper Push", &format!("Model failed: {e}"));
-                    // Fallback to whisper
-                    if backend != "whisper" {
-                        info!("Falling back to Whisper...");
-                        if let Ok(()) = crate::transcribe::load_model(&self.state.config.model) {
-                            self.state.set(State::Idle);
-                            let mut c = self.config.lock().unwrap();
-                            c.backend = "whisper".into();
-                            let _ = c.save();
-                        }
+            info!("Config backend: {backend}");
+            if backend != "voxtral-local" {
+                // Non-Voxtral backends can load on main thread
+                let load_result = match backend.as_str() {
+                    "parakeet" => crate::transcribe::parakeet::load_model(),
+                    _ => crate::transcribe::load_model(&self.state.config.model),
+                };
+                match load_result {
+                    Ok(()) => info!("{backend} model loaded"),
+                    Err(e) => {
+                        tracing::error!("{backend} load failed: {e}, falling back to whisper");
+                        let _ = crate::transcribe::load_model(&self.state.config.model);
                     }
                 }
+            } else {
+                // Voxtral: load Whisper as fallback, Voxtral loads lazy in pipeline thread
+                info!("Voxtral selected — will load in transcription thread (WGPU requires same-thread)");
+                let _ = crate::transcribe::load_model(&self.state.config.model);
             }
+            self.state.set(State::Idle);
 
             // Create tray icon AFTER model is loaded (menu is born in "Ready" state)
             self.create_tray();

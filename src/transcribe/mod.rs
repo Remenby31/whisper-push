@@ -77,7 +77,19 @@ pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend)
     match backend {
         Backend::Parakeet => parakeet::transcribe(audio),
         Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
-        Backend::VoxtralLocal => voxtral_local::transcribe(audio),
+        Backend::VoxtralLocal => {
+            // Voxtral must be loaded on the SAME thread that transcribes
+            // (WGPU/Metal doesn't support cross-thread model usage)
+            #[cfg(feature = "voxtral")]
+            {
+                if !voxtral_local::is_loaded() {
+                    info!("Loading Voxtral Q4 on transcription thread...");
+                    let dir = crate::config::data_dir().join("models").join("voxtral");
+                    voxtral_local::load_model(dir.to_str().unwrap_or(""))?;
+                }
+            }
+            voxtral_local::transcribe(audio)
+        }
     }
 }
 
