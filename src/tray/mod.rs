@@ -566,15 +566,35 @@ impl ApplicationHandler<UserEvent> for App {
             // so the menu starts in "Ready" state and never needs updating.
             // This avoids modifying menu items after creation (which closes
             // the menu on macOS Tahoe).
-            let model_name = self.state.config.model.clone();
-            match crate::transcribe::load_model(&model_name) {
+            // Load the correct model based on config backend
+            let backend = self.state.config.backend.clone();
+            info!("Loading backend: {backend}...");
+            let load_result = match backend.as_str() {
+                "parakeet" => crate::transcribe::parakeet::load_model(),
+                "voxtral-local" => {
+                    let dir = crate::config::data_dir().join("models").join("voxtral");
+                    crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
+                }
+                _ => crate::transcribe::load_model(&self.state.config.model),
+            };
+            match load_result {
                 Ok(()) => {
                     self.state.set(State::Idle);
-                    info!("Model loaded");
+                    info!("{backend} model loaded");
                 }
                 Err(e) => {
-                    tracing::error!("Model load failed: {e}");
+                    tracing::error!("{backend} model load failed: {e}");
                     crate::notify::send("Whisper Push", &format!("Model failed: {e}"));
+                    // Fallback to whisper
+                    if backend != "whisper" {
+                        info!("Falling back to Whisper...");
+                        if let Ok(()) = crate::transcribe::load_model(&self.state.config.model) {
+                            self.state.set(State::Idle);
+                            let mut c = self.config.lock().unwrap();
+                            c.backend = "whisper".into();
+                            let _ = c.save();
+                        }
+                    }
                 }
             }
 
@@ -727,7 +747,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     continue;
                 }
 
-                info!("Processing {:.1}s of audio...", audio.len() as f32 / 16000.0);
+                info!("Processing {:.1}s of audio with backend '{}'...", audio.len() as f32 / 16000.0, cfg.backend);
 
                 let backend = match cfg.backend.as_str() {
                     "parakeet" => crate::transcribe::Backend::Parakeet,
