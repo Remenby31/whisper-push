@@ -75,7 +75,7 @@ struct MenuItems {
     warn_item: Option<MenuItem>,
     mic_perm_id: String,
     acc_perm_id: String,
-    backend_items: Vec<(CheckMenuItem, String)>, // (item, config value)
+    backend_items: Vec<(MenuItem, String)>, // (item, config value)
 }
 
 impl App {
@@ -143,19 +143,23 @@ impl App {
         let voxtral_status = models.iter().find(|m| m.backend == "voxtral-local").map(|m| m.is_downloaded).unwrap_or(false);
         let whisper_status = models.iter().find(|m| m.backend == "whisper").map(|m| m.is_downloaded).unwrap_or(false);
 
-        let dl_icon = |downloaded: bool| if downloaded { "\u{2713}" } else { "\u{2913}" }; // ✓ or ⤓
+        let engine_label = |name: &str, backend_key: &str, downloaded: bool, current: &str| -> String {
+            let active = if backend_key == current { "\u{25CF} " } else { "    " }; // ● or spaces
+            let dl = if downloaded { "" } else { " \u{2913}" }; // ⤓ if not downloaded
+            format!("{active}{name}{dl}")
+        };
 
-        let backend_parakeet = CheckMenuItem::new(
-            &format!("{} Parakeet TDT v3 (600 MB)", dl_icon(parakeet_status)),
-            true, cfg.backend == "parakeet", None,
+        let backend_parakeet = MenuItem::new(
+            &engine_label("Parakeet TDT v3 (600 MB)", "parakeet", parakeet_status, &cfg.backend),
+            true, None,
         );
-        let backend_voxtral_local = CheckMenuItem::new(
-            &format!("{} Voxtral Realtime 2602 (2.3 GB, streaming)", dl_icon(voxtral_status)),
-            true, cfg.backend == "voxtral-local", None,
+        let backend_voxtral_local = MenuItem::new(
+            &engine_label("Voxtral Realtime 2602 (2.3 GB, streaming)", "voxtral-local", voxtral_status, &cfg.backend),
+            true, None,
         );
-        let backend_whisper = CheckMenuItem::new(
-            &format!("{} Whisper large-v3-turbo (550 MB)", dl_icon(whisper_status)),
-            true, cfg.backend == "whisper", None,
+        let backend_whisper = MenuItem::new(
+            &engine_label("Whisper large-v3-turbo (550 MB)", "whisper", whisper_status, &cfg.backend),
+            true, None,
         );
         let _ = backend_submenu.append(&backend_parakeet);
         let _ = backend_submenu.append(&backend_voxtral_local);
@@ -321,13 +325,20 @@ impl App {
                 // Backend selection
                 for (item, backend_value) in &mi.backend_items {
                     if id == &item.id().0 {
-                        // Save config and update checkmarks
+                        // Save config and update active indicator
                         let mut c = self.config.lock().unwrap();
                         c.backend = backend_value.clone();
                         let _ = c.save();
                         drop(c);
-                        for (bi, _) in &mi.backend_items {
-                            bi.set_checked(bi.id() == item.id());
+                        // Update ● indicator on all items
+                        for (bi, bv) in &mi.backend_items {
+                            let current_text = bi.text();
+                            let stripped = current_text.trim_start_matches('\u{25CF}').trim_start();
+                            if bv == backend_value {
+                                bi.set_text(&format!("\u{25CF} {stripped}"));
+                            } else {
+                                bi.set_text(&format!("    {stripped}"));
+                            }
                         }
 
                         // Auto-download + load model into RAM immediately
@@ -738,7 +749,10 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                         }
                     }
                     Ok(_) => info!("No speech detected"),
-                    Err(e) => tracing::error!("Transcription: {e}"),
+                    Err(e) => {
+                        tracing::error!("Transcription: {e}");
+                        crate::notify::send("Whisper Push", &format!("Error: {e}"));
+                    }
                 }
             }
 
@@ -782,7 +796,10 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                             }
                         }
                         Ok(_) => info!("No speech"),
-                        Err(e) => tracing::error!("Transcription: {e}"),
+                        Err(e) => {
+                        tracing::error!("Transcription: {e}");
+                        crate::notify::send("Whisper Push", &format!("Error: {e}"));
+                    }
                     }
                 }
             }
