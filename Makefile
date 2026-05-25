@@ -71,6 +71,19 @@ dmg: sign
 	fi
 	@echo "✓ DMG created at build/dist/Whisper-Push-macOS-arm64.dmg"
 
+# Notarize the DMG (requires Apple Developer account + App Store Connect API key)
+notarize: dmg
+	@echo "Notarizing..."
+	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
+		--keychain-profile "whisper-push" \
+		--wait
+	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
+	@echo "✓ DMG notarized and stapled"
+
+# Full release: build + sign + DMG + notarize
+release-macos: notarize
+	@echo "✓ Release ready at build/dist/Whisper-Push-macOS-arm64.dmg"
+
 # Build + sign + relaunch (dev workflow)
 deploy: sign
 	@if pgrep -f "whisper-push" > /dev/null 2>&1; then \
