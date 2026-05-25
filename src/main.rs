@@ -110,12 +110,21 @@ mod doctor {
         #[cfg(all(not(target_os = "macos"), not(feature = "cuda"), not(feature = "vulkan")))]
         println!("GPU:       CPU only");
 
-        // Audio devices
+        // Audio devices (with timeout — CoreAudio can hang without NSApp)
         println!("\nAudio devices:");
-        if let Ok(host) = crate::audio::list_devices() {
-            for (i, name) in host.iter().enumerate() {
-                println!("  [{i}] {name}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = crate::audio::list_devices();
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(devices)) => {
+                for (i, name) in devices.iter().enumerate() {
+                    println!("  [{i}] {name}");
+                }
             }
+            Ok(Err(e)) => println!("  Error: {e}"),
+            Err(_) => println!("  (timeout — run as app for full device list)"),
         }
 
         // Model
