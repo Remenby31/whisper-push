@@ -16,6 +16,10 @@ pub struct Config {
     pub language: String,
     /// Whisper model name (used for HuggingFace download)
     pub model: String,
+    /// Transcription backend: "whisper" (local) or "voxtral-api" (Mistral cloud)
+    pub backend: String,
+    /// Mistral API key (required for voxtral-api backend)
+    pub mistral_api_key: String,
     /// Free model from RAM after N minutes idle (0 = always resident)
     pub idle_unload_minutes: u32,
     /// Show OS notifications
@@ -38,6 +42,8 @@ impl Default for Config {
             hold_delay: 0.15,
             language: "auto".into(),
             model: "ggml-large-v3-turbo-q5_0.bin".into(),
+            backend: "whisper".into(),
+            mistral_api_key: String::new(),
             idle_unload_minutes: 0,
             notifications: true,
             sound_feedback: true,

@@ -1,7 +1,32 @@
+pub mod voxtral_api;
+
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing::{info, warn};
+
+/// Available transcription backends.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Backend {
+    /// Local whisper.cpp (Metal/CUDA/CPU)
+    WhisperLocal(String), // model filename
+    /// Mistral Voxtral API (cloud)
+    VoxtralAPI,
+}
+
+impl Backend {
+    pub fn label(&self) -> &str {
+        match self {
+            Backend::WhisperLocal(m) => {
+                if m.contains("large-v3-turbo") { "Whisper large-v3-turbo (local)" }
+                else if m.contains("small") { "Whisper small (local)" }
+                else if m.contains("base") { "Whisper base (local)" }
+                else { "Whisper (local)" }
+            }
+            Backend::VoxtralAPI => "Voxtral API (Mistral cloud)",
+        }
+    }
+}
 
 static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
 
@@ -43,8 +68,23 @@ pub fn is_loaded() -> bool {
     MODEL.lock().unwrap().is_some()
 }
 
-/// Transcribe a 16kHz mono f32 audio buffer to text.
+/// Transcribe audio using the active backend.
+pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend, api_key: Option<&str>) -> Result<String> {
+    match backend {
+        Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
+        Backend::VoxtralAPI => {
+            let key = api_key.ok_or_else(|| anyhow::anyhow!("Mistral API key required for Voxtral"))?;
+            voxtral_api::transcribe(audio, key, language)
+        }
+    }
+}
+
+/// Transcribe a 16kHz mono f32 audio buffer to text (whisper local).
 pub fn transcribe(audio: &[f32], language: &str) -> Result<String> {
+    transcribe_whisper(audio, language)
+}
+
+fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {
     let guard = MODEL.lock().unwrap();
     let ctx = guard
         .as_ref()

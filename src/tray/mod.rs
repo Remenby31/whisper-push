@@ -80,6 +80,10 @@ struct MenuItems {
     warn_item: Option<MenuItem>,
     mic_perm_id: String,
     acc_perm_id: String,
+    backend_whisper: CheckMenuItem,
+    backend_voxtral: CheckMenuItem,
+    backend_whisper_id: String,
+    backend_voxtral_id: String,
 }
 
 impl App {
@@ -138,6 +142,19 @@ impl App {
             idle_items.push((item, *minutes));
         }
 
+        // Backend submenu (Whisper local vs Voxtral API)
+        let backend_submenu = Submenu::new("Transcription Engine", true);
+        let backend_whisper = CheckMenuItem::new(
+            "Whisper large-v3-turbo (local, Metal GPU)",
+            true, cfg.backend == "whisper", None,
+        );
+        let backend_voxtral = CheckMenuItem::new(
+            "Voxtral API (Mistral cloud, $0.003/min)",
+            true, cfg.backend == "voxtral-api", None,
+        );
+        let _ = backend_submenu.append(&backend_whisper);
+        let _ = backend_submenu.append(&backend_voxtral);
+
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
@@ -177,6 +194,7 @@ impl App {
         let _ = menu.append(&hotkey_submenu);
         let _ = menu.append(&input_submenu);
         let _ = menu.append(&idle_submenu);
+        let _ = menu.append(&backend_submenu);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&notifications_item);
         let _ = menu.append(&sound_item);
@@ -198,6 +216,9 @@ impl App {
             mic_perm_id: mic_perm_item.id().0.clone(),
             acc_perm_id: acc_perm_item.id().0.clone(),
             mic_perm_item, acc_perm_item, perms_submenu, warn_item,
+            backend_whisper_id: backend_whisper.id().0.clone(),
+            backend_voxtral_id: backend_voxtral.id().0.clone(),
+            backend_whisper, backend_voxtral,
             status_item, toggle_item,
             notifications_item, sound_item, debug_item,
             hotkey_ids, hotkey_items,
@@ -286,6 +307,33 @@ impl App {
                         for (item, m) in &mi.idle_items { item.set_checked(*m == *minutes); }
                         return;
                     }
+                }
+                // Backend selection
+                if id == &mi.backend_whisper_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.backend = "whisper".into();
+                    let _ = c.save();
+                    mi.backend_whisper.set_checked(true);
+                    mi.backend_voxtral.set_checked(false);
+                    info!("Backend switched to Whisper (local)");
+                    return;
+                }
+                if id == &mi.backend_voxtral_id {
+                    let mut c = self.config.lock().unwrap();
+                    if c.mistral_api_key.is_empty() {
+                        crate::notify::send("Whisper Push", "Set mistral_api_key in config.toml first");
+                        // Open config file
+                        let path = crate::config::config_path();
+                        #[cfg(target_os = "macos")]
+                        { let _ = std::process::Command::new("open").arg(&path).spawn(); }
+                        return;
+                    }
+                    c.backend = "voxtral-api".into();
+                    let _ = c.save();
+                    mi.backend_whisper.set_checked(false);
+                    mi.backend_voxtral.set_checked(true);
+                    info!("Backend switched to Voxtral API");
+                    return;
                 }
             }
 
@@ -447,9 +495,15 @@ impl App {
         }
 
         let tx = self.state.tx.clone();
-        let lang = self.config.lock().unwrap().language.clone();
+        let cfg = self.config.lock().unwrap().clone();
+        let backend = if cfg.backend == "voxtral-api" {
+            crate::transcribe::Backend::VoxtralAPI
+        } else {
+            crate::transcribe::Backend::WhisperLocal(cfg.model.clone())
+        };
+        let api_key = if cfg.mistral_api_key.is_empty() { None } else { Some(cfg.mistral_api_key.clone()) };
         std::thread::spawn(move || {
-            match crate::transcribe::transcribe(&audio, &lang) {
+            match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend, api_key.as_deref()) {
                 Ok(text) if !text.is_empty() => { let _ = tx.send(Event::Transcribed(text)); }
                 Ok(_) => { let _ = tx.send(Event::StateChanged(State::Idle)); }
                 Err(e) => { tracing::error!("Transcription: {e}"); let _ = tx.send(Event::StateChanged(State::Idle)); }
