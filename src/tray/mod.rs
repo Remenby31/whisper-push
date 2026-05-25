@@ -101,8 +101,19 @@ impl App {
         let cfg = self.config.lock().unwrap().clone();
 
         // Build menu
-        let status_item = MenuItem::new("Whisper Push \u{2014} Loading...", false, None);
-        let toggle_item = MenuItem::new("Loading model...", false, None);
+        let is_ready = self.state.current() == State::Idle;
+        let disp = format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode);
+        let status_text = if is_ready {
+            format!("Whisper Push ({disp})")
+        } else {
+            "Whisper Push \u{2014} Loading...".into()
+        };
+        let status_item = MenuItem::new(&status_text, false, None);
+        let toggle_item = MenuItem::new(
+            if is_ready { "Start Recording" } else { "Loading model..." },
+            is_ready,
+            None,
+        );
 
         // Hotkey submenu
         let hotkey_submenu = Submenu::new("Hotkey", true);
@@ -167,8 +178,8 @@ impl App {
         let perms = crate::permissions::check_all();
         let mic_label = format!("{} Microphone \u{2014} {}", perms.microphone.symbol(), perms.microphone.label());
         let acc_label = format!("{} Accessibility \u{2014} {}", perms.accessibility.symbol(), perms.accessibility.label());
-        let mic_perm_item = MenuItem::new(&mic_label, perms.microphone != crate::permissions::PermState::Granted, None);
-        let acc_perm_item = MenuItem::new(&acc_label, perms.accessibility != crate::permissions::PermState::Granted, None);
+        let mic_perm_item = MenuItem::new(&mic_label, true, None);
+        let acc_perm_item = MenuItem::new(&acc_label, true, None);
         let perms_submenu = Submenu::new(
             if perms.all_granted() { "Permissions \u{2713}" } else { "\u{26a0} Permissions" },
             true,
@@ -521,13 +532,31 @@ impl ApplicationHandler<UserEvent> for App {
     ) {}
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
-        // Wait for events — don't poll. Events arrive via EventLoopProxy
-        // from the crossbeam forwarding thread, menu handler, and tray handler.
-        // This prevents the menu from closing prematurely.
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        // Poll every 100ms via about_to_wait(). We can't use EventLoopProxy
+        // because wake-ups cause macOS Tahoe to close tray menus (Apple bug).
+        // 100ms is fast enough for hotkey response, slow enough to not lag menus.
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(100),
+        ));
 
         if cause == winit::event::StartCause::Init {
-            // Create tray icon AFTER the event loop is running (required on macOS)
+            // Load model SYNCHRONOUSLY before creating the tray,
+            // so the menu starts in "Ready" state and never needs updating.
+            // This avoids modifying menu items after creation (which closes
+            // the menu on macOS Tahoe).
+            let model_name = self.state.config.model.clone();
+            match crate::transcribe::load_model(&model_name) {
+                Ok(()) => {
+                    self.state.set(State::Idle);
+                    info!("Model loaded");
+                }
+                Err(e) => {
+                    tracing::error!("Model load failed: {e}");
+                    crate::notify::send("Whisper Push", &format!("Model failed: {e}"));
+                }
+            }
+
+            // Create tray icon AFTER model is loaded (menu is born in "Ready" state)
             self.create_tray();
 
             // Wake the macOS run loop so the icon appears immediately
@@ -538,29 +567,35 @@ impl ApplicationHandler<UserEvent> for App {
                 CFRunLoopWakeUp(&rl);
             }
 
-            // Start model loading
-            let model_name = self.state.config.model.clone();
-            let tx = self.state.tx.clone();
-            std::thread::spawn(move || {
-                match crate::transcribe::load_model(&model_name) {
-                    Ok(()) => { let _ = tx.send(Event::ModelReady); }
-                    Err(e) => {
-                        tracing::error!("Model load failed: {e}");
-                        crate::notify::send("Whisper Push", &format!("Model failed: {e}"));
-                    }
-                }
-            });
-
             // Start hotkey listener
             let _ = crate::hotkey::start_listener(
                 &self.state.config.hotkey,
                 &self.state.config.hotkey_mode,
                 self.state.tx.clone(),
             );
+
+            if self.config.lock().unwrap().notifications {
+                crate::notify::send("Whisper Push", "Ready! Hold Control to dictate.");
+            }
         }
 
         // Events arrive via user_event() from the EventLoopProxy forwarder.
         // No polling needed — ControlFlow::Wait keeps the run loop clean.
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Poll all event sources. No EventLoopProxy used — avoids macOS Tahoe
+        // menu closing bug. This is called every ~100ms via WaitUntil.
+
+        // 1. Menu events (clicked items)
+        while let Ok(event) = MenuEvent::receiver().try_recv() {
+            self.process_event(Event::MenuClicked(event.id().0.to_string()));
+        }
+
+        // 2. App events (hotkey, transcription, model loading, etc.)
+        while let Ok(event) = self.rx.try_recv() {
+            self.process_event(event);
+        }
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -581,29 +616,12 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
 
-    // Forward menu events into winit's event loop via proxy
-    let proxy = event_loop.create_proxy();
-    MenuEvent::set_event_handler(Some(move |event| {
-        let _ = proxy.send_event(UserEvent::Menu(event));
-    }));
-    let proxy = event_loop.create_proxy();
-    TrayIconEvent::set_event_handler(Some(move |event| {
-        let _ = proxy.send_event(UserEvent::Tray(event));
-    }));
+    // Don't use EventLoopProxy for menu/tray events — it causes macOS Tahoe
+    // to close the tray menu. Instead, poll MenuEvent::receiver() in about_to_wait().
 
-    // Forward our crossbeam events → winit proxy (wakes the event loop)
-    let proxy = event_loop.create_proxy();
-    let rx_clone = rx.clone();
-    std::thread::spawn(move || {
-        loop {
-            match rx_clone.recv() {
-                Ok(event) => {
-                    let _ = proxy.send_event(UserEvent::App(event));
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    // No proxy forwarding — all crossbeam events are polled in about_to_wait().
+    // EventLoopProxy wake-ups cause macOS Tahoe to close the tray menu (Apple bug).
+    // Instead, we use WaitUntil(100ms) so about_to_wait is called periodically.
 
     let mut app = App::new(state, rx);
 
