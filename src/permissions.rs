@@ -50,22 +50,58 @@ impl PermissionStatus {
 
 /// Check all permissions (non-blocking, no prompts).
 pub fn check_all() -> PermissionStatus {
+    let mic = check_microphone();
+    let acc = check_accessibility();
+    tracing::info!("Permissions: microphone={:?}, accessibility={:?}", mic, acc);
     PermissionStatus {
-        microphone: check_microphone(),
-        accessibility: check_accessibility(),
+        microphone: mic,
+        accessibility: acc,
     }
 }
 
-/// Prompt for missing permissions (shows system dialogs or opens Settings).
+/// Prompt for missing permissions (shows native system dialogs).
 pub fn prompt_missing(status: &PermissionStatus) {
     #[cfg(target_os = "macos")]
     {
         if status.microphone != PermState::Granted {
-            open_settings("Privacy_Microphone");
+            request_microphone();
         }
         if status.accessibility != PermState::Granted {
             request_accessibility();
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_microphone() {
+    use objc2::runtime::AnyClass;
+    use objc2::msg_send;
+    use objc2_foundation::NSString;
+
+    tracing::info!("Requesting microphone permission...");
+
+    unsafe {
+        let cls = match AnyClass::get(c"AVCaptureDevice") {
+            Some(c) => c,
+            None => {
+                tracing::error!("AVCaptureDevice class not found");
+                return;
+            }
+        };
+        let media_type = NSString::from_str("soun");
+
+        // requestAccessForMediaType:completionHandler:
+        // The completion handler is (void)(^)(BOOL granted)
+        // In block2, BOOL maps to objc2::runtime::Bool
+        let block = block2::RcBlock::new(|granted: objc2::runtime::Bool| {
+            if granted.as_bool() {
+                tracing::info!("Microphone: granted by user!");
+            } else {
+                tracing::warn!("Microphone: denied by user");
+            }
+        });
+        let _: () = msg_send![cls, requestAccessForMediaType: &*media_type
+                                   completionHandler: &*block];
     }
 }
 

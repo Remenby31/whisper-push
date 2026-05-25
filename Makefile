@@ -44,6 +44,7 @@ sign: bundle
 		"$(APP_DIR)/Contents/MacOS/whisper-push"
 	@codesign --force --options runtime --deep \
 		-s "$(SIGN_ID)" \
+		--entitlements resources/entitlements.plist \
 		--timestamp \
 		"$(APP_DIR)"
 	@echo "✓ App signed with Developer ID"

@@ -42,6 +42,10 @@ pub enum Event {
     StateChanged(State),
     /// Menu item clicked (menu item id string)
     MenuClicked(String),
+    /// Prompt for missing permissions (after event loop is running)
+    PromptPermissions,
+    /// Refresh permission status in the menu
+    RefreshPermissions,
     /// Request quit
     Quit,
 }

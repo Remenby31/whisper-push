@@ -33,9 +33,10 @@ enigo = "0.3"            # Cross-platform keystroke simulation (paste)
 # Clipboard
 arboard = "3"
 
-# System tray
+# System tray + event loop
 tray-icon = "0.19"
-muda = "0.16"            # Menu (re-exported by tray-icon, but explicit for clarity)
+muda = "0.16"
+winit = "0.30"
 
 # Config
 serde = { version = "1", features = ["derive"] }
@@ -82,6 +83,7 @@ block2 = "0.6"
 objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGRemoteOperation"] }
 core-foundation = { version = "0.10", features = ["mac_os_10_7_support"] }
 core-foundation-sys = "0.8"
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
