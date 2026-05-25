@@ -20,6 +20,7 @@ voxtral = ["dep:voxtral-mini-realtime", "dep:burn"]
 cpal = "0.15"
 rubato = "0.16"
 hound = "3.5"            # WAV read for embedded sounds
+symphonia = { version = "0.5", features = ["mp3", "wav", "ogg", "flac", "aac"] }  # decode audio files
 
 # Transcription
 whisper-rs = "0.16"

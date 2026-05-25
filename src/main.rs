@@ -35,6 +35,10 @@ struct Cli {
     /// Run dependency/environment checks
     #[arg(long)]
     doctor: bool,
+
+    /// Transcribe an audio file (MP3/WAV/OGG/FLAC) and print the result
+    #[arg(long)]
+    transcribe: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -47,6 +51,10 @@ fn main() -> Result<()> {
 
     if cli.doctor {
         return doctor::run();
+    }
+
+    if let Some(ref audio_path) = cli.transcribe {
+        return cli_transcribe::run(audio_path, cli.language.as_deref());
     }
 
     // Load config
@@ -143,6 +151,44 @@ mod doctor {
         }
 
         println!("\nAll checks complete.");
+        Ok(())
+    }
+}
+
+mod cli_transcribe {
+    use anyhow::Result;
+    use std::path::Path;
+    use std::time::Instant;
+
+    pub fn run(path: &Path, language: Option<&str>) -> Result<()> {
+        let lang = language.unwrap_or("auto");
+
+        // Load audio
+        println!("Loading {}...", path.display());
+        let samples = crate::audio::decode::load_audio_file(path)?;
+        println!("Audio: {:.1}s ({} samples @ 16kHz)", samples.len() as f32 / 16000.0, samples.len());
+
+        // Load model
+        let cfg = crate::config::Config::load()?;
+        println!("Loading model: {}...", cfg.model);
+        crate::transcribe::load_model(&cfg.model)?;
+
+        // Transcribe
+        println!("Transcribing...");
+        let start = Instant::now();
+        let text = crate::transcribe::transcribe(&samples, lang)?;
+        let elapsed = start.elapsed();
+
+        println!("\n--- Result ({:.2}s) ---", elapsed.as_secs_f64());
+        println!("{text}");
+
+        let audio_duration = samples.len() as f64 / 16000.0;
+        let rtf = elapsed.as_secs_f64() / audio_duration;
+        println!("\n--- Stats ---");
+        println!("Audio:    {:.1}s", audio_duration);
+        println!("Compute:  {:.2}s", elapsed.as_secs_f64());
+        println!("RTF:      {:.3} ({:.0}x real-time)", rtf, 1.0 / rtf);
+
         Ok(())
     }
 }
