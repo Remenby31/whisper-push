@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod hotkey;
 mod hardware;
+mod model_manager;
 mod notify;
 mod overlay;
 mod paste;
@@ -38,6 +39,10 @@ struct Cli {
     #[arg(long)]
     doctor: bool,
 
+    /// List available models and download status
+    #[arg(long)]
+    models: bool,
+
     /// Transcribe an audio file (MP3/WAV/OGG/FLAC) and print the result
     #[arg(long)]
     transcribe: Option<PathBuf>,
@@ -53,6 +58,11 @@ fn main() -> Result<()> {
 
     if cli.doctor {
         return doctor::run();
+    }
+
+    if cli.models {
+        model_manager::print_status();
+        return Ok(());
     }
 
     if let Some(ref audio_path) = cli.transcribe {

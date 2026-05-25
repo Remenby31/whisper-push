@@ -2,6 +2,7 @@ pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod hardware;
+pub mod model_manager;
 pub mod notify;
 pub mod overlay;
 pub mod paste;
