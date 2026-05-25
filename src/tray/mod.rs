@@ -154,11 +154,11 @@ impl App {
         let backend_submenu = Submenu::new("Transcription Engine", true);
         let backend_parakeet = CheckMenuItem::new(
             "Parakeet TDT 0.6B (fastest, 600MB)",
-            cfg!(feature = "parakeet"), cfg.backend == "parakeet", None,
+            true, cfg.backend == "parakeet", None,
         );
         let backend_voxtral_local = CheckMenuItem::new(
             "Voxtral Mini 4B (streaming, 2.3GB)",
-            cfg!(feature = "voxtral"), cfg.backend == "voxtral-local", None,
+            true, cfg.backend == "voxtral-local", None,
         );
         let backend_whisper = CheckMenuItem::new(
             "Whisper large-v3-turbo (99 langs, 547MB)",
@@ -337,24 +337,30 @@ impl App {
                 // Backend selection
                 for (item, backend_value) in &mi.backend_items {
                     if id == &item.id().0 {
-                        // Voxtral local needs model download
-                        if backend_value == "voxtral-local" {
-                            let model_dir = crate::config::data_dir().join("models");
-                            if !model_dir.join("voxtral-q4.gguf").exists() {
-                                crate::notify::send("Whisper Push",
-                                    "Download Voxtral Q4 model first:\nhf download TrevorJS/voxtral-mini-realtime-gguf --local-dir <models_dir>");
-                                return;
-                            }
-                        }
+                        // Save config and update checkmarks
                         let mut c = self.config.lock().unwrap();
                         c.backend = backend_value.clone();
                         let _ = c.save();
-                        // Update checkmarks
+                        drop(c);
                         for (bi, _) in &mi.backend_items {
                             bi.set_checked(bi.id() == item.id());
                         }
-                        info!("Backend switched to: {backend_value}");
-                        crate::notify::send("Whisper Push", &format!("Engine: {backend_value}. Restart to apply."));
+
+                        // Auto-download model if needed, then notify
+                        let bv = backend_value.clone();
+                        std::thread::spawn(move || {
+                            info!("Switching to {bv}...");
+                            match crate::model_manager::ensure_model(&bv) {
+                                Ok(()) => {
+                                    crate::notify::send("Whisper Push",
+                                        &format!("Switched to {bv}. Restart to apply."));
+                                }
+                                Err(e) => {
+                                    crate::notify::send("Whisper Push",
+                                        &format!("Failed to set up {bv}: {e}"));
+                                }
+                            }
+                        });
                         return;
                     }
                 }

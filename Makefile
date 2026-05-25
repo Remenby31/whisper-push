@@ -12,10 +12,10 @@ build:
 	cargo build
 	@echo "✓ Debug build complete"
 
-# Release build (Metal GPU on macOS)
+# Release build (all backends on macOS)
 release:
-	cargo build --release --features metal
-	@echo "✓ Release build complete (Metal GPU)"
+	cargo build --release --features "metal,parakeet"
+	@echo "✓ Release build complete (Metal + Parakeet)"
 
 # Check (no build, just type-check)
 check:
