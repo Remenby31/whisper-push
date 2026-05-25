@@ -149,14 +149,8 @@ impl App {
             "Voxtral Mini 4B (local, Q4 GPU \u{2014} 2.5GB)",
             cfg!(feature = "voxtral"), cfg.backend == "voxtral-local", None,
         );
-        let backend_voxtral_api = CheckMenuItem::new(
-            "Voxtral API (Mistral cloud, $0.003/min)",
-            true, cfg.backend == "voxtral-api", None,
-        );
         let _ = backend_submenu.append(&backend_whisper);
         let _ = backend_submenu.append(&backend_voxtral_local);
-        let _ = backend_submenu.append(&PredefinedMenuItem::separator());
-        let _ = backend_submenu.append(&backend_voxtral_api);
 
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
@@ -222,7 +216,6 @@ impl App {
             backend_items: vec![
                 (backend_whisper, "whisper".into()),
                 (backend_voxtral_local, "voxtral-local".into()),
-                (backend_voxtral_api, "voxtral-api".into()),
             ],
             status_item, toggle_item,
             notifications_item, sound_item, debug_item,
@@ -316,18 +309,6 @@ impl App {
                 // Backend selection
                 for (item, backend_value) in &mi.backend_items {
                     if id == &item.id().0 {
-                        // Voxtral API needs API key
-                        if backend_value == "voxtral-api" {
-                            let c = self.config.lock().unwrap();
-                            if c.mistral_api_key.is_empty() {
-                                drop(c);
-                                crate::notify::send("Whisper Push", "Set mistral_api_key in config.toml first");
-                                let path = crate::config::config_path();
-                                #[cfg(target_os = "macos")]
-                                { let _ = std::process::Command::new("open").arg(&path).spawn(); }
-                                return;
-                            }
-                        }
                         // Voxtral local needs model download
                         if backend_value == "voxtral-local" {
                             let model_dir = crate::config::data_dir().join("models");
@@ -512,12 +493,10 @@ impl App {
         let cfg = self.config.lock().unwrap().clone();
         let backend = match cfg.backend.as_str() {
             "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-            "voxtral-api" => crate::transcribe::Backend::VoxtralAPI,
             _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
         };
-        let api_key = if cfg.mistral_api_key.is_empty() { None } else { Some(cfg.mistral_api_key.clone()) };
         std::thread::spawn(move || {
-            match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend, api_key.as_deref()) {
+            match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
                 Ok(text) if !text.is_empty() => { let _ = tx.send(Event::Transcribed(text)); }
                 Ok(_) => { let _ = tx.send(Event::StateChanged(State::Idle)); }
                 Err(e) => { tracing::error!("Transcription: {e}"); let _ = tx.send(Event::StateChanged(State::Idle)); }

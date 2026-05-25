@@ -1,4 +1,3 @@
-pub mod voxtral_api;
 pub mod voxtral_local;
 
 use anyhow::Result;
@@ -13,8 +12,6 @@ pub enum Backend {
     WhisperLocal(String), // model filename
     /// Local Voxtral Mini 4B Realtime (Burn + WGPU, Q4 GGUF)
     VoxtralLocal,
-    /// Mistral Voxtral API (cloud)
-    VoxtralAPI,
 }
 
 impl Backend {
@@ -27,7 +24,6 @@ impl Backend {
                 else { "Whisper (local)" }
             }
             Backend::VoxtralLocal => "Voxtral Mini 4B (local, Q4 GPU)",
-            Backend::VoxtralAPI => "Voxtral API (Mistral cloud)",
         }
     }
 }
@@ -73,14 +69,10 @@ pub fn is_loaded() -> bool {
 }
 
 /// Transcribe audio using the active backend.
-pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend, api_key: Option<&str>) -> Result<String> {
+pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend) -> Result<String> {
     match backend {
         Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
         Backend::VoxtralLocal => voxtral_local::transcribe(audio),
-        Backend::VoxtralAPI => {
-            let key = api_key.ok_or_else(|| anyhow::anyhow!("Mistral API key required for Voxtral"))?;
-            voxtral_api::transcribe(audio, key, language)
-        }
     }
 }
 
