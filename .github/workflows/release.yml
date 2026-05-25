@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # ─── macOS (Metal, Apple Silicon) ───────────────────────────────
+  macos:
+    runs-on: macos-14  # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release
+      - name: Create app bundle
+        run: make bundle
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-push-macos-arm64
+          path: build/Whisper Push.app
+
+  # ─── Linux (CPU) ───────────────────────────────────────────────
+  linux-cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+      - name: Build release
+        run: cargo build --release
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/whisper-push dist/
+          cp -r sounds dist/
+          tar czf whisper-push-linux-x86_64.tar.gz -C dist .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-push-linux-x86_64
+          path: whisper-push-linux-x86_64.tar.gz
+
+  # ─── Linux (CUDA) ──────────────────────────────────────────────
+  linux-cuda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.4.0'
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+      - name: Build release with CUDA
+        run: cargo build --release --features cuda
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/whisper-push dist/
+          cp -r sounds dist/
+          tar czf whisper-push-linux-x86_64-cuda.tar.gz -C dist .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-push-linux-x86_64-cuda
+          path: whisper-push-linux-x86_64-cuda.tar.gz
+
+  # ─── Windows (CPU) ─────────────────────────────────────────────
+  windows-cpu:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/whisper-push.exe dist/
+          cp -r sounds dist/
+          cd dist && 7z a ../whisper-push-windows-x64.zip .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-push-windows-x64
+          path: whisper-push-windows-x64.zip
+
+  # ─── Windows (CUDA) ────────────────────────────────────────────
+  windows-cuda:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.4.0'
+      - name: Build release with CUDA
+        run: cargo build --release --features cuda
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/whisper-push.exe dist/
+          cp -r sounds dist/
+          cd dist && 7z a ../whisper-push-windows-x64-cuda.zip .
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: whisper-push-windows-x64-cuda
+          path: whisper-push-windows-x64-cuda.zip
+
+  # ─── Create GitHub Release ─────────────────────────────────────
+  release:
+    needs: [macos, linux-cpu, linux-cuda, windows-cpu, windows-cuda]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*
+          generate_release_notes: true

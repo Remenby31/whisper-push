@@ -1,0 +1,95 @@
+[package]
+name = "whisper-push"
+version = "2.0.0"
+edition = "2024"
+description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
+license = "MIT"
+repository = "https://github.com/Remenby31/whisper-push"
+categories = ["multimedia::audio", "accessibility"]
+keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
+
+[features]
+default = []
+cuda = ["whisper-rs/cuda"]
+vulkan = ["whisper-rs/vulkan"]
+
+[dependencies]
+# Audio capture & playback
+cpal = "0.15"
+rubato = "0.16"
+hound = "3.5"            # WAV read for embedded sounds
+
+# Transcription
+whisper-rs = "0.16"
+
+# Model download
+hf-hub = "0.4"
+indicatif = "0.17"       # Progress bar for model download
+
+# Hotkey
+enigo = "0.3"            # Cross-platform keystroke simulation (paste)
+
+# Clipboard
+arboard = "3"
+
+# System tray
+tray-icon = "0.19"
+muda = "0.16"            # Menu (re-exported by tray-icon, but explicit for clarity)
+
+# Config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+
+# Notifications
+notify-rust = "4"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Async / threading
+crossbeam-channel = "0.5"
+
+# Single instance
+fs4 = "0.12"
+
+# Error handling
+anyhow = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSThread"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSEvent",
+    "NSRunningApplication",
+    "NSWorkspace",
+    "NSImage",
+    "NSStatusBar",
+    "NSStatusItem",
+    "block2",
+] }
+block2 = "0.6"
+objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGRemoteOperation"] }
+core-foundation = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+opt-level = "s"          # Optimize for size (binary stays small)
