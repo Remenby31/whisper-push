@@ -2,6 +2,7 @@ pub mod audio;
 pub mod config;
 pub mod hotkey;
 pub mod notify;
+pub mod overlay;
 pub mod paste;
 pub mod permissions;
 pub mod state;

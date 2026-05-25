@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod hotkey;
 mod notify;
+mod overlay;
 mod paste;
 mod permissions;
 mod state;
