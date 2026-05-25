@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, rust-rewrite]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            features: "metal"
+            name: "macOS (Metal)"
+          - os: ubuntu-latest
+            features: ""
+            name: "Linux (CPU)"
+          - os: windows-latest
+            features: ""
+            name: "Windows (CPU)"
+    runs-on: ${{ matrix.os }}
+    name: Check — ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+      - name: Check
+        run: cargo check --features "${{ matrix.features }}"
+      - name: Build
+        run: cargo build --features "${{ matrix.features }}"
+
+  test:
+    runs-on: macos-14
+    name: Tests (macOS)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run unit tests
+        run: cargo test --features metal --test integration test_config test_paste test_audio_decode -- --nocapture
+
+  clippy:
+    runs-on: macos-14
+    name: Clippy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy
+        run: cargo clippy --features metal -- -W warnings
+
+  format:
+    runs-on: ubuntu-latest
+    name: Format
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check format
+        run: cargo fmt --check
