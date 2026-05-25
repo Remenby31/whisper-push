@@ -2,164 +2,148 @@ use crossbeam_channel::Sender;
 use crate::state::Event;
 use tracing::{debug, info, warn};
 
-const KEYCODE_LCTRL: u16 = 59;
-const KEYCODE_RCTRL: u16 = 62;
-const KEYCODE_LSHIFT: u16 = 56;
-const KEYCODE_RSHIFT: u16 = 60;
-const KEYCODE_LALT: u16 = 58;
-const KEYCODE_RALT: u16 = 61;
-const KEYCODE_LCMD: u16 = 55;
-const KEYCODE_RCMD: u16 = 54;
+// CGEvent types
+const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
+const K_CG_EVENT_KEY_DOWN: u32 = 10;
 
-struct ParsedHotkey {
-    modifier_flags: usize,
-    key_code: Option<u16>,
-    modifier_keycode: Option<u16>,
+// Modifier flags in CGEventFlags
+const CG_EVENT_FLAG_CONTROL: u64 = 1 << 18;
+const CG_EVENT_FLAG_SHIFT: u64 = 1 << 17;
+const CG_EVENT_FLAG_ALTERNATE: u64 = 1 << 19;
+const CG_EVENT_FLAG_COMMAND: u64 = 1 << 20;
+
+const KEYCODE_LCTRL: i64 = 59;
+const KEYCODE_RCTRL: i64 = 62;
+const KEYCODE_LSHIFT: i64 = 56;
+const KEYCODE_RSHIFT: i64 = 60;
+const KEYCODE_LALT: i64 = 58;
+const KEYCODE_RALT: i64 = 61;
+const KEYCODE_LCMD: i64 = 55;
+const KEYCODE_RCMD: i64 = 54;
+
+struct HotkeyConfig {
+    modifier_flags: u64,
+    key_code: Option<i64>,
+    modifier_keycode: Option<i64>,
 }
 
-fn parse_hotkey(hotkey: &str) -> ParsedHotkey {
-    const SHIFT: usize = 1 << 17;
-    const CONTROL: usize = 1 << 18;
-    const OPTION: usize = 1 << 19;
-    const COMMAND: usize = 1 << 20;
-
-    let mut flags: usize = 0;
-    let mut key_code: Option<u16> = None;
-    let mut modifier_keycode: Option<u16> = None;
+fn parse_hotkey(hotkey: &str) -> HotkeyConfig {
+    let mut flags: u64 = 0;
+    let mut key_code: Option<i64> = None;
+    let mut modifier_keycode: Option<i64> = None;
 
     for part in hotkey.to_lowercase().split('+') {
         let part = part.trim();
         match part {
-            "cmd" | "command" => flags |= COMMAND,
-            "shift" => flags |= SHIFT,
-            "alt" | "option" => flags |= OPTION,
-            "ctrl" | "control" => flags |= CONTROL,
-            "lctrl" => { modifier_keycode = Some(KEYCODE_LCTRL); flags |= CONTROL; }
-            "rctrl" => { modifier_keycode = Some(KEYCODE_RCTRL); flags |= CONTROL; }
-            "lshift" => { modifier_keycode = Some(KEYCODE_LSHIFT); flags |= SHIFT; }
-            "rshift" => { modifier_keycode = Some(KEYCODE_RSHIFT); flags |= SHIFT; }
-            "lalt" => { modifier_keycode = Some(KEYCODE_LALT); flags |= OPTION; }
-            "ralt" => { modifier_keycode = Some(KEYCODE_RALT); flags |= OPTION; }
-            "lcmd" => { modifier_keycode = Some(KEYCODE_LCMD); flags |= COMMAND; }
-            "rcmd" => { modifier_keycode = Some(KEYCODE_RCMD); flags |= COMMAND; }
+            "cmd" | "command" => flags |= CG_EVENT_FLAG_COMMAND,
+            "shift" => flags |= CG_EVENT_FLAG_SHIFT,
+            "alt" | "option" => flags |= CG_EVENT_FLAG_ALTERNATE,
+            "ctrl" | "control" => flags |= CG_EVENT_FLAG_CONTROL,
+            "lctrl" => { modifier_keycode = Some(KEYCODE_LCTRL); flags |= CG_EVENT_FLAG_CONTROL; }
+            "rctrl" => { modifier_keycode = Some(KEYCODE_RCTRL); flags |= CG_EVENT_FLAG_CONTROL; }
+            "lshift" => { modifier_keycode = Some(KEYCODE_LSHIFT); flags |= CG_EVENT_FLAG_SHIFT; }
+            "rshift" => { modifier_keycode = Some(KEYCODE_RSHIFT); flags |= CG_EVENT_FLAG_SHIFT; }
+            "lalt" => { modifier_keycode = Some(KEYCODE_LALT); flags |= CG_EVENT_FLAG_ALTERNATE; }
+            "ralt" => { modifier_keycode = Some(KEYCODE_RALT); flags |= CG_EVENT_FLAG_ALTERNATE; }
+            "lcmd" => { modifier_keycode = Some(KEYCODE_LCMD); flags |= CG_EVENT_FLAG_COMMAND; }
+            "rcmd" => { modifier_keycode = Some(KEYCODE_RCMD); flags |= CG_EVENT_FLAG_COMMAND; }
             "space" => key_code = Some(49),
-            "return" => key_code = Some(36),
-            "tab" => key_code = Some(48),
-            "escape" => key_code = Some(53),
-            k if k.len() == 1 => {
-                let c = k.chars().next().unwrap();
-                let code = match c {
-                    'a' => 0, 'b' => 11, 'c' => 8, 'd' => 2, 'e' => 14, 'f' => 3,
-                    'g' => 5, 'h' => 4, 'i' => 34, 'j' => 38, 'k' => 40, 'l' => 37,
-                    'm' => 46, 'n' => 45, 'o' => 31, 'p' => 35, 'q' => 12, 'r' => 15,
-                    's' => 1, 't' => 17, 'u' => 32, 'v' => 9, 'w' => 13, 'x' => 7,
-                    'y' => 16, 'z' => 6,
-                    '0' => 29, '1' => 18, '2' => 19, '3' => 20, '4' => 21, '5' => 23,
-                    '6' => 22, '7' => 26, '8' => 28, '9' => 25,
-                    _ => { warn!("Unknown key: {k}"); 0 }
-                };
-                key_code = Some(code);
-            }
-            _ => warn!("Unknown hotkey part: {part}"),
+            _ => {}
         }
     }
-
-    ParsedHotkey { modifier_flags: flags, key_code, modifier_keycode }
+    HotkeyConfig { modifier_flags: flags, key_code, modifier_keycode }
 }
 
-/// Start global hotkey listener on macOS.
-/// MUST be called from the main thread (needs the NSApp run loop for NSEvent monitors).
+/// Start global hotkey listener using CGEventTap (works from any thread).
 pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> {
-    let parsed = parse_hotkey(hotkey);
+    let config = parse_hotkey(hotkey);
     let is_hold = mode == "hold";
 
     info!(
-        "macOS hotkey: '{}' mode={} flags={:#x} key={:?} mod_key={:?}",
-        hotkey, mode, parsed.modifier_flags, parsed.key_code, parsed.modifier_keycode
+        "macOS hotkey (CGEventTap): '{}' mode={} flags={:#x}",
+        hotkey, mode, config.modifier_flags
     );
 
-    let expected_flags = parsed.modifier_flags;
-    let hold_keycode = parsed.modifier_keycode;
-    let toggle_keycode = parsed.key_code;
+    let expected_flags = config.modifier_flags;
+    let hold_keycode = config.modifier_keycode;
+    let toggle_keycode = config.key_code;
 
-    // NSEvent monitors are created on the CURRENT thread (must be main thread).
-    // They use the NSApp run loop which winit manages.
-    use objc2_app_kit::{NSEvent, NSEventMask};
-    use std::ptr::NonNull;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    std::thread::spawn(move || {
+        use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType};
 
-    static HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
+        let hold_active = std::sync::atomic::AtomicBool::new(false);
 
-    if is_hold {
-        let tx_flags = tx.clone();
-        let flags_block = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
-            let event = unsafe { event_ptr.as_ref() };
-            let kc = event.keyCode();
-            let mods = event.modifierFlags().0 as usize;
+        // Event mask: FlagsChanged (modifier keys) + KeyDown (for hold interrupt)
+        let mask = (1u64 << K_CG_EVENT_FLAGS_CHANGED) | (1u64 << K_CG_EVENT_KEY_DOWN);
 
-            if let Some(expected_kc) = hold_keycode {
-                if kc != expected_kc { return; }
-            }
+        let tap = CGEventTap::new(
+            CGEventTapLocation::HID,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::ListenOnly,
+            vec![
+                CGEventType::FlagsChanged,
+                CGEventType::KeyDown,
+            ],
+            |_proxy, event_type, event| {
+                match event_type {
+                    CGEventType::FlagsChanged if is_hold => {
+                        let kc = event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
+                        let flags = event.get_flags().bits();
 
-            let pressed = (mods & expected_flags) == expected_flags;
+                        if let Some(expected_kc) = hold_keycode {
+                            if kc != expected_kc { return None; }
+                        }
 
-            if pressed && !HOLD_ACTIVE.load(Ordering::Relaxed) {
-                HOLD_ACTIVE.store(true, Ordering::Relaxed);
-                let _ = tx_flags.send(Event::HotkeyDown);
-            } else if !pressed && HOLD_ACTIVE.load(Ordering::Relaxed) {
-                HOLD_ACTIVE.store(false, Ordering::Relaxed);
-                let _ = tx_flags.send(Event::HotkeyUp);
-            }
-        });
+                        let pressed = (flags & expected_flags) == expected_flags;
 
-        // Keep the monitor alive by leaking it
-        let _monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-            NSEventMask::FlagsChanged,
-            &flags_block,
-        );
-        std::mem::forget(flags_block);
-        if let Some(m) = _monitor { std::mem::forget(m); }
-
-        // KeyDown monitor: discard pre-roll if another key is pressed during hold
-        let tx_key = tx.clone();
-        let key_block = block2::RcBlock::new(move |_event_ptr: NonNull<NSEvent>| {
-            if HOLD_ACTIVE.load(Ordering::Relaxed) {
-                debug!("Key pressed during hold — discarding pre-roll");
-                HOLD_ACTIVE.store(false, Ordering::Relaxed);
-                let _ = tx_key.send(Event::HotkeyUp);
-            }
-        });
-
-        let _monitor2 = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-            NSEventMask::KeyDown,
-            &key_block,
-        );
-        std::mem::forget(key_block);
-        if let Some(m) = _monitor2 { std::mem::forget(m); }
-
-        info!("Hotkey monitors installed on main thread");
-    } else {
-        let tx_toggle = tx.clone();
-        let toggle_block = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
-            let event = unsafe { event_ptr.as_ref() };
-            let kc = event.keyCode();
-            let mods = event.modifierFlags().0 as usize;
-
-            if let Some(expected_kc) = toggle_keycode {
-                if kc == expected_kc && (mods & expected_flags) == expected_flags {
-                    info!("Toggle hotkey matched");
-                    let _ = tx_toggle.send(Event::HotkeyToggle);
+                        if pressed && !hold_active.load(std::sync::atomic::Ordering::Relaxed) {
+                            hold_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                            info!("HotkeyDown");
+                            let _ = tx.send(Event::HotkeyDown);
+                        } else if !pressed && hold_active.load(std::sync::atomic::Ordering::Relaxed) {
+                            hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                            info!("HotkeyUp");
+                            let _ = tx.send(Event::HotkeyUp);
+                        }
+                    }
+                    CGEventType::KeyDown if is_hold => {
+                        // Another key pressed during hold — discard
+                        if hold_active.load(std::sync::atomic::Ordering::Relaxed) {
+                            debug!("Key during hold — discard");
+                            hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                            let _ = tx.send(Event::HotkeyUp);
+                        }
+                    }
+                    CGEventType::KeyDown if !is_hold => {
+                        let kc = event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
+                        let flags = event.get_flags().bits();
+                        if let Some(expected_kc) = toggle_keycode {
+                            if kc == expected_kc && (flags & expected_flags) == expected_flags {
+                                info!("Toggle hotkey");
+                                let _ = tx.send(Event::HotkeyToggle);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-            }
-        });
+                None // ListenOnly — don't modify events
+            },
+        ).expect("Failed to create CGEventTap — check Accessibility permission");
 
-        let _monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-            NSEventMask::KeyDown,
-            &toggle_block,
-        );
-        std::mem::forget(toggle_block);
-        if let Some(m) = _monitor { std::mem::forget(m); }
-    }
+        info!("CGEventTap created — listening for hotkey events");
+
+        // Run the tap on the current thread's run loop
+        let loop_source = tap.mach_port.create_runloop_source(0)
+            .expect("Failed to create run loop source");
+        let run_loop = core_foundation::runloop::CFRunLoop::get_current();
+        unsafe {
+            run_loop.add_source(&loop_source, core_foundation::runloop::kCFRunLoopCommonModes);
+        }
+        tap.enable();
+
+        info!("CGEventTap enabled — running CFRunLoop");
+        core_foundation::runloop::CFRunLoop::run_current();
+    });
 
     Ok(())
 }

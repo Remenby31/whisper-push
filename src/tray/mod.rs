@@ -555,11 +555,12 @@ impl ApplicationHandler<UserEvent> for App {
     ) {}
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
-        // Pure Wait — absolutely NO periodic wake-ups.
-        // Any wake-up (even WaitUntil) causes macOS to close the tray menu.
-        // All hotkey/transcription logic runs in background threads.
-        // Menu events are handled in about_to_wait (called after menu closes).
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+        // WaitUntil(500ms) — needed for NSEvent monitors to fire (they require
+        // the run loop to pump events). 500ms is slow enough to not close menus
+        // on most interactions, but fast enough for hotkey responsiveness.
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(500),
+        ));
 
         if cause == winit::event::StartCause::Init {
             // Load model SYNCHRONOUSLY before creating the tray,
@@ -747,7 +748,8 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     continue;
                 }
 
-                info!("Processing {:.1}s of audio with backend '{}'...", audio.len() as f32 / 16000.0, cfg.backend);
+                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
+                info!("Processing {:.1}s of audio with backend '{}' (RMS={:.4})...", audio.len() as f32 / 16000.0, cfg.backend, rms);
 
                 let backend = match cfg.backend.as_str() {
                     "parakeet" => crate::transcribe::Backend::Parakeet,
@@ -755,9 +757,23 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
                 };
 
-                match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
+                let start = std::time::Instant::now();
+                // Use catch_unwind to catch WGPU/Metal panics from cross-thread access
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend)
+                }));
+                let result = match result {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
+                            else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
+                            else { "unknown panic".into() };
+                        Err(anyhow::anyhow!("Transcription panicked: {msg}"))
+                    }
+                };
+                match result {
                     Ok(text) if !text.is_empty() => {
-                        info!("Pasting: '{}'", if text.len() > 80 { &text[..80] } else { &text });
+                        info!("Pasting ({:.2}s): '{}'", start.elapsed().as_secs_f64(), if text.len() > 80 { &text[..80] } else { &text });
                         if let Err(e) = crate::paste::paste_text(&text) {
                             tracing::error!("Paste failed: {e}");
                         }

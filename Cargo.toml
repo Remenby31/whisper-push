@@ -88,6 +88,7 @@ objc2-app-kit = { version = "0.3", features = [
 block2 = "0.6"
 objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGRemoteOperation"] }
 core-foundation = { version = "0.10", features = ["mac_os_10_7_support"] }
+core-graphics = "0.24"
 core-foundation-sys = "0.8"
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
 
