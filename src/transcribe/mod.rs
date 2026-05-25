@@ -1,4 +1,5 @@
 pub mod voxtral_api;
+pub mod voxtral_local;
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -10,6 +11,8 @@ use tracing::{info, warn};
 pub enum Backend {
     /// Local whisper.cpp (Metal/CUDA/CPU)
     WhisperLocal(String), // model filename
+    /// Local Voxtral Mini 4B Realtime (Burn + WGPU, Q4 GGUF)
+    VoxtralLocal,
     /// Mistral Voxtral API (cloud)
     VoxtralAPI,
 }
@@ -23,6 +26,7 @@ impl Backend {
                 else if m.contains("base") { "Whisper base (local)" }
                 else { "Whisper (local)" }
             }
+            Backend::VoxtralLocal => "Voxtral Mini 4B (local, Q4 GPU)",
             Backend::VoxtralAPI => "Voxtral API (Mistral cloud)",
         }
     }
@@ -72,6 +76,7 @@ pub fn is_loaded() -> bool {
 pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend, api_key: Option<&str>) -> Result<String> {
     match backend {
         Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
+        Backend::VoxtralLocal => voxtral_local::transcribe(audio),
         Backend::VoxtralAPI => {
             let key = api_key.ok_or_else(|| anyhow::anyhow!("Mistral API key required for Voxtral"))?;
             voxtral_api::transcribe(audio, key, language)
@@ -135,8 +140,6 @@ fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {
 
 /// Download a GGUF model from HuggingFace.
 fn download_model(model_name: &str, dest: &PathBuf) -> Result<()> {
-    use indicatif::{ProgressBar, ProgressStyle};
-
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
