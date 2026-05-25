@@ -64,6 +64,7 @@ struct MenuItems {
     notif_id: String,
     sound_id: String,
     debug_id: String,
+    test_id: String,
     hotkey_ids: Vec<(String, String, String)>,
     hotkey_items: Vec<(CheckMenuItem, String, String)>,
     input_ids: Vec<(String, String)>,
@@ -169,6 +170,7 @@ impl App {
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
         let debug_item = CheckMenuItem::new("Debug Logging", true, cfg.debug, None);
+        let test_item = MenuItem::new("Test (record 3s + transcribe)", true, None);
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
         // Permissions
@@ -221,6 +223,8 @@ impl App {
         let _ = menu.append(&sound_item);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&test_item);
+        let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
 
         // Collect IDs
@@ -229,6 +233,7 @@ impl App {
 
         self.menu_items = Some(MenuItems {
             toggle_id: toggle_item.id().0.clone(),
+            test_id: test_item.id().0.clone(),
             quit_id: quit_item.id().0.clone(),
             notif_id: notifications_item.id().0.clone(),
             sound_id: sound_item.id().0.clone(),
@@ -291,6 +296,64 @@ impl App {
             Event::MenuClicked(ref id) => {
                 if id == &mi.quit_id { std::process::exit(0); }
                 if id == &mi.toggle_id { self.process_event(Event::HotkeyToggle); return; }
+                if id == &mi.test_id {
+                    // Test: record 3 seconds + transcribe + show result
+                    let cfg = self.config.lock().unwrap().clone();
+                    std::thread::spawn(move || {
+                        info!("=== TEST: Recording 3 seconds... ===");
+                        crate::notify::send("Whisper Push", "Recording 3 seconds...");
+
+                        match crate::audio::capture::AudioCapture::start(&cfg.input_device) {
+                            Ok(cap) => {
+                                std::thread::sleep(std::time::Duration::from_secs(3));
+                                let audio = cap.stop();
+                                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len().max(1) as f32).sqrt();
+                                info!("=== TEST: Captured {:.1}s, RMS={:.4} ===", audio.len() as f32 / 16000.0, rms);
+
+                                if audio.len() < 4800 {
+                                    crate::notify::send("Whisper Push", "Test failed: audio too short");
+                                    return;
+                                }
+                                if rms < 0.001 {
+                                    crate::notify::send("Whisper Push", "Test failed: silence (check mic permission)");
+                                    return;
+                                }
+
+                                info!("=== TEST: Transcribing with '{}' ===", cfg.backend);
+                                crate::notify::send("Whisper Push", &format!("Transcribing with {}...", cfg.backend));
+
+                                let backend = match cfg.backend.as_str() {
+                                    "parakeet" => crate::transcribe::Backend::Parakeet,
+                                    "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
+                                    _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
+                                };
+
+                                let start = std::time::Instant::now();
+                                match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
+                                    Ok(text) if !text.is_empty() => {
+                                        let elapsed = start.elapsed();
+                                        info!("=== TEST OK ({:.2}s): '{}' ===", elapsed.as_secs_f64(), text);
+                                        crate::notify::send("Whisper Push",
+                                            &format!("Test OK ({:.1}s): {}", elapsed.as_secs_f64(), text));
+                                    }
+                                    Ok(_) => {
+                                        info!("=== TEST: No speech detected ===");
+                                        crate::notify::send("Whisper Push", "Test: no speech detected");
+                                    }
+                                    Err(e) => {
+                                        info!("=== TEST ERROR: {e} ===");
+                                        crate::notify::send("Whisper Push", &format!("Test error: {e}"));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                info!("=== TEST: Capture failed: {e} ===");
+                                crate::notify::send("Whisper Push", &format!("Test failed: {e}"));
+                            }
+                        }
+                    });
+                    return;
+                }
                 if id == &mi.mic_perm_id {
                     #[cfg(target_os = "macos")]
                     crate::permissions::open_settings("Privacy_Microphone");
