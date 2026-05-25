@@ -46,11 +46,28 @@ python3 -m venv "$VENV"
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 pip install --quiet --upgrade pip
+# MLX is pinned to 0.30.6 on purpose: 0.31.x raises
+#   "There is no Stream(gpu, 0) in current thread."
+# when transcription runs on a thread other than the one that warmed the model.
+# We also re-pin to the macosx_14_0 wheels below so the app runs on macOS 14+
+# (building on macOS 26 otherwise pulls macosx_26_0 wheels whose libs set
+# minos 26.0, locking out every older Apple Silicon Mac).
+MLX_VERSION="0.30.6"
+MACOS_WHEEL_TARGET="macosx_14_0_arm64"
+
 log "Installing dependencies (this downloads MLX, PyObjC, etc.)..."
 pip install --quiet \
     "pyinstaller>=6.6" \
+    "mlx==${MLX_VERSION}" "mlx-metal==${MLX_VERSION}" \
     parakeet-mlx sounddevice soundfile numpy scipy \
     pyobjc-framework-Cocoa pyobjc-framework-Quartz
+
+log "Re-pinning MLX to ${MACOS_WHEEL_TARGET} wheels (macOS 14+ compatibility)..."
+WHEELS="$BUILD_DIR/mlx-wheels"; rm -rf "$WHEELS"; mkdir -p "$WHEELS"
+pip download --quiet --no-deps --only-binary :all: \
+    --platform "$MACOS_WHEEL_TARGET" --python-version 3.13 \
+    "mlx==${MLX_VERSION}" "mlx-metal==${MLX_VERSION}" -d "$WHEELS"
+pip install --quiet --force-reinstall --no-deps "$WHEELS"/*.whl
 
 # --- Build the .app ---
 log "Cleaning previous builds..."

@@ -89,7 +89,7 @@ app = BUNDLE(
         "CFBundleDisplayName": "Whisper Push",
         "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1.0.0",
-        "LSMinimumSystemVersion": "13.0",
+        "LSMinimumSystemVersion": "14.0",
         "NSHighResolutionCapable": True,
         "LSUIElement": True,  # menu-bar app, no Dock icon
         "NSMicrophoneUsageDescription":
