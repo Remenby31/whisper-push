@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod hotkey;
+mod autostart;
 mod hardware;
 mod model_manager;
 mod notify;

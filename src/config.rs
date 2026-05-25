@@ -30,6 +30,8 @@ pub struct Config {
     pub output_device: String,
     /// Verbose logging
     pub debug: bool,
+    /// Auto-start on login
+    pub auto_start: bool,
 }
 
 impl Default for Config {
@@ -47,6 +49,7 @@ impl Default for Config {
             input_device: "auto".into(),
             output_device: "auto".into(),
             debug: false,
+            auto_start: false,
         }
     }
 }
