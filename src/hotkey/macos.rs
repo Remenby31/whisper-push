@@ -67,11 +67,8 @@ fn parse_hotkey(hotkey: &str) -> ParsedHotkey {
     ParsedHotkey { modifier_flags: flags, key_code, modifier_keycode }
 }
 
-/// Extra event to signal that another key was pressed during hold pre-roll.
-/// This tells the tray event loop to discard the pre-roll.
-#[derive(Debug, Clone)]
-pub struct HoldInterrupted;
-
+/// Start global hotkey listener on macOS.
+/// MUST be called from the main thread (needs the NSApp run loop for NSEvent monitors).
 pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> {
     let parsed = parse_hotkey(hotkey);
     let is_hold = mode == "hold";
@@ -85,84 +82,84 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
     let hold_keycode = parsed.modifier_keycode;
     let toggle_keycode = parsed.key_code;
 
-    std::thread::spawn(move || {
-        use objc2_app_kit::{NSEvent, NSEventMask};
-        use std::ptr::NonNull;
-        use std::sync::atomic::{AtomicBool, Ordering};
+    // NSEvent monitors are created on the CURRENT thread (must be main thread).
+    // They use the NSApp run loop which winit manages.
+    use objc2_app_kit::{NSEvent, NSEventMask};
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-        // Shared flag: is the modifier currently held down (pre-roll active)?
-        static HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
+    static HOLD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-        if is_hold {
-            // Monitor 1: FlagsChanged — detect modifier press/release
-            let tx_flags = tx.clone();
-            let flags_block = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
-                let event = unsafe { event_ptr.as_ref() };
-                let kc = event.keyCode();
-                let mods = event.modifierFlags().0 as usize;
+    if is_hold {
+        let tx_flags = tx.clone();
+        let flags_block = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
+            let event = unsafe { event_ptr.as_ref() };
+            let kc = event.keyCode();
+            let mods = event.modifierFlags().0 as usize;
 
-                if let Some(expected_kc) = hold_keycode {
-                    if kc != expected_kc { return; }
+            if let Some(expected_kc) = hold_keycode {
+                if kc != expected_kc { return; }
+            }
+
+            let pressed = (mods & expected_flags) == expected_flags;
+
+            if pressed && !HOLD_ACTIVE.load(Ordering::Relaxed) {
+                HOLD_ACTIVE.store(true, Ordering::Relaxed);
+                let _ = tx_flags.send(Event::HotkeyDown);
+            } else if !pressed && HOLD_ACTIVE.load(Ordering::Relaxed) {
+                HOLD_ACTIVE.store(false, Ordering::Relaxed);
+                let _ = tx_flags.send(Event::HotkeyUp);
+            }
+        });
+
+        // Keep the monitor alive by leaking it
+        let _monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+            NSEventMask::FlagsChanged,
+            &flags_block,
+        );
+        std::mem::forget(flags_block);
+        if let Some(m) = _monitor { std::mem::forget(m); }
+
+        // KeyDown monitor: discard pre-roll if another key is pressed during hold
+        let tx_key = tx.clone();
+        let key_block = block2::RcBlock::new(move |_event_ptr: NonNull<NSEvent>| {
+            if HOLD_ACTIVE.load(Ordering::Relaxed) {
+                debug!("Key pressed during hold — discarding pre-roll");
+                HOLD_ACTIVE.store(false, Ordering::Relaxed);
+                let _ = tx_key.send(Event::HotkeyUp);
+            }
+        });
+
+        let _monitor2 = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown,
+            &key_block,
+        );
+        std::mem::forget(key_block);
+        if let Some(m) = _monitor2 { std::mem::forget(m); }
+
+        info!("Hotkey monitors installed on main thread");
+    } else {
+        let tx_toggle = tx.clone();
+        let toggle_block = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
+            let event = unsafe { event_ptr.as_ref() };
+            let kc = event.keyCode();
+            let mods = event.modifierFlags().0 as usize;
+
+            if let Some(expected_kc) = toggle_keycode {
+                if kc == expected_kc && (mods & expected_flags) == expected_flags {
+                    info!("Toggle hotkey matched");
+                    let _ = tx_toggle.send(Event::HotkeyToggle);
                 }
+            }
+        });
 
-                let pressed = (mods & expected_flags) == expected_flags;
-
-                if pressed && !HOLD_ACTIVE.load(Ordering::Relaxed) {
-                    HOLD_ACTIVE.store(true, Ordering::Relaxed);
-                    let _ = tx_flags.send(Event::HotkeyDown);
-                } else if !pressed && HOLD_ACTIVE.load(Ordering::Relaxed) {
-                    HOLD_ACTIVE.store(false, Ordering::Relaxed);
-                    let _ = tx_flags.send(Event::HotkeyUp);
-                }
-            });
-
-            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-                NSEventMask::FlagsChanged,
-                &flags_block,
-            );
-
-            // Monitor 2: KeyDown — if any key is pressed while modifier is held,
-            // it's a shortcut (Ctrl+C, Ctrl+B, etc.) → discard the pre-roll
-            let tx_key = tx.clone();
-            let key_block = block2::RcBlock::new(move |_event_ptr: NonNull<NSEvent>| {
-                if HOLD_ACTIVE.load(Ordering::Relaxed) {
-                    debug!("Key pressed during hold → discarding pre-roll");
-                    // Send HotkeyUp to cancel the pre-roll, then immediately
-                    // reset so the next release doesn't trigger again
-                    HOLD_ACTIVE.store(false, Ordering::Relaxed);
-                    let _ = tx_key.send(Event::HotkeyUp);
-                }
-            });
-
-            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-                NSEventMask::KeyDown,
-                &key_block,
-            );
-        } else {
-            // Toggle mode: KeyDown with modifier combo
-            let tx_toggle = tx.clone();
-            let toggle_block = block2::RcBlock::new(move |event_ptr: NonNull<NSEvent>| {
-                let event = unsafe { event_ptr.as_ref() };
-                let kc = event.keyCode();
-                let mods = event.modifierFlags().0 as usize;
-
-                if let Some(expected_kc) = toggle_keycode {
-                    if kc == expected_kc && (mods & expected_flags) == expected_flags {
-                        info!("Toggle hotkey matched");
-                        let _ = tx_toggle.send(Event::HotkeyToggle);
-                    }
-                }
-            });
-
-            NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
-                NSEventMask::KeyDown,
-                &toggle_block,
-            );
-        }
-
-        // Keep thread alive — monitors are dropped when their reference is dropped
-        loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
-    });
+        let _monitor = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown,
+            &toggle_block,
+        );
+        std::mem::forget(toggle_block);
+        if let Some(m) = _monitor { std::mem::forget(m); }
+    }
 
     Ok(())
 }
