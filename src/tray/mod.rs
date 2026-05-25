@@ -153,15 +153,15 @@ impl App {
         // Backend submenu (Whisper local vs Voxtral API)
         let backend_submenu = Submenu::new("Transcription Engine", true);
         let backend_parakeet = CheckMenuItem::new(
-            "Parakeet TDT 0.6B (fastest, 600MB)",
+            "Parakeet (600 MB)",
             true, cfg.backend == "parakeet", None,
         );
         let backend_voxtral_local = CheckMenuItem::new(
-            "Voxtral Mini 4B (streaming, 2.3GB)",
+            "Voxtral Realtime (2.3 GB, streaming)",
             true, cfg.backend == "voxtral-local", None,
         );
         let backend_whisper = CheckMenuItem::new(
-            "Whisper large-v3-turbo (99 langs, 547MB)",
+            "Whisper Turbo (550 MB)",
             true, cfg.backend == "whisper", None,
         );
         let _ = backend_submenu.append(&backend_parakeet);
