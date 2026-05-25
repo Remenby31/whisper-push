@@ -4,60 +4,51 @@ use crate::state::{AppState, Event, State};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use std::sync::{Arc, Mutex};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu, CheckMenuItem};
-use tray_icon::{TrayIcon, TrayIconBuilder};
+use tray_icon::menu::{
+    CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
+};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use tracing::{info, warn};
 
-/// Run the tray icon + event loop. Blocks on main thread.
+const ICON_IDLE: &[u8] = include_bytes!("../../resources/icons/icon-idle.png");
+const ICON_RECORDING: &[u8] = include_bytes!("../../resources/icons/icon-recording.png");
+const ICON_PROCESSING: &[u8] = include_bytes!("../../resources/icons/icon-processing.png");
+
+fn load_icon(data: &[u8]) -> Option<Icon> {
+    let img = image::load_from_memory(data).ok()?.into_rgba8();
+    let (w, h) = img.dimensions();
+    Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
+/// Hotkey presets: (label, hotkey config value, mode)
+const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
+    ("Hold — Control", "ctrl", "hold"),
+    ("Hold — Right Control", "rctrl", "hold"),
+    ("Hold — Right Command", "rcmd", "hold"),
+    ("Hold — Right Option", "ralt", "hold"),
+    ("Toggle — ⌘⇧Space", "cmd+shift+space", "toggle"),
+    ("Toggle — ⌃⇧Space", "ctrl+shift+space", "toggle"),
+];
+
+/// Idle unload presets: (label, minutes)
+const IDLE_PRESETS: &[(&str, u32)] = &[
+    ("Never", 0),
+    ("After 5 min", 5),
+    ("After 15 min", 15),
+    ("After 30 min", 30),
+];
+
 pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
     info!("Starting system tray...");
-
-    // Build menu
-    let status_item = MenuItem::new("Whisper Push — Loading...", false, None);
-    let toggle_item = MenuItem::new("Loading model...", false, None);
-    let sep1 = PredefinedMenuItem::separator();
-    let notifications_item = CheckMenuItem::new("Notifications", true, state.config.notifications, None);
-    let sound_item = CheckMenuItem::new("Sound Feedback", true, state.config.sound_feedback, None);
-    let debug_item = CheckMenuItem::new("Debug Logging", true, state.config.debug, None);
-    let sep2 = PredefinedMenuItem::separator();
-    let config_item = MenuItem::new("Open Config...", true, None);
-    let quit_item = MenuItem::new("Quit Whisper Push", true, None);
-
-    let menu = Menu::new();
-    menu.append(&status_item)?;
-    menu.append(&sep1)?;
-    menu.append(&toggle_item)?;
-    menu.append(&PredefinedMenuItem::separator())?;
-    menu.append(&notifications_item)?;
-    menu.append(&sound_item)?;
-    menu.append(&debug_item)?;
-    menu.append(&sep2)?;
-    menu.append(&config_item)?;
-    menu.append(&quit_item)?;
-
-    // Create tray icon (use a simple text icon for now — can be replaced with PNG later)
-    let tray = TrayIconBuilder::new()
-        .with_menu(Box::new(menu))
-        .with_tooltip("Whisper Push")
-        .with_title("◆") // macOS menu bar text
-        .build()?;
-
-    // Store tray handle for icon updates
-    let tray = Arc::new(Mutex::new(tray));
-
-    // Capture handle for hold-to-talk
-    let capture: Arc<Mutex<Option<AudioCapture>>> = Arc::new(Mutex::new(None));
-
-    // Hold mode state
-    let hold_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let hold_delay = state.config.hold_delay;
 
     // Load model in background
     let model_name = state.config.model.clone();
     let tx_model = state.tx.clone();
     std::thread::spawn(move || {
         match crate::transcribe::load_model(&model_name) {
-            Ok(()) => { let _ = tx_model.send(Event::ModelReady); }
+            Ok(()) => {
+                let _ = tx_model.send(Event::ModelReady);
+            }
             Err(e) => {
                 tracing::error!("Failed to load model: {e}");
                 crate::notify::send("Whisper Push", &format!("Model load failed: {e}"));
@@ -72,304 +63,544 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
         state.tx.clone(),
     )?;
 
-    // IDs for menu event matching
+    // Forward menu events to our channel
+    let tx_menu = state.tx.clone();
+    let menu_rx = MenuEvent::receiver().clone();
+    std::thread::spawn(move || {
+        loop {
+            if let Ok(event) = menu_rx.recv() {
+                let _ = tx_menu.send(Event::MenuClicked(event.id().0.to_string()));
+            }
+        }
+    });
+
+    // ── Build menu ──────────────────────────────────────────────
+
+    let status_item = MenuItem::new("Whisper Push — Loading...", false, None);
+    let toggle_item = MenuItem::new("Loading model...", false, None);
+
+    // Hotkey submenu
+    let hotkey_submenu = Submenu::new("Hotkey", true);
+    let mut hotkey_items: Vec<(CheckMenuItem, String, String)> = Vec::new();
+    for (label, hotkey, mode) in HOTKEY_PRESETS {
+        let checked = *hotkey == state.config.hotkey && *mode == state.config.hotkey_mode;
+        let item = CheckMenuItem::new(*label, true, checked, None);
+        hotkey_submenu.append(&item)?;
+        hotkey_items.push((item, hotkey.to_string(), mode.to_string()));
+    }
+
+    // Input device submenu
+    let input_submenu = Submenu::new(
+        &format!("Input: {}", &state.config.input_device),
+        true,
+    );
+    let input_auto = CheckMenuItem::new("Auto", true, state.config.input_device == "auto", None);
+    input_submenu.append(&input_auto)?;
+    input_submenu.append(&PredefinedMenuItem::separator())?;
+    let mut input_device_items: Vec<(CheckMenuItem, String)> = vec![
+        (input_auto, "auto".to_string()),
+    ];
+    if let Ok(devices) = crate::audio::list_devices() {
+        for name in devices {
+            let checked = state.config.input_device == name;
+            let item = CheckMenuItem::new(&name, true, checked, None);
+            input_submenu.append(&item)?;
+            input_device_items.push((item, name));
+        }
+    }
+
+    // Idle unload submenu
+    let idle_submenu = Submenu::new("Idle Unload", true);
+    let mut idle_items: Vec<(CheckMenuItem, u32)> = Vec::new();
+    for (label, minutes) in IDLE_PRESETS {
+        let checked = *minutes == state.config.idle_unload_minutes;
+        let item = CheckMenuItem::new(*label, true, checked, None);
+        idle_submenu.append(&item)?;
+        idle_items.push((item, *minutes));
+    }
+
+    // Boolean toggles
+    let notifications_item =
+        CheckMenuItem::new("Notifications", true, state.config.notifications, None);
+    let sound_item =
+        CheckMenuItem::new("Sound Feedback", true, state.config.sound_feedback, None);
+    let debug_item =
+        CheckMenuItem::new("Debug Logging", true, state.config.debug, None);
+
+    let quit_item = MenuItem::new("Quit Whisper Push", true, None);
+
+    // Assemble menu
+    let menu = Menu::new();
+    menu.append(&status_item)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&toggle_item)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&hotkey_submenu)?;
+    menu.append(&input_submenu)?;
+    menu.append(&idle_submenu)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&notifications_item)?;
+    menu.append(&sound_item)?;
+    menu.append(&debug_item)?;
+    menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&quit_item)?;
+
+    // Collect IDs for event matching
     let toggle_id = toggle_item.id().clone();
-    let config_id = config_item.id().clone();
     let quit_id = quit_item.id().clone();
     let notif_id = notifications_item.id().clone();
     let sound_id = sound_item.id().clone();
     let debug_id = debug_item.id().clone();
 
-    // Config clone for mutations
+    // Collect hotkey item IDs
+    let hotkey_ids: Vec<(String, String, String)> = hotkey_items
+        .iter()
+        .map(|(item, hk, mode)| (item.id().0.clone(), hk.clone(), mode.clone()))
+        .collect();
+
+    // Collect input device item IDs
+    let input_ids: Vec<(String, String)> = input_device_items
+        .iter()
+        .map(|(item, name)| (item.id().0.clone(), name.clone()))
+        .collect();
+
+    // Collect idle item IDs
+    let idle_ids: Vec<(String, u32)> = idle_items
+        .iter()
+        .map(|(item, min)| (item.id().0.clone(), *min))
+        .collect();
+
+    // Create tray icon
+    let icon = load_icon(ICON_IDLE);
+    let mut builder = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_tooltip("Whisper Push — Loading...");
+    if let Some(ref ico) = icon {
+        builder = builder.with_icon(ico.clone());
+    }
+    let tray = builder.build()?;
+
+    // Shared state
+    let capture: Arc<Mutex<Option<AudioCapture>>> = Arc::new(Mutex::new(None));
+    let hold_pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hold_delay = state.config.hold_delay;
     let config = Arc::new(Mutex::new(state.config.clone()));
 
-    // Process menu events in a separate thread
-    let tx_menu = state.tx.clone();
-    let config_menu = config.clone();
-    std::thread::spawn(move || {
+    // ── Event loop (main thread) ────────────────────────────────
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+
+        let poll_interval = std::time::Duration::from_millis(16);
+        let mtm = MainThreadMarker::new().expect("must be on main thread");
+        let app = NSApplication::sharedApplication(mtm);
+
         loop {
-            if let Ok(event) = MenuEvent::receiver().recv() {
-                if event.id() == &quit_id {
-                    let _ = tx_menu.send(Event::Quit);
-                } else if event.id() == &toggle_id {
-                    let _ = tx_menu.send(Event::HotkeyToggle);
-                } else if event.id() == &config_id {
-                    let path = crate::config::config_path();
-                    #[cfg(target_os = "macos")]
-                    { let _ = std::process::Command::new("open").arg(&path).spawn(); }
-                    #[cfg(target_os = "linux")]
-                    { let _ = std::process::Command::new("xdg-open").arg(&path).spawn(); }
-                    #[cfg(target_os = "windows")]
-                    { let _ = std::process::Command::new("notepad").arg(&path).spawn(); }
-                } else if event.id() == &notif_id {
-                    let mut cfg = config_menu.lock().unwrap();
-                    cfg.notifications = !cfg.notifications;
-                    let _ = cfg.save();
-                } else if event.id() == &sound_id {
-                    let mut cfg = config_menu.lock().unwrap();
-                    cfg.sound_feedback = !cfg.sound_feedback;
-                    let _ = cfg.save();
-                } else if event.id() == &debug_id {
-                    let mut cfg = config_menu.lock().unwrap();
-                    cfg.debug = !cfg.debug;
-                    let _ = cfg.save();
+            while let Ok(event) = rx.try_recv() {
+                handle_event(
+                    event,
+                    &state,
+                    &config,
+                    &tray,
+                    &capture,
+                    &hold_pending,
+                    hold_delay,
+                    &toggle_item,
+                    &status_item,
+                    &toggle_id,
+                    &quit_id,
+                    &notif_id,
+                    &sound_id,
+                    &debug_id,
+                    &notifications_item,
+                    &sound_item,
+                    &debug_item,
+                    &hotkey_ids,
+                    &hotkey_items,
+                    &input_ids,
+                    &input_device_items,
+                    &input_submenu,
+                    &idle_ids,
+                    &idle_items,
+                );
+            }
+
+            unsafe {
+                let until = objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(
+                    poll_interval.as_secs_f64(),
+                );
+                let evt = app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                    objc2_app_kit::NSEventMask::Any,
+                    Some(&until),
+                    objc2_foundation::NSDefaultRunLoopMode,
+                    true,
+                );
+                if let Some(ref e) = evt {
+                    app.sendEvent(e);
                 }
             }
         }
-    });
+    }
 
-    // Main event loop
-    let cfg = config.clone();
-    loop {
-        match rx.recv() {
-            Ok(Event::ModelReady) => {
-                state.set(State::Idle);
-                toggle_item.set_text("Start Recording");
-                toggle_item.set_enabled(true);
-                let hotkey_display = format_hotkey_display(&state.config.hotkey, &state.config.hotkey_mode);
-                status_item.set_text(&format!("Whisper Push ({hotkey_display})"));
-                update_tray_title(&tray, State::Idle);
-                if cfg.lock().unwrap().notifications {
-                    crate::notify::send("Whisper Push", "Model loaded and ready!");
+    #[cfg(not(target_os = "macos"))]
+    {
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(event) => {
+                    handle_event(
+                        event,
+                        &state,
+                        &config,
+                        &tray,
+                        &capture,
+                        &hold_pending,
+                        hold_delay,
+                        &toggle_item,
+                        &status_item,
+                        &toggle_id,
+                        &quit_id,
+                        &notif_id,
+                        &sound_id,
+                        &debug_id,
+                        &notifications_item,
+                        &sound_item,
+                        &debug_item,
+                        &hotkey_ids,
+                        &hotkey_items,
+                        &input_ids,
+                        &input_device_items,
+                        &input_submenu,
+                        &idle_ids,
+                        &idle_items,
+                    );
                 }
-                info!("Ready — listening for hotkey");
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_event(
+    event: Event,
+    state: &AppState,
+    cfg: &Arc<Mutex<Config>>,
+    tray: &TrayIcon,
+    capture: &Arc<Mutex<Option<AudioCapture>>>,
+    hold_pending: &Arc<std::sync::atomic::AtomicBool>,
+    hold_delay: f64,
+    toggle_item: &MenuItem,
+    status_item: &MenuItem,
+    toggle_id: &tray_icon::menu::MenuId,
+    quit_id: &tray_icon::menu::MenuId,
+    notif_id: &tray_icon::menu::MenuId,
+    sound_id: &tray_icon::menu::MenuId,
+    debug_id: &tray_icon::menu::MenuId,
+    notifications_item: &CheckMenuItem,
+    sound_item: &CheckMenuItem,
+    debug_item: &CheckMenuItem,
+    hotkey_ids: &[(String, String, String)],
+    hotkey_items: &[(CheckMenuItem, String, String)],
+    input_ids: &[(String, String)],
+    input_device_items: &[(CheckMenuItem, String)],
+    input_submenu: &Submenu,
+    idle_ids: &[(String, u32)],
+    idle_items: &[(CheckMenuItem, u32)],
+) {
+    match event {
+        Event::ModelReady => {
+            state.set(State::Idle);
+            toggle_item.set_text("Start Recording");
+            toggle_item.set_enabled(true);
+            let disp =
+                format_hotkey_display(&state.config.hotkey, &state.config.hotkey_mode);
+            status_item.set_text(&format!("Whisper Push ({disp})"));
+            set_tray_icon(tray, State::Idle);
+            if cfg.lock().unwrap().notifications {
+                crate::notify::send("Whisper Push", "Model loaded and ready!");
+            }
+            info!("Ready — listening for hotkey");
+        }
+
+        Event::MenuClicked(ref id) => {
+            // Quit
+            if id == &quit_id.0 {
+                info!("Quit");
+                crate::transcribe::unload_model();
+                std::process::exit(0);
+            }
+            // Toggle recording from menu
+            if id == &toggle_id.0 {
+                let _ = state.tx.send(Event::HotkeyToggle);
+                return;
+            }
+            // Notifications toggle
+            if id == &notif_id.0 {
+                let mut c = cfg.lock().unwrap();
+                c.notifications = !c.notifications;
+                let _ = c.save();
+                return;
+            }
+            // Sound toggle
+            if id == &sound_id.0 {
+                let mut c = cfg.lock().unwrap();
+                c.sound_feedback = !c.sound_feedback;
+                let _ = c.save();
+                return;
+            }
+            // Debug toggle
+            if id == &debug_id.0 {
+                let mut c = cfg.lock().unwrap();
+                c.debug = !c.debug;
+                let _ = c.save();
+                return;
             }
 
-            Ok(Event::HotkeyDown) => {
-                if state.current() != State::Idle { continue; }
+            // Hotkey preset selected
+            for (item_id, hotkey, mode) in hotkey_ids {
+                if id == item_id {
+                    info!("Hotkey changed to: {hotkey} ({mode})");
+                    let mut c = cfg.lock().unwrap();
+                    c.hotkey = hotkey.clone();
+                    c.hotkey_mode = mode.clone();
+                    let _ = c.save();
+                    // Update checkmarks
+                    for (item, hk, _) in hotkey_items {
+                        item.set_checked(hk == hotkey);
+                    }
+                    // Update status text
+                    let disp = format_hotkey_display(hotkey, mode);
+                    status_item.set_text(&format!("Whisper Push ({disp})"));
+                    // Note: hotkey listener restart requires app restart for now
+                    crate::notify::send(
+                        "Whisper Push",
+                        "Hotkey changed. Restart the app to apply.",
+                    );
+                    return;
+                }
+            }
 
-                // Pre-roll: start capturing immediately
+            // Input device selected
+            for (item_id, name) in input_ids {
+                if id == item_id {
+                    info!("Input device changed to: {name}");
+                    let mut c = cfg.lock().unwrap();
+                    c.input_device = name.clone();
+                    let _ = c.save();
+                    // Update checkmarks
+                    for (item, n) in input_device_items {
+                        item.set_checked(n == name);
+                    }
+                    // Update submenu title
+                    input_submenu.set_text(&format!("Input: {name}"));
+                    return;
+                }
+            }
+
+            // Idle unload selected
+            for (item_id, minutes) in idle_ids {
+                if id == item_id {
+                    info!("Idle unload changed to: {minutes} min");
+                    let mut c = cfg.lock().unwrap();
+                    c.idle_unload_minutes = *minutes;
+                    let _ = c.save();
+                    for (item, m) in idle_items {
+                        item.set_checked(*m == *minutes);
+                    }
+                    return;
+                }
+            }
+        }
+
+        Event::HotkeyDown => {
+            if state.current() != State::Idle {
+                return;
+            }
+            let device = cfg.lock().unwrap().input_device.clone();
+            match AudioCapture::start(&device) {
+                Ok(cap) => {
+                    *capture.lock().unwrap() = Some(cap);
+                    hold_pending.store(true, std::sync::atomic::Ordering::Relaxed);
+                    let pending = hold_pending.clone();
+                    let tx = state.tx.clone();
+                    let delay_ms = (hold_delay * 1000.0) as u64;
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                        if pending.load(std::sync::atomic::Ordering::Relaxed) {
+                            pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                            let _ = tx.send(Event::StateChanged(State::Recording));
+                        }
+                    });
+                }
+                Err(e) => warn!("Capture failed: {e}"),
+            }
+        }
+
+        Event::HotkeyUp => {
+            if hold_pending.load(std::sync::atomic::Ordering::Relaxed) {
+                hold_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                capture.lock().unwrap().take();
+                info!("Quick tap — discarded");
+                return;
+            }
+            if state.current() != State::Recording {
+                return;
+            }
+            do_finish(state, cfg, tray, capture, toggle_item);
+        }
+
+        Event::HotkeyToggle => match state.current() {
+            State::Idle => {
                 let device = cfg.lock().unwrap().input_device.clone();
                 match AudioCapture::start(&device) {
                     Ok(cap) => {
                         *capture.lock().unwrap() = Some(cap);
-                        hold_pending.store(true, std::sync::atomic::Ordering::Relaxed);
-
-                        // Hold delay timer: if key is still held after delay, commit
-                        let pending = hold_pending.clone();
-                        let tx_delay = state.tx.clone();
-                        let delay_ms = (hold_delay * 1000.0) as u64;
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                            if pending.load(std::sync::atomic::Ordering::Relaxed) {
-                                pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                                let _ = tx_delay.send(Event::StateChanged(State::Recording));
-                            }
-                        });
-                    }
-                    Err(e) => warn!("Failed to start capture: {e}"),
-                }
-            }
-
-            Ok(Event::HotkeyUp) => {
-                if hold_pending.load(std::sync::atomic::Ordering::Relaxed) {
-                    // Released during hold delay — discard pre-roll
-                    hold_pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                    if let Some(cap) = capture.lock().unwrap().take() {
-                        drop(cap);
-                    }
-                    info!("Quick tap — discarded");
-                    continue;
-                }
-
-                if state.current() != State::Recording { continue; }
-
-                // Stop recording and transcribe
-                state.set(State::Processing);
-                toggle_item.set_text("Processing...");
-                toggle_item.set_enabled(false);
-                update_tray_title(&tray, State::Processing);
-
-                if cfg.lock().unwrap().sound_feedback {
-                    crate::audio::playback::play_sound("stop");
-                }
-
-                let audio = capture.lock().unwrap().take()
-                    .map(|c| c.stop())
-                    .unwrap_or_default();
-
-                if audio.len() < 4800 {
-                    // Less than 0.3s — skip
-                    info!("Audio too short ({:.1}s), skipping", audio.len() as f32 / 16000.0);
-                    state.set(State::Idle);
-                    toggle_item.set_text("Start Recording");
-                    toggle_item.set_enabled(true);
-                    update_tray_title(&tray, State::Idle);
-                    continue;
-                }
-
-                let tx_transcribe = state.tx.clone();
-                let lang = cfg.lock().unwrap().language.clone();
-                std::thread::spawn(move || {
-                    match crate::transcribe::transcribe(&audio, &lang) {
-                        Ok(text) if !text.is_empty() => {
-                            let _ = tx_transcribe.send(Event::Transcribed(text));
-                        }
-                        Ok(_) => {
-                            info!("No speech detected");
-                            let _ = tx_transcribe.send(Event::StateChanged(State::Idle));
-                        }
-                        Err(e) => {
-                            tracing::error!("Transcription error: {e}");
-                            let _ = tx_transcribe.send(Event::StateChanged(State::Idle));
-                        }
-                    }
-                });
-            }
-
-            Ok(Event::HotkeyToggle) => {
-                match state.current() {
-                    State::Idle => {
-                        // Start recording
-                        let device = cfg.lock().unwrap().input_device.clone();
-                        match AudioCapture::start(&device) {
-                            Ok(cap) => {
-                                *capture.lock().unwrap() = Some(cap);
-                                state.set(State::Recording);
-                                toggle_item.set_text("Stop & Transcribe");
-                                update_tray_title(&tray, State::Recording);
-                                if cfg.lock().unwrap().sound_feedback {
-                                    crate::audio::playback::play_sound("start");
-                                }
-                                info!("Recording started (toggle mode)");
-                            }
-                            Err(e) => warn!("Failed to start capture: {e}"),
-                        }
-                    }
-                    State::Recording => {
-                        // Stop and transcribe
-                        state.set(State::Processing);
-                        toggle_item.set_text("Processing...");
-                        toggle_item.set_enabled(false);
-                        update_tray_title(&tray, State::Processing);
-
+                        state.set(State::Recording);
+                        toggle_item.set_text("Stop & Transcribe");
+                        set_tray_icon(tray, State::Recording);
                         if cfg.lock().unwrap().sound_feedback {
-                            crate::audio::playback::play_sound("stop");
+                            crate::audio::playback::play_sound("start");
                         }
-
-                        let audio = capture.lock().unwrap().take()
-                            .map(|c| c.stop())
-                            .unwrap_or_default();
-
-                        let tx_t = state.tx.clone();
-                        let lang = cfg.lock().unwrap().language.clone();
-                        std::thread::spawn(move || {
-                            match crate::transcribe::transcribe(&audio, &lang) {
-                                Ok(text) if !text.is_empty() => {
-                                    let _ = tx_t.send(Event::Transcribed(text));
-                                }
-                                Ok(_) => {
-                                    let _ = tx_t.send(Event::StateChanged(State::Idle));
-                                }
-                                Err(e) => {
-                                    tracing::error!("Transcription error: {e}");
-                                    let _ = tx_t.send(Event::StateChanged(State::Idle));
-                                }
-                            }
-                        });
                     }
-                    _ => {}
+                    Err(e) => warn!("Capture failed: {e}"),
                 }
             }
+            State::Recording => do_finish(state, cfg, tray, capture, toggle_item),
+            _ => {}
+        },
 
-            Ok(Event::Transcribed(text)) => {
-                info!("Pasting: '{}'", if text.len() > 80 { &text[..80] } else { &text });
-                if let Err(e) = crate::paste::paste_text(&text) {
-                    tracing::error!("Paste failed: {e}");
-                }
-                if cfg.lock().unwrap().notifications {
-                    let preview = if text.len() > 50 {
-                        format!("{}...", &text[..50])
-                    } else {
-                        text
-                    };
-                    crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
-                }
-                state.set(State::Idle);
+        Event::StateChanged(State::Recording) => {
+            state.set(State::Recording);
+            toggle_item.set_text("Recording...");
+            set_tray_icon(tray, State::Recording);
+            if cfg.lock().unwrap().sound_feedback {
+                crate::audio::playback::play_sound("start");
+            }
+            info!("Hold confirmed — recording");
+        }
+
+        Event::Transcribed(text) => {
+            if let Err(e) = crate::paste::paste_text(&text) {
+                tracing::error!("Paste failed: {e}");
+            }
+            if cfg.lock().unwrap().notifications {
+                let preview = if text.len() > 50 {
+                    format!("{}...", &text[..50])
+                } else {
+                    text
+                };
+                crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
+            }
+            state.set(State::Idle);
+            toggle_item.set_text("Start Recording");
+            toggle_item.set_enabled(true);
+            set_tray_icon(tray, State::Idle);
+        }
+
+        Event::StateChanged(s) => {
+            state.set(s);
+            set_tray_icon(tray, s);
+            if s == State::Idle {
                 toggle_item.set_text("Start Recording");
                 toggle_item.set_enabled(true);
-                update_tray_title(&tray, State::Idle);
             }
-
-            Ok(Event::StateChanged(State::Recording)) => {
-                // Hold confirmed (after delay) — commit the recording
-                state.set(State::Recording);
-                toggle_item.set_text("Recording... (release to stop)");
-                update_tray_title(&tray, State::Recording);
-                if cfg.lock().unwrap().sound_feedback {
-                    crate::audio::playback::play_sound("start");
-                }
-                info!("Hold confirmed — recording");
-            }
-
-            Ok(Event::StateChanged(new_state)) => {
-                state.set(new_state);
-                update_tray_title(&tray, new_state);
-                match new_state {
-                    State::Idle => {
-                        toggle_item.set_text("Start Recording");
-                        toggle_item.set_enabled(true);
-                    }
-                    _ => {}
-                }
-            }
-
-            Ok(Event::AudioCaptured(_)) => {
-                // Handled inline above
-            }
-
-            Ok(Event::Quit) => {
-                info!("Quitting...");
-                crate::transcribe::unload_model();
-                break;
-            }
-
-            Err(_) => break,
         }
-    }
 
-    Ok(())
+        _ => {}
+    }
 }
 
-fn update_tray_title(tray: &Arc<Mutex<TrayIcon>>, state: State) {
-    let title = match state {
-        State::Loading => "◐",
-        State::Idle => "◆",
-        State::Recording => "●",
-        State::Processing => "◐",
+fn do_finish(
+    state: &AppState,
+    cfg: &Arc<Mutex<Config>>,
+    tray: &TrayIcon,
+    capture: &Arc<Mutex<Option<AudioCapture>>>,
+    toggle_item: &MenuItem,
+) {
+    state.set(State::Processing);
+    toggle_item.set_text("Processing...");
+    toggle_item.set_enabled(false);
+    set_tray_icon(tray, State::Processing);
+
+    if cfg.lock().unwrap().sound_feedback {
+        crate::audio::playback::play_sound("stop");
+    }
+
+    let audio = capture
+        .lock()
+        .unwrap()
+        .take()
+        .map(|c| c.stop())
+        .unwrap_or_default();
+    if audio.len() < 4800 {
+        info!("Too short, skipping");
+        state.set(State::Idle);
+        toggle_item.set_text("Start Recording");
+        toggle_item.set_enabled(true);
+        set_tray_icon(tray, State::Idle);
+        return;
+    }
+
+    let tx = state.tx.clone();
+    let lang = cfg.lock().unwrap().language.clone();
+    std::thread::spawn(move || {
+        match crate::transcribe::transcribe(&audio, &lang) {
+            Ok(text) if !text.is_empty() => {
+                let _ = tx.send(Event::Transcribed(text));
+            }
+            Ok(_) => {
+                let _ = tx.send(Event::StateChanged(State::Idle));
+            }
+            Err(e) => {
+                tracing::error!("Transcription: {e}");
+                let _ = tx.send(Event::StateChanged(State::Idle));
+            }
+        }
+    });
+}
+
+fn set_tray_icon(tray: &TrayIcon, state: State) {
+    let data = match state {
+        State::Loading | State::Processing => ICON_PROCESSING,
+        State::Idle => ICON_IDLE,
+        State::Recording => ICON_RECORDING,
     };
-    if let Ok(t) = tray.lock() {
-        t.set_title(Some(title));
+    if let Some(icon) = load_icon(data) {
+        let _ = tray.set_icon(Some(icon));
     }
 }
 
-/// Format hotkey for display.
 fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
     let symbols: &[(&str, &str)] = &[
-        ("cmd", "⌘"), ("command", "⌘"),
+        ("cmd", "⌘"),
         ("shift", "⇧"),
-        ("alt", "⌥"), ("option", "⌥"),
-        ("ctrl", "⌃"), ("control", "⌃"),
-        ("lctrl", "⌃L"), ("rctrl", "⌃R"),
-        ("lshift", "⇧L"), ("rshift", "⇧R"),
-        ("lalt", "⌥L"), ("ralt", "⌥R"),
-        ("lcmd", "⌘L"), ("rcmd", "⌘R"),
+        ("alt", "⌥"),
+        ("ctrl", "⌃"),
+        ("lctrl", "⌃L"),
+        ("rctrl", "⌃R"),
+        ("rcmd", "⌘R"),
+        ("ralt", "⌥R"),
         ("space", "Space"),
     ];
-
-    let mut result = String::new();
-    if mode == "hold" {
-        result.push_str("Hold ");
-    }
-
-    for (i, part) in hotkey.to_lowercase().split('+').enumerate() {
-        let part = part.trim();
-        if i > 0 { result.push('+'); }
-        if let Some((_, sym)) = symbols.iter().find(|(k, _)| *k == part) {
-            result.push_str(sym);
+    let mut r = if mode == "hold" {
+        "Hold ".into()
+    } else {
+        String::new()
+    };
+    for (i, p) in hotkey.to_lowercase().split('+').enumerate() {
+        let p = p.trim();
+        if i > 0 {
+            r.push('+');
+        }
+        if let Some((_, s)) = symbols.iter().find(|(k, _)| *k == p) {
+            r.push_str(s);
         } else {
-            result.push_str(&part.to_uppercase());
+            r.push_str(&p.to_uppercase());
         }
     }
-    result
+    r
 }

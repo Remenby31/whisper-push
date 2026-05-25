@@ -40,6 +40,8 @@ pub enum Event {
     ModelReady,
     /// State changed (for tray icon update)
     StateChanged(State),
+    /// Menu item clicked (menu item id string)
+    MenuClicked(String),
     /// Request quit
     Quit,
 }
