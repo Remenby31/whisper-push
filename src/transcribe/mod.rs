@@ -1,3 +1,4 @@
+pub mod parakeet;
 pub mod voxtral_local;
 
 use anyhow::Result;
@@ -8,6 +9,8 @@ use tracing::{info, warn};
 /// Available transcription backends.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Backend {
+    /// Parakeet TDT — fastest (ONNX Runtime, WebGPU/CUDA/CPU)
+    Parakeet,
     /// Local whisper.cpp (Metal/CUDA/CPU)
     WhisperLocal(String), // model filename
     /// Local Voxtral Mini 4B Realtime (Burn + WGPU, Q4 GGUF)
@@ -17,6 +20,7 @@ pub enum Backend {
 impl Backend {
     pub fn label(&self) -> &str {
         match self {
+            Backend::Parakeet => "Parakeet TDT 0.6B (fastest, ONNX GPU)",
             Backend::WhisperLocal(m) => {
                 if m.contains("large-v3-turbo") { "Whisper large-v3-turbo (local)" }
                 else if m.contains("small") { "Whisper small (local)" }
@@ -71,6 +75,7 @@ pub fn is_loaded() -> bool {
 /// Transcribe audio using the active backend.
 pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend) -> Result<String> {
     match backend {
+        Backend::Parakeet => parakeet::transcribe(audio),
         Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
         Backend::VoxtralLocal => voxtral_local::transcribe(audio),
     }

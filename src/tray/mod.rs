@@ -141,16 +141,21 @@ impl App {
 
         // Backend submenu (Whisper local vs Voxtral API)
         let backend_submenu = Submenu::new("Transcription Engine", true);
-        let backend_whisper = CheckMenuItem::new(
-            "Whisper large-v3-turbo (local, Metal GPU)",
-            true, cfg.backend == "whisper", None,
+        let backend_parakeet = CheckMenuItem::new(
+            "\u{26a1} Parakeet TDT 0.6B (fastest \u{2014} ~27ms, 600MB)",
+            cfg!(feature = "parakeet"), cfg.backend == "parakeet", None,
         );
         let backend_voxtral_local = CheckMenuItem::new(
-            "Voxtral Mini 4B (local, Q4 GPU \u{2014} 2.5GB)",
+            "Voxtral Mini 4B (streaming \u{2014} ~400ms, 2.3GB)",
             cfg!(feature = "voxtral"), cfg.backend == "voxtral-local", None,
         );
-        let _ = backend_submenu.append(&backend_whisper);
+        let backend_whisper = CheckMenuItem::new(
+            "Whisper large-v3-turbo (99 langs \u{2014} ~1.2s, 547MB)",
+            true, cfg.backend == "whisper", None,
+        );
+        let _ = backend_submenu.append(&backend_parakeet);
         let _ = backend_submenu.append(&backend_voxtral_local);
+        let _ = backend_submenu.append(&backend_whisper);
 
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
@@ -214,8 +219,9 @@ impl App {
             acc_perm_id: acc_perm_item.id().0.clone(),
             mic_perm_item, acc_perm_item, perms_submenu, warn_item,
             backend_items: vec![
-                (backend_whisper, "whisper".into()),
+                (backend_parakeet, "parakeet".into()),
                 (backend_voxtral_local, "voxtral-local".into()),
+                (backend_whisper, "whisper".into()),
             ],
             status_item, toggle_item,
             notifications_item, sound_item, debug_item,
@@ -492,6 +498,7 @@ impl App {
         let tx = self.state.tx.clone();
         let cfg = self.config.lock().unwrap().clone();
         let backend = match cfg.backend.as_str() {
+            "parakeet" => crate::transcribe::Backend::Parakeet,
             "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
             _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
         };

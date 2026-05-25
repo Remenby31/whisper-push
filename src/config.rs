@@ -16,7 +16,7 @@ pub struct Config {
     pub language: String,
     /// Whisper model name (used for HuggingFace download)
     pub model: String,
-    /// Transcription backend: "whisper" or "voxtral-local"
+    /// Transcription backend: "parakeet", "whisper", or "voxtral-local"
     pub backend: String,
     /// Free model from RAM after N minutes idle (0 = always resident)
     pub idle_unload_minutes: u32,

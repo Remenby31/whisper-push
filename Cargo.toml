@@ -14,6 +14,7 @@ metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
 voxtral = ["dep:voxtral-mini-realtime", "dep:burn"]
+parakeet = ["dep:parakeet-rs"]
 
 [dependencies]
 # Audio capture & playback
@@ -25,6 +26,7 @@ symphonia = { version = "0.5", features = ["mp3", "wav", "ogg", "flac", "aac"] }
 # Transcription
 whisper-rs = "0.16"
 voxtral-mini-realtime = { path = "../voxtral-mini-realtime-rs", default-features = false, features = ["wgpu", "native-tokenizer"], optional = true }
+parakeet-rs = { version = "0.3", optional = true }
 burn = { version = "0.20", default-features = false, features = ["wgpu"], optional = true }
 
 # Model download
