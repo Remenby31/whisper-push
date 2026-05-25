@@ -13,7 +13,7 @@ default = []
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
-voxtral = ["dep:voxtral-mini-realtime"]
+voxtral = ["dep:voxtral-mini-realtime", "dep:burn"]
 
 [dependencies]
 # Audio capture & playback
@@ -23,7 +23,8 @@ hound = "3.5"            # WAV read for embedded sounds
 
 # Transcription
 whisper-rs = "0.16"
-voxtral-mini-realtime = { git = "https://github.com/TrevorS/voxtral-mini-realtime-rs.git", default-features = false, features = ["wgpu", "native-tokenizer"], optional = true }
+voxtral-mini-realtime = { path = "../voxtral-mini-realtime-rs", default-features = false, features = ["wgpu", "native-tokenizer"], optional = true }
+burn = { version = "0.20", default-features = false, features = ["wgpu"], optional = true }
 
 # Model download
 hf-hub = "0.4"
