@@ -4,6 +4,7 @@ mod hotkey;
 mod hardware;
 mod model_manager;
 mod notify;
+mod onboarding;
 mod overlay;
 mod paste;
 mod permissions;
@@ -213,9 +214,15 @@ mod app {
     use anyhow::Result;
     use crate::config::Config;
 
-    pub fn run(cfg: Config) -> Result<()> {
+    pub fn run(mut cfg: Config) -> Result<()> {
         // Ensure single instance
         let _lock = crate::state::acquire_lock()?;
+
+        // First-launch onboarding
+        if crate::onboarding::check_first_launch() {
+            let backend = crate::onboarding::run();
+            cfg.backend = backend;
+        }
 
         tracing::info!("Starting whisper-push daemon");
 
