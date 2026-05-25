@@ -14,8 +14,8 @@ build:
 
 # Release build (all backends on macOS)
 release:
-	cargo build --release --features "metal,parakeet"
-	@echo "✓ Release build complete (Metal + Parakeet)"
+	cargo build --release --features "metal,parakeet,voxtral"
+	@echo "✓ Release build complete (Metal + Parakeet + Voxtral)"
 
 # Check (no build, just type-check)
 check:
