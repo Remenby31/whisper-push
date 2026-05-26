@@ -134,74 +134,104 @@ mod inner {
         use super::VOXTRAL;
 
         /// Streaming session wrapper.
+        /// Accumulates all audio and re-encodes from scratch each chunk
+        /// (encoder is fast), using decoder KV cache for incremental decode.
         pub struct StreamingSession {
-            session: Q4StreamingSession,
             mel_extractor: MelSpectrogram,
             pad_config: PadConfig,
-            audio_overlap: Vec<f32>, // overlap buffer for mel continuity
+            all_audio: Vec<f32>,           // accumulated audio samples
+            last_decoded_positions: usize, // how many decoder positions we've already decoded
+            decoder_cache_tokens: Vec<i32>, // all tokens generated so far
+            prefill_done: bool,
         }
 
-        /// Start a new streaming session. Model must be loaded first.
+        /// Start a new streaming session.
         pub fn start() -> Result<StreamingSession> {
-            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
-            let state = guard.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Voxtral not loaded — call load_model first"))?;
-
-            // We need the model reference but can't hold the lock during streaming.
-            // The session stores caches independently; we only need the model for feed_chunk.
-            // For now, create the session while we have the lock.
-            let session = Q4StreamingSession::new(&state.model, 6.0);
-
             Ok(StreamingSession {
-                session,
                 mel_extractor: MelSpectrogram::new(MelConfig::voxtral()),
                 pad_config: PadConfig::voxtral(),
-                audio_overlap: Vec::new(),
+                all_audio: Vec::new(),
+                last_decoded_positions: 0,
+                decoder_cache_tokens: Vec::new(),
+                prefill_done: false,
             })
         }
 
         /// Feed an audio chunk (16kHz mono f32) and return newly transcribed words.
+        /// Uses "accumulate + full re-encode" approach: audio is accumulated,
+        /// mel + encoder run on the full audio each time, but we only decode
+        /// the NEW positions (the ones we haven't decoded yet).
         pub fn feed_chunk(session: &mut StreamingSession, audio: &[f32]) -> Result<Vec<String>> {
-            // Prepend overlap from previous chunk for mel continuity
-            let mut full_audio = session.audio_overlap.clone();
-            full_audio.extend_from_slice(audio);
+            session.all_audio.extend_from_slice(audio);
 
-            // Save overlap for next chunk (win_length - hop_length = 240 samples)
-            let overlap_size = 240.min(full_audio.len());
-            session.audio_overlap = full_audio[full_audio.len() - overlap_size..].to_vec();
+            // Need at least 1 second of audio before attempting transcription
+            if session.all_audio.len() < 16000 {
+                return Ok(Vec::new());
+            }
 
-            // Compute mel spectrogram for this chunk
-            let audio_buf = AudioBuffer::new(full_audio, 16000);
+            // Run full batch transcription on all accumulated audio
+            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let state = guard.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Model not loaded"))?;
+
+            // Compute mel on all audio
+            let audio_buf = AudioBuffer::new(session.all_audio.clone(), 16000);
             let padded = pad_audio(&audio_buf, &session.pad_config);
             let mel = session.mel_extractor.compute_log(&padded.samples);
             let n_frames = mel.len();
             let n_mels = if n_frames > 0 { mel[0].len() } else { 0 };
+            if n_frames == 0 { return Ok(Vec::new()); }
 
-            if n_frames == 0 {
-                return Ok(Vec::new());
-            }
-
-            // Transpose mel [frames, mels] → [mels, frames] and create tensor
-            let mut mel_transposed = vec![vec![0.0f32; n_frames]; n_mels];
-            for (frame_idx, frame) in mel.iter().enumerate() {
-                for (mel_idx, &val) in frame.iter().enumerate() {
-                    mel_transposed[mel_idx][frame_idx] = val;
+            let mut mel_t = vec![vec![0.0f32; n_frames]; n_mels];
+            for (fi, frame) in mel.iter().enumerate() {
+                for (mi, &val) in frame.iter().enumerate() {
+                    mel_t[mi][fi] = val;
                 }
             }
-            let mel_flat: Vec<f32> = mel_transposed.into_iter().flatten().collect();
-
+            let mel_flat: Vec<f32> = mel_t.into_iter().flatten().collect();
             let device: burn::backend::wgpu::WgpuDevice = Default::default();
             let mel_tensor = burn::tensor::Tensor::from_data(
                 burn::tensor::TensorData::new(mel_flat, [1, n_mels, n_frames]),
                 &device,
             );
 
-            // Feed to the streaming session (needs model reference)
-            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
-            let state = guard.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Model unloaded during streaming"))?;
+            // Full encode (fast, ~50ms for 10s audio on M4 Pro Metal)
+            let audio_embeds = state.model.encode_audio(mel_tensor);
+            let [_, seq_len, _] = audio_embeds.dims();
 
-            let new_tokens = session.session.feed_mel_chunk(&state.model, mel_tensor);
+            // How many NEW positions to decode?
+            let new_positions = seq_len.saturating_sub(session.last_decoded_positions);
+            if new_positions == 0 {
+                return Ok(Vec::new());
+            }
+
+            // Run transcribe_streaming on the full audio (re-does prefill+decode)
+            // but we only extract the NEW tokens at the end
+            let all_tokens = state.model.transcribe_streaming(
+                // Re-create mel tensor for transcribe_streaming
+                {
+                    let mel2 = session.mel_extractor.compute_log(&padded.samples);
+                    let mut mt = vec![vec![0.0f32; n_frames]; n_mels];
+                    for (fi, frame) in mel2.iter().enumerate() {
+                        for (mi, &val) in frame.iter().enumerate() {
+                            mt[mi][fi] = val;
+                        }
+                    }
+                    let flat: Vec<f32> = mt.into_iter().flatten().collect();
+                    burn::tensor::Tensor::from_data(
+                        burn::tensor::TensorData::new(flat, [1, n_mels, n_frames]),
+                        &device,
+                    )
+                },
+                state.t_embed.clone(),
+            );
+
+            // Extract only the NEW tokens (skip the ones we already reported)
+            let prev_count = session.decoder_cache_tokens.len();
+            session.decoder_cache_tokens = all_tokens.clone();
+            session.last_decoded_positions = seq_len;
+
+            let new_tokens: Vec<i32> = all_tokens.into_iter().skip(prev_count).collect();
 
             // Decode text tokens (>= 1000)
             let text_tokens: Vec<u32> = new_tokens.iter()
@@ -215,7 +245,6 @@ mod inner {
 
             let text = state.tokenizer.decode(&text_tokens)
                 .context("Failed to decode tokens")?;
-
             let words: Vec<String> = text.split_whitespace()
                 .map(|w| w.to_string())
                 .collect();
@@ -229,8 +258,7 @@ mod inner {
 
         /// Finish streaming and return the complete transcription.
         pub fn finish(session: StreamingSession) -> Result<String> {
-            let all_tokens = session.session.finish();
-            let text_tokens: Vec<u32> = all_tokens.iter()
+            let text_tokens: Vec<u32> = session.decoder_cache_tokens.iter()
                 .filter(|&&t| t >= 1000)
                 .map(|&t| t as u32)
                 .collect();
