@@ -125,11 +125,43 @@ Then:
 2. Drag to Applications
 3. Run `./macos/install.sh` to set up hotkey daemon
 
+## Code signing (so Accessibility permission sticks)
+
+macOS remembers the Accessibility grant by the app's signing identity. With
+ad-hoc signing the identity (cdhash) changes on every build, so the permission
+is forgotten on each update and the system dialog reappears. `build-dmg.sh`
+therefore signs with a **stable** identity if one is available.
+
+- **Best:** a `Developer ID Application` certificate (Apple Developer account).
+  Build with `WHISPER_PUSH_SIGN_IDENTITY="Developer ID Application: …"`.
+- **Free fallback:** a local self-signed code-signing certificate named
+  `WhisperPush Self-Signed`. Create it once:
+
+  ```bash
+  CN="WhisperPush Self-Signed"; D=$(mktemp -d)
+  openssl req -x509 -newkey rsa:2048 -keyout "$D/key.pem" -out "$D/cert.pem" \
+    -days 3650 -nodes -subj "/CN=$CN" \
+    -addext "basicConstraints=critical,CA:false" \
+    -addext "keyUsage=critical,digitalSignature" \
+    -addext "extendedKeyUsage=critical,codeSigning"
+  openssl pkcs12 -export -legacy -inkey "$D/key.pem" -in "$D/cert.pem" \
+    -out "$D/cert.p12" -passout pass:wpbuild -name "$CN"
+  security import "$D/cert.p12" -k ~/Library/Keychains/login.keychain-db \
+    -P wpbuild -A -T /usr/bin/codesign
+  rm -rf "$D"
+  ```
+
+  The cert is self-signed (Gatekeeper still needs a right-click → Open on first
+  launch, since it isn't notarized), but TCC keys on its stable certificate hash,
+  so the Accessibility grant survives app updates.
+
+After switching signing identity, reset any stale grant once:
+`tccutil reset Accessibility com.whisper-push.app`, then grant again.
+
 ## Compatibility
 
-- **macOS 11.0+** (Big Sur or later)
-- **Apple Silicon** (M1/M2/M3/M4) - Native ARM64
-- **Intel Macs** - x86_64 support
+- **macOS 14.0+** (Sonoma or later) — required by the bundled MLX runtime
+- **Apple Silicon only** (M1/M2/M3/M4) — MLX/Parakeet are arm64-only; no Intel
 
 ## Performance (Apple Silicon)
 

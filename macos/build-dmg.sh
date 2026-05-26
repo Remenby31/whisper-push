@@ -92,9 +92,22 @@ deactivate
 [[ -d "$APP_PATH" ]] || error "PyInstaller did not produce $APP_PATH"
 log "App bundle: $APP_PATH"
 
-# --- Ad-hoc sign so it launches once de-quarantined ---
-log "Ad-hoc signing the app..."
-codesign --force --deep --sign - "$APP_PATH" || warn "Ad-hoc signing failed (app may still run after de-quarantine)."
+# --- Code-sign so granted permissions (Accessibility) persist across updates ---
+# A *stable* signing identity matters: with ad-hoc (-) signing the cdhash changes
+# on every build, so macOS (TCC) forgets the Accessibility grant each update and
+# re-shows the permission dialog. Override with WHISPER_PUSH_SIGN_IDENTITY (e.g.
+# a "Developer ID Application" cert); otherwise use a local self-signed cert, and
+# fall back to ad-hoc only if neither exists.
+SIGN_IDENTITY="${WHISPER_PUSH_SIGN_IDENTITY:-WhisperPush Self-Signed}"
+if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+    log "Signing with identity: $SIGN_IDENTITY"
+    codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_PATH" \
+        || warn "Signing with '$SIGN_IDENTITY' failed (app may still run after de-quarantine)."
+else
+    warn "Identity '$SIGN_IDENTITY' not found -- ad-hoc signing (permissions will NOT persist across updates)."
+    warn "Create one: see macos/README.md (self-signed cert) so TCC grants stick."
+    codesign --force --deep --sign - "$APP_PATH" || warn "Ad-hoc signing failed."
+fi
 
 # --- Package into a DMG ---
 # create-dmg wants a SOURCE FOLDER (its contents go into the image), so stage
