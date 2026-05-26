@@ -26,17 +26,28 @@ error(){ echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 [[ "$(uname -m)" == "arm64" ]] || error "This app requires Apple Silicon (MLX is arm64-only)."
 command -v python3 >/dev/null || error "python3 not found (brew install python)."
 
-# --- Generate the .icns from the SVG if missing ---
+# --- Regenerate the app icon (.icns) and menu-bar PNGs from the brand SVGs ---
+# The wave glyph is bundled as SVG; load_icon_image() reads PNGs, so render them
+# here (and always rebuild the .icns) to keep the app in sync with icon.svg.
 ICNS_FILE="$SCRIPT_DIR/whisper-push.icns"
 SVG_FILE="$PROJECT_ROOT/icon.svg"
-if [[ ! -f "$ICNS_FILE" && -f "$SVG_FILE" ]] && command -v rsvg-convert >/dev/null && command -v iconutil >/dev/null; then
-    log "Generating app icon from SVG..."
-    ICONSET="$BUILD_DIR/icon.iconset"; mkdir -p "$ICONSET"
-    for size in 16 32 64 128 256 512; do
-        rsvg-convert -w $size -h $size "$SVG_FILE" -o "$ICONSET/icon_${size}x${size}.png"
-        rsvg-convert -w $((size*2)) -h $((size*2)) "$SVG_FILE" -o "$ICONSET/icon_${size}x${size}@2x.png"
+if command -v rsvg-convert >/dev/null; then
+    if [[ -f "$SVG_FILE" ]] && command -v iconutil >/dev/null; then
+        log "Generating app icon (.icns) from $SVG_FILE..."
+        ICONSET="$BUILD_DIR/icon.iconset"; rm -rf "$ICONSET"; mkdir -p "$ICONSET"
+        for size in 16 32 128 256 512; do
+            rsvg-convert -w $size -h $size "$SVG_FILE" -o "$ICONSET/icon_${size}x${size}.png"
+            rsvg-convert -w $((size*2)) -h $((size*2)) "$SVG_FILE" -o "$ICONSET/icon_${size}x${size}@2x.png"
+        done
+        iconutil -c icns "$ICONSET" -o "$ICNS_FILE" && rm -rf "$ICONSET"
+    fi
+    log "Rendering menu-bar icons (PNG) from SVG..."
+    for st in idle recording processing; do
+        [[ -f "$SCRIPT_DIR/icons/icon-${st}.svg" ]] && \
+            rsvg-convert -w 36 -h 36 "$SCRIPT_DIR/icons/icon-${st}.svg" -o "$SCRIPT_DIR/icons/icon-${st}.png"
     done
-    iconutil -c icns "$ICONSET" -o "$ICNS_FILE" && rm -rf "$ICONSET"
+else
+    warn "rsvg-convert not found; using committed icon assets as-is."
 fi
 
 # --- Build venv with the runtime deps + PyInstaller ---

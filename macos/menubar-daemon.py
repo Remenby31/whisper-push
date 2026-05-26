@@ -63,6 +63,8 @@ try:
         NSOffState,
         NSAlert,
         NSAlertFirstButtonReturn,
+        NSAppearanceNameAqua,
+        NSAppearanceNameDarkAqua,
     )
     from Cocoa import (
         NSEvent,
@@ -77,6 +79,7 @@ try:
         NSMakeSize,
     )
     from PyObjCTools import AppHelper
+    from Foundation import NSDistributedNotificationCenter
 except ImportError:
     print("Error: PyObjC not installed. Run: pip3 install pyobjc-framework-Cocoa pyobjc-framework-Quartz", file=sys.stderr)
     sys.exit(1)
@@ -471,22 +474,24 @@ def format_hotkey_display(hotkey_str):
     return ''.join(result)
 
 
-def load_icon(state):
-    """Load icon for the given state."""
-    icon_files = {
-        State.IDLE: ICONS_DIR / "icon-idle.png",
-        State.LOADING: ICONS_DIR / "icon-processing.png",
-        State.RECORDING: ICONS_DIR / "icon-recording.png",
-        State.PROCESSING: ICONS_DIR / "icon-processing.png",
-    }
+# Menu-bar glyph colors (PADDOCK palette). The wave shape is identical across
+# states; only the color carries the state, so we load one image per color and
+# resolve state -> color at draw time (idle/processing adapt to the menu bar).
+ICON_COLOR_FILES = {
+    "cream":  ICONS_DIR / "icon-idle.png",        # light glyph, for dark menu bars
+    "racing": ICONS_DIR / "icon-processing.png",  # dark glyph, for light menu bars
+    "citron": ICONS_DIR / "icon-recording.png",   # accent, recording state
+}
 
-    icon_path = icon_files.get(state)
-    if icon_path and icon_path.exists():
-        image = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+
+def load_icon_image(color):
+    """Load the wave glyph in the given PADDOCK color as an 18pt NSImage."""
+    path = ICON_COLOR_FILES.get(color)
+    if path and path.exists():
+        image = NSImage.alloc().initWithContentsOfFile_(str(path))
         if image:
             image.setSize_(NSMakeSize(18, 18))
             return image
-
     return None
 
 
@@ -851,12 +856,12 @@ class MenuBarApp(NSObject):
         self.recorder = AudioRecorder(config=self.config)
         self._resolve_output_device_idx()
 
-        # Load icons
+        # Load one image per color; state -> color is resolved at draw time
+        # (see _icon_for_state) so the idle/processing glyph follows the bar.
         self.icons = {
-            State.IDLE: load_icon(State.IDLE),
-            State.LOADING: load_icon(State.LOADING),
-            State.RECORDING: load_icon(State.RECORDING),
-            State.PROCESSING: load_icon(State.PROCESSING),
+            "cream": load_icon_image("cream"),
+            "racing": load_icon_image("racing"),
+            "citron": load_icon_image("citron"),
         }
 
         if self.hotkey_mode == "hold":
@@ -876,6 +881,12 @@ class MenuBarApp(NSObject):
         # Create status bar item
         self.status_bar = NSStatusBar.systemStatusBar()
         self.status_item = self.status_bar.statusItemWithLength_(NSVariableStatusItemLength)
+
+        # Re-render the icon when the user toggles light/dark mode, so the idle
+        # glyph stays contrasted against the menu bar.
+        NSDistributedNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "appearanceChanged:", "AppleInterfaceThemeChangedNotification", None
+        )
 
         # Set initial icon (loading state)
         self.update_icon()
@@ -1162,9 +1173,33 @@ class MenuBarApp(NSObject):
         quit_item.setTarget_(self)
         self.menu.addItem_(quit_item)
 
+    def _menubar_is_dark(self):
+        """True when the menu bar is currently using a dark appearance."""
+        try:
+            button = self.status_item.button()
+            appearance = button.effectiveAppearance() if button else NSApp.effectiveAppearance()
+            name = appearance.bestMatchFromAppearancesWithNames_(
+                [NSAppearanceNameAqua, NSAppearanceNameDarkAqua]
+            )
+            return name == NSAppearanceNameDarkAqua
+        except Exception:
+            return True  # assume dark (most common menu-bar look)
+
+    def _icon_for_state(self, state):
+        """Colored glyph for a state; idle/processing follow the menu-bar appearance."""
+        if state == State.RECORDING:
+            color = "citron"
+        else:  # IDLE, LOADING, PROCESSING -> contrast with the bar
+            color = "cream" if self._menubar_is_dark() else "racing"
+        return self.icons.get(color)
+
+    def appearanceChanged_(self, note):
+        """Light/dark mode toggled: re-draw so the idle glyph stays contrasted."""
+        self.update_icon()
+
     def update_icon(self):
         """Update the menu bar icon based on current state."""
-        icon = self.icons.get(self.state)
+        icon = self._icon_for_state(self.state)
         if icon:
             self.status_item.setImage_(icon)
             self.status_item.setTitle_("")
