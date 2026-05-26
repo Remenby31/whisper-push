@@ -92,20 +92,25 @@ deactivate
 [[ -d "$APP_PATH" ]] || error "PyInstaller did not produce $APP_PATH"
 log "App bundle: $APP_PATH"
 
-# --- Code-sign so granted permissions (Accessibility) persist across updates ---
-# A *stable* signing identity matters: with ad-hoc (-) signing the cdhash changes
-# on every build, so macOS (TCC) forgets the Accessibility grant each update and
-# re-shows the permission dialog. Override with WHISPER_PUSH_SIGN_IDENTITY (e.g.
-# a "Developer ID Application" cert); otherwise use a local self-signed cert, and
-# fall back to ad-hoc only if neither exists.
-SIGN_IDENTITY="${WHISPER_PUSH_SIGN_IDENTITY:-WhisperPush Self-Signed}"
-if security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+# --- Code-sign ---
+# For DISTRIBUTION we sign ad-hoc by default. A self-signed cert lives only in
+# the builder's keychain, so it gives downloaders no Gatekeeper trust (it isn't
+# notarized) and a stale --deep seal can even trigger "app is damaged" -- which
+# de-quarantine does NOT fix. Ad-hoc is the reliable path: users de-quarantine
+# once (the DMG prints the command) and the app runs on every macOS version.
+#
+# Set WHISPER_PUSH_SIGN_IDENTITY to a real "Developer ID Application" cert to sign
+# (and then notarize) properly. A stable identity also makes macOS (TCC) keep the
+# Accessibility grant across updates instead of re-prompting -- but that only
+# matters once you ship signed+notarized builds, not for ad-hoc distribution.
+SIGN_IDENTITY="${WHISPER_PUSH_SIGN_IDENTITY:-}"
+if [[ -n "$SIGN_IDENTITY" ]] && security find-identity -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
     log "Signing with identity: $SIGN_IDENTITY"
     codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_PATH" \
         || warn "Signing with '$SIGN_IDENTITY' failed (app may still run after de-quarantine)."
 else
-    warn "Identity '$SIGN_IDENTITY' not found -- ad-hoc signing (permissions will NOT persist across updates)."
-    warn "Create one: see macos/README.md (self-signed cert) so TCC grants stick."
+    [[ -n "$SIGN_IDENTITY" ]] && warn "Identity '$SIGN_IDENTITY' not found -- falling back to ad-hoc."
+    log "Ad-hoc signing (unsigned distribution; users de-quarantine on first launch)."
     codesign --force --deep --sign - "$APP_PATH" || warn "Ad-hoc signing failed."
 fi
 
@@ -125,7 +130,24 @@ if command -v create-dmg >/dev/null; then
         --icon "$APP_NAME.app" 150 190 \
         --app-drop-link 450 190 \
         --hide-extension "$APP_NAME.app" \
-        "$DMG_PATH" "$STAGE" || warn "create-dmg returned non-zero (DMG may still be usable)."
+        "$DMG_PATH" "$STAGE" || warn "create-dmg returned non-zero (recovering below)."
+
+    # create-dmg sometimes fails to UNMOUNT the staging volume ("Resource busy",
+    # usually Spotlight indexing it) and bails right before converting -- leaving
+    # the final DMG missing but a fully laid-out rw.*.dmg next to it. Recover by
+    # detaching any stuck "$APP_NAME" volume and converting that temp image,
+    # rather than throwing away a good build.
+    if [[ ! -f "$DMG_PATH" ]]; then
+        RW_DMG=$(ls -t "$DIST_DIR"/rw.*"$DMG_NAME".dmg 2>/dev/null | head -1 || true)
+        if [[ -n "$RW_DMG" ]]; then
+            warn "Final DMG missing; converting leftover temp image ($RW_DMG)."
+            for d in $(hdiutil info | awk -v v="/Volumes/$APP_NAME" '$0 ~ v {print $1}'); do
+                hdiutil detach "$d" -force >/dev/null 2>&1 || true
+            done
+            hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" \
+                && rm -f "$RW_DMG"
+        fi
+    fi
 else
     warn "create-dmg not found (brew install create-dmg) -- using hdiutil fallback."
     ln -s /Applications "$STAGE/Applications"
@@ -142,9 +164,11 @@ echo "=================================================="
 echo ""
 echo "Install:"
 echo "  1. Open the DMG, drag 'Whisper Push' to Applications."
-echo "  2. UNSIGNED app -> first launch is blocked by Gatekeeper. Run once:"
+echo "  2. UNSIGNED app -> Gatekeeper blocks the first launch. Clear quarantine once:"
 echo "       xattr -dr com.apple.quarantine \"/Applications/Whisper Push.app\""
-echo "     (or right-click the app > Open > Open)."
+echo "     This works on every macOS version. (On macOS 15+ the old right-click >"
+echo "     Open trick is gone; without the command, use System Settings > Privacy &"
+echo "     Security > 'Open Anyway' after the first blocked launch.)"
 echo "  3. Grant Microphone + Accessibility + Input Monitoring when prompted"
 echo "     (System Settings > Privacy & Security)."
 echo "  4. First launch downloads the Parakeet model (~600 MB) -> needs internet."

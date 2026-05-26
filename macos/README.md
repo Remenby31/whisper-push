@@ -125,38 +125,37 @@ Then:
 2. Drag to Applications
 3. Run `./macos/install.sh` to set up hotkey daemon
 
-## Code signing (so Accessibility permission sticks)
+## Code signing & first launch
 
-macOS remembers the Accessibility grant by the app's signing identity. With
-ad-hoc signing the identity (cdhash) changes on every build, so the permission
-is forgotten on each update and the system dialog reappears. `build-dmg.sh`
-therefore signs with a **stable** identity if one is available.
+`build-dmg.sh` produces an **ad-hoc signed (effectively unsigned)** app. It is
+not notarized, so on first launch Gatekeeper blocks it. The user clears the
+quarantine flag once:
 
-- **Best:** a `Developer ID Application` certificate (Apple Developer account).
-  Build with `WHISPER_PUSH_SIGN_IDENTITY="Developer ID Application: …"`.
-- **Free fallback:** a local self-signed code-signing certificate named
-  `WhisperPush Self-Signed`. Create it once:
+```bash
+xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"
+```
 
-  ```bash
-  CN="WhisperPush Self-Signed"; D=$(mktemp -d)
-  openssl req -x509 -newkey rsa:2048 -keyout "$D/key.pem" -out "$D/cert.pem" \
-    -days 3650 -nodes -subj "/CN=$CN" \
-    -addext "basicConstraints=critical,CA:false" \
-    -addext "keyUsage=critical,digitalSignature" \
-    -addext "extendedKeyUsage=critical,codeSigning"
-  openssl pkcs12 -export -legacy -inkey "$D/key.pem" -in "$D/cert.pem" \
-    -out "$D/cert.p12" -passout pass:wpbuild -name "$CN"
-  security import "$D/cert.p12" -k ~/Library/Keychains/login.keychain-db \
-    -P wpbuild -A -T /usr/bin/codesign
-  rm -rf "$D"
-  ```
+This works on **every macOS version**. On macOS 15+ the old right-click → Open
+bypass is gone — without the command, the alternative is System Settings →
+Privacy & Security → **Open Anyway** after the first blocked launch.
 
-  The cert is self-signed (Gatekeeper still needs a right-click → Open on first
-  launch, since it isn't notarized), but TCC keys on its stable certificate hash,
-  so the Accessibility grant survives app updates.
+> **Don't ship a self-signed certificate.** It lives only in the builder's
+> keychain, so it gives downloaders no Gatekeeper trust (it isn't notarized), and
+> a stale `--deep` seal can trigger *"the app is damaged"* — which de-quarantine
+> cannot fix. Ad-hoc is the reliable path for distribution.
 
-After switching signing identity, reset any stale grant once:
-`tccutil reset Accessibility com.whisper-push.app`, then grant again.
+**To make it just work (no terminal command):** get an Apple Developer account
+($99/yr), and build + notarize with a real Developer ID:
+
+```bash
+WHISPER_PUSH_SIGN_IDENTITY="Developer ID Application: …" ./macos/build-dmg.sh
+# then: xcrun notarytool submit … && xcrun stapler staple "dist/…dmg"
+```
+
+A real Developer ID is also what lets macOS (TCC) keep the **Accessibility**
+grant across updates instead of re-prompting. After switching signing identity,
+reset any stale grant once: `tccutil reset Accessibility com.whisper-push.app`,
+then grant again.
 
 ## Compatibility
 
@@ -189,11 +188,16 @@ After switching signing identity, reset any stale grant once:
 2. View logs: `cat ~/Library/Application\ Support/whisper-push/daemon.log`
 3. Restart daemon: `launchctl kickstart -k gui/$(id -u)/com.whisper-push.hotkey`
 
-### "Cannot be opened because the developer cannot be verified"
+### "Cannot be opened because the developer cannot be verified" / "is damaged"
 
 ```bash
-xattr -d com.apple.quarantine /Applications/Whisper\ Push.app
+xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"
 ```
+
+`-r` (recursive) matters: it clears the flag on the nested binaries too. This
+works on every macOS version. On macOS 15+ you can also approve it via System
+Settings → Privacy & Security → **Open Anyway** (the old right-click → Open
+bypass was removed).
 
 ### Microphone not recording
 
