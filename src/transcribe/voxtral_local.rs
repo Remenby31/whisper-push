@@ -27,6 +27,7 @@ mod inner {
         mel_extractor: MelSpectrogram,
         pad_config: PadConfig,
         t_embed: Tensor<Backend, 3>,
+        loaded_thread: std::thread::ThreadId,
     }
 
     static VOXTRAL: Mutex<Option<VoxtralState>> = Mutex::new(None);
@@ -65,6 +66,7 @@ mod inner {
 
         *VOXTRAL.lock().unwrap() = Some(VoxtralState {
             model, tokenizer, mel_extractor, pad_config, t_embed,
+            loaded_thread: std::thread::current().id(),
         });
 
         info!("Voxtral Q4 model loaded and ready");
