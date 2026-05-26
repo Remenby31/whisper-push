@@ -69,6 +69,7 @@ struct MenuItems {
     sound_id: String,
     debug_id: String,
     test_id: String,
+    uninstall_id: String,
     hotkey_ids: Vec<(String, String, String)>,
     hotkey_items: Vec<(CheckMenuItem, String, String)>,
     input_ids: Vec<(String, String)>,
@@ -175,6 +176,7 @@ impl App {
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
         let debug_item = CheckMenuItem::new("Debug Logging", true, cfg.debug, None);
         let test_item = MenuItem::new("Test (record 3s + transcribe)", true, None);
+        let uninstall_item = MenuItem::new("Uninstall...", true, None);
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
         // Permissions
@@ -228,6 +230,7 @@ impl App {
 
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&test_item);
+        let _ = menu.append(&uninstall_item);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
 
@@ -238,6 +241,7 @@ impl App {
         self.menu_items = Some(MenuItems {
             toggle_id: toggle_item.id().0.clone(),
             test_id: test_item.id().0.clone(),
+            uninstall_id: uninstall_item.id().0.clone(),
             quit_id: quit_item.id().0.clone(),
             notif_id: notifications_item.id().0.clone(),
             sound_id: sound_item.id().0.clone(),
@@ -299,6 +303,17 @@ impl App {
 
             Event::MenuClicked(ref id) => {
                 if id == &mi.quit_id { std::process::exit(0); }
+                if id == &mi.uninstall_id {
+                    // Uninstall: remove data dir, autostart, and notify
+                    let data_dir = crate::config::data_dir();
+                    if data_dir.exists() {
+                        let _ = std::fs::remove_dir_all(&data_dir);
+                        info!("Removed data dir: {}", data_dir.display());
+                    }
+                    crate::autostart::disable();
+                    crate::notify::send("Whisper Push", "Uninstalled. You can delete the app from Applications.");
+                    std::process::exit(0);
+                }
                 if id == &mi.toggle_id { self.process_event(Event::HotkeyToggle); return; }
                 if id == &mi.test_id {
                     // Test: record 3 seconds + transcribe + show result
