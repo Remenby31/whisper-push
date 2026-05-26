@@ -216,7 +216,11 @@ Switch to CPU in config: `device = "cpu"`, `compute_type = "float32"`.
 
 ## Uninstall
 
-- **macOS:** `./macos/uninstall.sh` (or drag the app to the Trash).
+- **macOS (app):** open the 🎙 menu → **Uninstall Whisper Push…**. This deletes
+  your settings and the downloaded model (~600 MB), then moves the app to the
+  Trash. Dragging the app to the Trash on its own leaves the model and settings
+  behind, since macOS runs no cleanup code when an app is trashed.
+- **macOS (source install):** `./macos/uninstall.sh`
 - **Linux:** `./uninstall.sh`
 
 ## License

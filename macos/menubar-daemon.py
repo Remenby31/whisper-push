@@ -7,6 +7,8 @@ Model stays loaded in RAM for instant transcription.
 
 import subprocess
 import sys
+import os
+import shutil
 import signal
 import fcntl
 import tomllib
@@ -59,6 +61,8 @@ try:
         NSImage,
         NSOnState,
         NSOffState,
+        NSAlert,
+        NSAlertFirstButtonReturn,
     )
     from Cocoa import (
         NSEvent,
@@ -92,6 +96,11 @@ CONFIG_FILE = SUPPORT_DIR / "config.toml"
 LOG_FILE = SUPPORT_DIR / "daemon.log"
 LOCK_FILE = SUPPORT_DIR / "daemon.lock"
 
+# Keep the downloaded model inside our own folder (under SUPPORT_DIR) instead of
+# the shared ~/.cache/huggingface, so "Uninstall" only has to remove SUPPORT_DIR.
+MODELS_DIR = SUPPORT_DIR / "models"
+os.environ.setdefault("HF_HOME", str(MODELS_DIR))
+
 # Read-only resources: bundled inside the .app when frozen (PyInstaller), else
 # installed into SUPPORT_DIR by install.sh.
 if getattr(sys, "frozen", False):
@@ -100,6 +109,16 @@ else:
     RESOURCE_DIR = SUPPORT_DIR
 ICONS_DIR = RESOURCE_DIR / "icons"
 SOUNDS_DIR = RESOURCE_DIR / "sounds"
+
+
+def _app_bundle_path():
+    """Path to the enclosing .app bundle when frozen (PyInstaller), else None."""
+    if not getattr(sys, "frozen", False):
+        return None
+    for parent in Path(sys.executable).parents:
+        if parent.suffix == ".app":
+            return str(parent)
+    return None
 
 # Key code mapping (US keyboard layout)
 KEY_CODES = {
@@ -1125,6 +1144,14 @@ class MenuBarApp(NSObject):
         logs_item.setTarget_(self)
         self.menu.addItem_(logs_item)
 
+        uninstall_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Uninstall Whisper Push...",
+            "uninstallApp:",
+            ""
+        )
+        uninstall_item.setTarget_(self)
+        self.menu.addItem_(uninstall_item)
+
         self.menu.addItem_(NSMenuItem.separatorItem())
 
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -1338,6 +1365,46 @@ class MenuBarApp(NSObject):
             subprocess.run(["open", str(SUPPORT_DIR)])
 
     def quitApp_(self, sender):
+        NSApp.terminate_(None)
+
+    def uninstallApp_(self, sender):
+        """Remove all app data + the model, move the app to the Trash, then quit.
+
+        macOS runs no code when an app is dragged to the Trash, so this menu item
+        is the only way to clean up everything Whisper Push wrote outside its
+        bundle (settings, logs, and the ~600 MB model)."""
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Uninstall Whisper Push?")
+        alert.setInformativeText_(
+            "This deletes your settings and the downloaded model (~600 MB), "
+            "moves the app to the Trash, and quits.\n\nThis cannot be undone."
+        )
+        alert.addButtonWithTitle_("Uninstall")
+        alert.addButtonWithTitle_("Cancel")
+        NSApp.activateIgnoringOtherApps_(True)
+        if alert.runModal() != NSAlertFirstButtonReturn:
+            return
+
+        logger.info("Uninstalling: removing app data and model...")
+
+        # 1. Settings, logs, and the model (now stored under SUPPORT_DIR).
+        shutil.rmtree(SUPPORT_DIR, ignore_errors=True)
+
+        # 2. Model left in the shared HuggingFace cache by older builds.
+        model_name = self.config.get("model", "parakeet-tdt-0.6b-v3")
+        legacy_model = (Path.home() / ".cache" / "huggingface" / "hub"
+                        / f"models--mlx-community--{model_name}")
+        shutil.rmtree(legacy_model, ignore_errors=True)
+
+        # 3. Move the .app bundle itself to the Trash (frozen builds only).
+        bundle = _app_bundle_path()
+        if bundle:
+            subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "Finder" to delete (POSIX file "{bundle}" as alias)'],
+                check=False,
+            )
+
         NSApp.terminate_(None)
 
     # --- Device selection ---
