@@ -649,9 +649,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             } else {
-                // Voxtral: load Whisper as fallback, Voxtral loads lazy in pipeline thread
+                // Voxtral: don't load Whisper (its Metal cleanup crashes on exit).
+                // Voxtral loads lazy in the pipeline thread (WGPU requires same-thread).
                 info!("Voxtral selected — will load in transcription thread (WGPU requires same-thread)");
-                let _ = crate::transcribe::load_model(&self.state.config.model);
             }
             self.state.set(State::Idle);
 
