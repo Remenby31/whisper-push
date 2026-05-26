@@ -38,6 +38,22 @@ pub fn paste_text(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Type text progressively at the cursor — for streaming transcription.
+/// Uses clipboard + Cmd/Ctrl+V for each word (more reliable than character-by-character).
+pub fn type_text(text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(text)?;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    simulate_paste()?;
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    Ok(())
+}
+
 /// Simulate Cmd+V (macOS) or Ctrl+V (Linux/Windows) keystroke.
 fn simulate_paste() -> Result<()> {
     #[cfg(target_os = "macos")]

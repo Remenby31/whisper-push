@@ -120,11 +120,153 @@ mod inner {
         info!("Voxtral: '{}'", text.trim());
         Ok(text.trim().to_string())
     }
+
+    /// Streaming transcription API.
+    pub mod streaming {
+        use anyhow::{Context, Result};
+        use tracing::info;
+        use voxtral_mini_realtime::audio::mel::{MelConfig, MelSpectrogram};
+        use voxtral_mini_realtime::audio::pad::{pad_audio, PadConfig};
+        use voxtral_mini_realtime::audio::AudioBuffer;
+        use voxtral_mini_realtime::gguf::model::Q4StreamingSession;
+        use voxtral_mini_realtime::tokenizer::VoxtralTokenizer;
+
+        use super::VOXTRAL;
+
+        /// Streaming session wrapper.
+        pub struct StreamingSession {
+            session: Q4StreamingSession,
+            mel_extractor: MelSpectrogram,
+            pad_config: PadConfig,
+            audio_overlap: Vec<f32>, // overlap buffer for mel continuity
+        }
+
+        /// Start a new streaming session. Model must be loaded first.
+        pub fn start() -> Result<StreamingSession> {
+            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let state = guard.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Voxtral not loaded — call load_model first"))?;
+
+            // We need the model reference but can't hold the lock during streaming.
+            // The session stores caches independently; we only need the model for feed_chunk.
+            // For now, create the session while we have the lock.
+            let session = Q4StreamingSession::new(&state.model, 6.0);
+
+            Ok(StreamingSession {
+                session,
+                mel_extractor: MelSpectrogram::new(MelConfig::voxtral()),
+                pad_config: PadConfig::voxtral(),
+                audio_overlap: Vec::new(),
+            })
+        }
+
+        /// Feed an audio chunk (16kHz mono f32) and return newly transcribed words.
+        pub fn feed_chunk(session: &mut StreamingSession, audio: &[f32]) -> Result<Vec<String>> {
+            // Prepend overlap from previous chunk for mel continuity
+            let mut full_audio = session.audio_overlap.clone();
+            full_audio.extend_from_slice(audio);
+
+            // Save overlap for next chunk (win_length - hop_length = 240 samples)
+            let overlap_size = 240.min(full_audio.len());
+            session.audio_overlap = full_audio[full_audio.len() - overlap_size..].to_vec();
+
+            // Compute mel spectrogram for this chunk
+            let audio_buf = AudioBuffer::new(full_audio, 16000);
+            let padded = pad_audio(&audio_buf, &session.pad_config);
+            let mel = session.mel_extractor.compute_log(&padded.samples);
+            let n_frames = mel.len();
+            let n_mels = if n_frames > 0 { mel[0].len() } else { 0 };
+
+            if n_frames == 0 {
+                return Ok(Vec::new());
+            }
+
+            // Transpose mel [frames, mels] → [mels, frames] and create tensor
+            let mut mel_transposed = vec![vec![0.0f32; n_frames]; n_mels];
+            for (frame_idx, frame) in mel.iter().enumerate() {
+                for (mel_idx, &val) in frame.iter().enumerate() {
+                    mel_transposed[mel_idx][frame_idx] = val;
+                }
+            }
+            let mel_flat: Vec<f32> = mel_transposed.into_iter().flatten().collect();
+
+            let device: burn::backend::wgpu::WgpuDevice = Default::default();
+            let mel_tensor = burn::tensor::Tensor::from_data(
+                burn::tensor::TensorData::new(mel_flat, [1, n_mels, n_frames]),
+                &device,
+            );
+
+            // Feed to the streaming session (needs model reference)
+            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let state = guard.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Model unloaded during streaming"))?;
+
+            let new_tokens = session.session.feed_mel_chunk(&state.model, mel_tensor);
+
+            // Decode text tokens (>= 1000)
+            let text_tokens: Vec<u32> = new_tokens.iter()
+                .filter(|&&t| t >= 1000)
+                .map(|&t| t as u32)
+                .collect();
+
+            if text_tokens.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let text = state.tokenizer.decode(&text_tokens)
+                .context("Failed to decode tokens")?;
+
+            let words: Vec<String> = text.split_whitespace()
+                .map(|w| w.to_string())
+                .collect();
+
+            if !words.is_empty() {
+                info!("Streaming: +{} words: {:?}", words.len(), words);
+            }
+
+            Ok(words)
+        }
+
+        /// Finish streaming and return the complete transcription.
+        pub fn finish(session: StreamingSession) -> Result<String> {
+            let all_tokens = session.session.finish();
+            let text_tokens: Vec<u32> = all_tokens.iter()
+                .filter(|&&t| t >= 1000)
+                .map(|&t| t as u32)
+                .collect();
+
+            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let state = guard.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Model unloaded"))?;
+
+            let text = state.tokenizer.decode(&text_tokens)
+                .context("Failed to decode final tokens")?;
+
+            info!("Streaming finished: '{}'", text.trim());
+            Ok(text.trim().to_string())
+        }
+    }
 }
 
 // Public API: delegates to inner when feature is enabled
 #[cfg(feature = "voxtral")]
 pub use inner::{load_model, is_loaded, transcribe};
+#[cfg(feature = "voxtral")]
+pub use inner::streaming;
+
+#[cfg(not(feature = "voxtral"))]
+pub mod streaming {
+    pub struct StreamingSession;
+    pub fn start() -> anyhow::Result<StreamingSession> {
+        anyhow::bail!("Voxtral not compiled")
+    }
+    pub fn feed_chunk(_session: &mut StreamingSession, _audio: &[f32]) -> anyhow::Result<Vec<String>> {
+        anyhow::bail!("Voxtral not compiled")
+    }
+    pub fn finish(_session: StreamingSession) -> anyhow::Result<String> {
+        anyhow::bail!("Voxtral not compiled")
+    }
+}
 
 #[cfg(not(feature = "voxtral"))]
 pub fn load_model(_model_dir: &str) -> anyhow::Result<()> {

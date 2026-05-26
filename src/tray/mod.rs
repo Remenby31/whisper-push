@@ -758,8 +758,104 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let cfg = config.lock().unwrap();
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
+                let is_voxtral_streaming = cfg.backend == "voxtral-local";
                 drop(cfg);
 
+                if is_voxtral_streaming {
+                    // Streaming mode: use StreamingCapture + StreamingSession
+                    recording.store(true, Ordering::Relaxed);
+                    let rec = recording.clone();
+                    let cfg2 = config.clone();
+                    let rx_clone = rx.clone();
+
+                    // Run streaming in this thread (needs same thread for WGPU)
+                    info!("Starting streaming transcription...");
+                    if cfg2.lock().unwrap().sound_feedback {
+                        crate::audio::playback::play_sound("start");
+                    }
+
+                    // Ensure Voxtral model is loaded on this thread
+                    if !crate::transcribe::voxtral_local::is_loaded() {
+                        let dir = crate::config::data_dir().join("models").join("voxtral");
+                        if let Err(e) = crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or("")) {
+                            tracing::error!("Voxtral load failed: {e}");
+                            crate::notify::send("Whisper Push", &format!("Error: {e}"));
+                            rec.store(false, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
+
+                    // Start streaming session
+                    match crate::transcribe::voxtral_local::streaming::start() {
+                        Ok(mut session) => {
+                            // Start streaming capture (500ms chunks)
+                            match crate::audio::stream::StreamingCapture::start(&device, 500) {
+                                Ok(stream_capture) => {
+                                    info!("Streaming: capture + session started");
+
+                                    // Feed chunks until HotkeyUp
+                                    loop {
+                                        // Check for HotkeyUp (non-blocking)
+                                        if let Ok(Event::HotkeyUp) = rx_clone.try_recv() {
+                                            break;
+                                        }
+
+                                        // Get next audio chunk (with timeout)
+                                        match stream_capture.chunk_rx.recv_timeout(
+                                            std::time::Duration::from_millis(100)
+                                        ) {
+                                            Ok(chunk) => {
+                                                match crate::transcribe::voxtral_local::streaming::feed_chunk(
+                                                    &mut session, &chunk.samples
+                                                ) {
+                                                    Ok(words) if !words.is_empty() => {
+                                                        let text = words.join(" ");
+                                                        info!("Streaming → '{text}'");
+                                                        if let Err(e) = crate::paste::type_text(&text) {
+                                                            tracing::error!("Type failed: {e}");
+                                                        }
+                                                    }
+                                                    Ok(_) => {} // no new words yet
+                                                    Err(e) => {
+                                                        tracing::error!("Streaming feed error: {e}");
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                                            Err(_) => break,
+                                        }
+                                    }
+
+                                    // Stop capture and feed remaining
+                                    drop(stream_capture);
+                                    if cfg2.lock().unwrap().sound_feedback {
+                                        crate::audio::playback::play_sound("stop");
+                                    }
+
+                                    // Finish and paste any remaining text
+                                    match crate::transcribe::voxtral_local::streaming::finish(session) {
+                                        Ok(final_text) if !final_text.is_empty() => {
+                                            info!("Streaming final: '{final_text}'");
+                                        }
+                                        Ok(_) => info!("Streaming: no final text"),
+                                        Err(e) => tracing::error!("Streaming finish: {e}"),
+                                    }
+                                }
+                                Err(e) => warn!("Stream capture failed: {e}"),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Streaming session failed: {e}");
+                            crate::notify::send("Whisper Push", &format!("Streaming error: {e}"));
+                        }
+                    }
+
+                    rec.store(false, Ordering::Relaxed);
+                    continue; // Don't fall through to batch mode
+                }
+
+                // Batch mode (Whisper, Parakeet)
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
                         *capture.lock().unwrap() = Some(cap);
