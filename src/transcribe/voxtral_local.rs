@@ -69,7 +69,36 @@ mod inner {
             __loaded_thread: std::thread::current().id(),
         });
 
-        info!("Voxtral Q4 model loaded and ready");
+        info!("Voxtral Q4 model loaded — warming up GPU shaders...");
+
+        // Warmup: run a tiny inference to compile all Metal/WGPU shaders now,
+        // not on the first real transcription. Uses 1 second of silence.
+        {
+            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let state = guard.as_ref().unwrap();
+            let silence = vec![0.0f32; 16000]; // 1 second of silence
+            let audio_buf = AudioBuffer::new(silence, 16000);
+            let padded = pad_audio(&audio_buf, &state.pad_config);
+            let mel = state.mel_extractor.compute_log(&padded.samples);
+            let n_frames = mel.len();
+            let n_mels = if n_frames > 0 { mel[0].len() } else { 0 };
+            if n_frames > 0 {
+                let mut mel_t = vec![vec![0.0f32; n_frames]; n_mels];
+                for (fi, frame) in mel.iter().enumerate() {
+                    for (mi, &val) in frame.iter().enumerate() {
+                        mel_t[mi][fi] = val;
+                    }
+                }
+                let flat: Vec<f32> = mel_t.into_iter().flatten().collect();
+                let mel_tensor = burn::tensor::Tensor::from_data(
+                    burn::tensor::TensorData::new(flat, [1, n_mels, n_frames]),
+                    &device,
+                );
+                let _ = state.model.transcribe_streaming(mel_tensor, state.t_embed.clone());
+            }
+        }
+
+        info!("Voxtral Q4 model ready (GPU shaders compiled)");
         Ok(())
     }
 
