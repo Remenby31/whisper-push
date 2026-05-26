@@ -33,13 +33,14 @@ Linux it's a CLI you bind to a hotkey, powered by faster-whisper.
 ### macOS (Apple Silicon — M1/M2/M3/M4)
 
 **Option A — App (easiest):**
-1. Download `Whisper-Push-macOS-arm64.dmg` from the [Releases](../../releases) page.
+1. Download `Whisper-Push-macOS-arm64.dmg` from the [latest release](../../releases/latest).
 2. Open it and drag **Whisper Push** to **Applications**.
-3. First launch is blocked because the app isn't notarized — clear the quarantine flag once:
+3. The app isn't notarized, so the first launch is blocked. Clear the quarantine flag once:
    ```bash
    xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"
    ```
-   (or right-click the app → **Open** → **Open**)
+   > No terminal? Double-click the app, then go to **System Settings → Privacy & Security**
+   > and click **Open Anyway**. (On macOS 15+ the old right-click → Open trick is gone.)
 4. Grant **Microphone**, **Accessibility**, and **Input Monitoring** when asked
    (System Settings → Privacy & Security).
 5. Hold **Control**, speak, release. The first run downloads the model (~600 MB).
