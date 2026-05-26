@@ -13,6 +13,7 @@ fn test_voxtral_streaming_from_file() {
     }
 
     let path = test_files[0].path();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
     println!("=== Voxtral Streaming Test ===");
     println!("File: {}", path.display());
 
