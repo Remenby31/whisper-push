@@ -40,30 +40,42 @@ pub fn paste_text(text: &str) -> Result<()> {
 
 /// Simulate Cmd+V (macOS) or Ctrl+V (Linux/Windows) keystroke.
 fn simulate_paste() -> Result<()> {
-    use enigo::{Enigo, Key, Keyboard, Settings};
-
-    let mut enigo = Enigo::new(&Settings::default())
-        .map_err(|e| anyhow::anyhow!("Failed to create input simulator: {e}"))?;
-
     #[cfg(target_os = "macos")]
     {
-        enigo.key(Key::Meta, enigo::Direction::Press)
-            .map_err(|e| anyhow::anyhow!("Key press failed: {e}"))?;
-        enigo.key(Key::Unicode('v'), enigo::Direction::Click)
-            .map_err(|e| anyhow::anyhow!("Key click failed: {e}"))?;
-        enigo.key(Key::Meta, enigo::Direction::Release)
-            .map_err(|e| anyhow::anyhow!("Key release failed: {e}"))?;
+        // Use CGEvent directly — enigo's TSM calls crash from background threads.
+        use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, CGEventTapLocation};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| anyhow::anyhow!("Failed to create CGEventSource"))?;
+
+        // Key code 9 = 'v'
+        let key_down = CGEvent::new_keyboard_event(source.clone(), 9, true)
+            .map_err(|_| anyhow::anyhow!("Failed to create key down event"))?;
+        key_down.set_flags(CGEventFlags::CGEventFlagCommand);
+        key_down.post(CGEventTapLocation::HID);
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        let key_up = CGEvent::new_keyboard_event(source, 9, false)
+            .map_err(|_| anyhow::anyhow!("Failed to create key up event"))?;
+        key_up.set_flags(CGEventFlags::CGEventFlagCommand);
+        key_up.post(CGEventTapLocation::HID);
+
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]
     {
+        use enigo::{Enigo, Key, Keyboard, Settings};
+        let mut enigo = Enigo::new(&Settings::default())
+            .map_err(|e| anyhow::anyhow!("Failed to create input simulator: {e}"))?;
         enigo.key(Key::Control, enigo::Direction::Press)
             .map_err(|e| anyhow::anyhow!("Key press failed: {e}"))?;
         enigo.key(Key::Unicode('v'), enigo::Direction::Click)
             .map_err(|e| anyhow::anyhow!("Key click failed: {e}"))?;
         enigo.key(Key::Control, enigo::Direction::Release)
             .map_err(|e| anyhow::anyhow!("Key release failed: {e}"))?;
+        Ok(())
     }
-
-    Ok(())
 }
