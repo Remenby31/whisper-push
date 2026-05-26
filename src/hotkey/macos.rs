@@ -1,6 +1,6 @@
 use crossbeam_channel::Sender;
 use crate::state::Event;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 // CGEvent types
 const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
@@ -74,7 +74,7 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
         let hold_active = std::sync::atomic::AtomicBool::new(false);
 
         // Event mask: FlagsChanged (modifier keys) + KeyDown (for hold interrupt)
-        let mask = (1u64 << K_CG_EVENT_FLAGS_CHANGED) | (1u64 << K_CG_EVENT_KEY_DOWN);
+        let _mask = (1u64 << K_CG_EVENT_FLAGS_CHANGED) | (1u64 << K_CG_EVENT_KEY_DOWN);
 
         let tap = CGEventTap::new(
             CGEventTapLocation::HID,

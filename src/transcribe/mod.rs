@@ -4,7 +4,7 @@ pub mod voxtral_local;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Available transcription backends.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +18,7 @@ pub enum Backend {
 }
 
 impl Backend {
+    #[allow(dead_code)]
     pub fn label(&self) -> &str {
         match self {
             Backend::Parakeet => "Parakeet TDT 0.6B (fastest, ONNX GPU)",
@@ -62,12 +63,14 @@ pub fn load_model(model_name: &str) -> Result<()> {
 }
 
 /// Unload the model to free memory.
+#[allow(dead_code)]
 pub fn unload_model() {
     *MODEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
     info!("Model unloaded");
 }
 
 /// Check if the model is loaded.
+#[allow(dead_code)]
 pub fn is_loaded() -> bool {
     MODEL.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }

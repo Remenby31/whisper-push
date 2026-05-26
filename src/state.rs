@@ -25,6 +25,7 @@ impl std::fmt::Display for State {
 
 /// Events sent between components.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Event {
     /// Hotkey pressed (start recording / pre-roll)
     HotkeyDown,

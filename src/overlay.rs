@@ -1,4 +1,5 @@
 //! Floating overlay window — shows live transcription text.
+#![allow(dead_code)]
 //! Appears at the bottom-right of the screen during recording.
 
 use std::sync::{Arc, Mutex};

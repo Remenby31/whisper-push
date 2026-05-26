@@ -3,6 +3,7 @@
 use tracing::info;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HardwareInfo {
     pub os: &'static str,
     pub arch: &'static str,
@@ -10,6 +11,7 @@ pub struct HardwareInfo {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum GpuInfo {
     AppleSilicon { chip: String },
     NvidiaCuda { name: String },

@@ -1,8 +1,9 @@
 //! Streaming audio capture — feeds chunks to a consumer in real-time.
+#![allow(dead_code)]
 //! Used for streaming transcription (Parakeet Nemotron, Voxtral Realtime).
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Receiver;
 use rubato::{FftFixedIn, Resampler};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -58,7 +59,7 @@ impl StreamingCapture {
         // How many samples per chunk at target rate
         let chunk_size_target = (TARGET_SAMPLE_RATE * chunk_duration_ms / 1000) as usize;
         // How many samples per chunk at device rate
-        let chunk_size_device = (device_sr * chunk_duration_ms / 1000) as usize;
+        let _chunk_size_device = (device_sr * chunk_duration_ms / 1000) as usize;
 
         // Resampler
         let needs_resample = device_sr != TARGET_SAMPLE_RATE;

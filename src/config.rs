@@ -1,7 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -99,6 +98,7 @@ pub fn data_dir() -> PathBuf {
 }
 
 /// Platform-specific cache directory (temporary audio).
+#[allow(dead_code)]
 pub fn cache_dir() -> PathBuf {
     dirs::cache_dir()
         .unwrap_or_else(|| PathBuf::from("."))

@@ -34,6 +34,7 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
 
 /// User events forwarded into winit's event loop.
 #[derive(Debug)]
+#[allow(dead_code)]
 enum UserEvent {
     Tray(TrayIconEvent),
     Menu(MenuEvent),
@@ -56,8 +57,11 @@ struct App {
 struct MenuItems {
     status_item: MenuItem,
     toggle_item: MenuItem,
+    #[allow(dead_code)]
     notifications_item: CheckMenuItem,
+    #[allow(dead_code)]
     sound_item: CheckMenuItem,
+    #[allow(dead_code)]
     debug_item: CheckMenuItem,
     toggle_id: String,
     quit_id: String,
@@ -660,10 +664,10 @@ impl ApplicationHandler<UserEvent> for App {
 
             // Wake the macOS run loop so the icon appears immediately
             #[cfg(target_os = "macos")]
-            unsafe {
-                use objc2_core_foundation::{CFRunLoopGetMain, CFRunLoopWakeUp};
-                let rl = CFRunLoopGetMain().unwrap();
-                CFRunLoopWakeUp(&rl);
+            { // CFRunLoop API
+                use objc2_core_foundation::CFRunLoop;
+                let rl = CFRunLoop::main().unwrap();
+                rl.wake_up();
             }
 
             // Start hotkey listener + autonomous pipeline thread.

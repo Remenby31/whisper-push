@@ -1,6 +1,6 @@
 //! Auto-start on login — platform-specific implementation.
+#![allow(dead_code)]
 
-use tracing::info;
 
 /// Enable auto-start on login.
 pub fn enable() {

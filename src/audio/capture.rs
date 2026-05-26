@@ -1,18 +1,18 @@
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam_channel::Sender;
 use rubato::{FftFixedIn, Resampler};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
+#[allow(dead_code)]
 const TARGET_CHANNELS: u16 = 1;
 
 /// Audio recorder that captures to an in-memory f32 buffer at 16kHz mono.
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<Vec<f32>>>,
-    device_sample_rate: u32,
+        _device_sample_rate: u32,
 }
 
 impl AudioCapture {
@@ -104,7 +104,7 @@ impl AudioCapture {
         Ok(Self {
             stream: Some(stream),
             buffer,
-            device_sample_rate: device_sr,
+                _device_sample_rate: device_sr,
         })
     }
 
@@ -128,6 +128,7 @@ impl AudioCapture {
     }
 
     /// Get current RMS level (for UI metering).
+    #[allow(dead_code)]
     pub fn current_rms(&self) -> f32 {
         let buf = self.buffer.lock().unwrap();
         if buf.is_empty() {

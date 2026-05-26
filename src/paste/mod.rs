@@ -43,7 +43,7 @@ fn simulate_paste() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         // Use CGEvent directly — enigo's TSM calls crash from background threads.
-        use core_graphics::event::{CGEvent, CGEventFlags, CGKeyCode, CGEventTapLocation};
+        use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
         use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
