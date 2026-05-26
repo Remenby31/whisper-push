@@ -625,7 +625,25 @@ def _restore_pasteboard_later(saved_items, delay=0.3):
 
 
 def notify(title: str, message: str = ""):
-    """Show macOS notification."""
+    """Show a macOS notification using the app's own icon.
+
+    Delivered from this process (Whisper Push.app) so macOS shows the app icon.
+    osascript would instead show the generic Script Editor icon, since the
+    notification would be attributed to that helper process.
+    """
+    try:
+        from Foundation import NSUserNotification, NSUserNotificationCenter
+        center = NSUserNotificationCenter.defaultUserNotificationCenter()
+        if center is not None:
+            note = NSUserNotification.alloc().init()
+            note.setTitle_(title)
+            if message:
+                note.setInformativeText_(message)
+            center.deliverNotification_(note)
+            return
+    except Exception as e:
+        logger.debug(f"NSUserNotification unavailable, using osascript: {e}")
+    # Fallback (shows the generic script icon rather than the app icon).
     script = f'display notification "{message}" with title "{title}"'
     subprocess.run(["osascript", "-e", script], capture_output=True)
 
