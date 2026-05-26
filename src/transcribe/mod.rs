@@ -56,20 +56,20 @@ pub fn load_model(model_name: &str) -> Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("Failed to load model: {:?}", e))?;
 
-    *MODEL.lock().unwrap() = Some(ctx);
+    *MODEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
     info!("Model loaded and ready");
     Ok(())
 }
 
 /// Unload the model to free memory.
 pub fn unload_model() {
-    *MODEL.lock().unwrap() = None;
+    *MODEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
     info!("Model unloaded");
 }
 
 /// Check if the model is loaded.
 pub fn is_loaded() -> bool {
-    MODEL.lock().unwrap().is_some()
+    MODEL.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
 
 /// Transcribe audio using the active backend.
@@ -99,7 +99,7 @@ pub fn transcribe(audio: &[f32], language: &str) -> Result<String> {
 }
 
 fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {
-    let guard = MODEL.lock().unwrap();
+    let guard = MODEL.lock().unwrap_or_else(|e| e.into_inner());
     let ctx = guard
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Model not loaded"))?;

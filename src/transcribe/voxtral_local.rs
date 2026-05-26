@@ -64,7 +64,7 @@ mod inner {
         let time_embed = TimeEmbedding::new(3072);
         let t_embed = time_embed.embed::<Backend>(6.0, &device);
 
-        *VOXTRAL.lock().unwrap() = Some(VoxtralState {
+        *VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(VoxtralState {
             model, tokenizer, mel_extractor, pad_config, t_embed,
             loaded_thread: std::thread::current().id(),
         });
@@ -74,16 +74,16 @@ mod inner {
     }
 
     pub fn is_loaded() -> bool {
-        VOXTRAL.lock().unwrap().is_some()
+        VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub fn unload_model() {
-        *VOXTRAL.lock().unwrap() = None;
+        *VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()) = None;
         info!("Voxtral model unloaded");
     }
 
     pub fn transcribe(audio: &[f32]) -> Result<String> {
-        let guard = VOXTRAL.lock().unwrap();
+        let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
         let state = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Voxtral model not loaded"))?;
 
         let device = Default::default();
