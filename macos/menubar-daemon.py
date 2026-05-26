@@ -474,6 +474,10 @@ def format_hotkey_display(hotkey_str):
     return ''.join(result)
 
 
+# On-screen size (points) of the menu-bar glyph. The bar is ~22pt tall; the wave
+# shape has padding in its canvas, so we render it large within the bar.
+MENUBAR_ICON_SIZE = 22
+
 # Menu-bar glyph colors (PADDOCK palette). The wave shape is identical across
 # states; only the color carries the state, so we load one image per color and
 # resolve state -> color at draw time (idle/processing adapt to the menu bar).
@@ -485,12 +489,12 @@ ICON_COLOR_FILES = {
 
 
 def load_icon_image(color):
-    """Load the wave glyph in the given PADDOCK color as an 18pt NSImage."""
+    """Load the wave glyph in the given PADDOCK color as a menu-bar NSImage."""
     path = ICON_COLOR_FILES.get(color)
     if path and path.exists():
         image = NSImage.alloc().initWithContentsOfFile_(str(path))
         if image:
-            image.setSize_(NSMakeSize(18, 18))
+            image.setSize_(NSMakeSize(MENUBAR_ICON_SIZE, MENUBAR_ICON_SIZE))
             return image
     return None
 

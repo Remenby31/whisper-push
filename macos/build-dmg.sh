@@ -44,7 +44,7 @@ if command -v rsvg-convert >/dev/null; then
     log "Rendering menu-bar icons (PNG) from SVG..."
     for st in idle recording processing; do
         [[ -f "$SCRIPT_DIR/icons/icon-${st}.svg" ]] && \
-            rsvg-convert -w 36 -h 36 "$SCRIPT_DIR/icons/icon-${st}.svg" -o "$SCRIPT_DIR/icons/icon-${st}.png"
+            rsvg-convert -w 44 -h 44 "$SCRIPT_DIR/icons/icon-${st}.svg" -o "$SCRIPT_DIR/icons/icon-${st}.png"
     done
 else
     warn "rsvg-convert not found; using committed icon assets as-is."
