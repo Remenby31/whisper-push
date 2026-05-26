@@ -758,7 +758,9 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let cfg = config.lock().unwrap();
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
-                let is_voxtral_streaming = cfg.backend == "voxtral-local";
+                // Real-time streaming is too slow (re-encodes all audio each chunk).
+                // Use batch mode for now + progressive typing for visual effect.
+                let is_voxtral_streaming = false; // TODO: enable when incremental encoder KV cache works
                 drop(cfg);
 
                 if is_voxtral_streaming {
