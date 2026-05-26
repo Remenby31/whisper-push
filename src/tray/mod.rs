@@ -404,32 +404,32 @@ impl App {
                             }
                         }
 
-                        // Auto-download + load model into RAM immediately
+                        // For Voxtral: DON'T load here — WGPU requires same-thread.
+                        // It will lazy-load in the transcription thread on first use.
+                        // For others: load immediately.
                         let bv = backend_value.clone();
-                        std::thread::spawn(move || {
-                            info!("Switching to {bv}...");
-                            crate::notify::send("Whisper Push", &format!("Loading {bv}..."));
-                            match crate::model_manager::ensure_model(&bv) {
-                                Ok(()) => {
-                                    // Load the new model into RAM
-                                    let load_result = match bv.as_str() {
-                                        "parakeet" => crate::transcribe::parakeet::load_model(),
-                                        "voxtral-local" => {
-                                            let dir = crate::config::data_dir().join("models").join("voxtral");
-                                            crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
-                                        }
-                                        _ => crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin"),
-                                    };
-                                    match load_result {
-                                        Ok(()) => crate::notify::send("Whisper Push", &format!("{bv} ready!")),
-                                        Err(e) => crate::notify::send("Whisper Push", &format!("Failed to load {bv}: {e}")),
-                                    }
-                                }
-                                Err(e) => {
-                                    crate::notify::send("Whisper Push", &format!("Failed: {e}"));
-                                }
+                        if bv == "voxtral-local" {
+                            // Just check the model file exists
+                            let dir = crate::config::data_dir().join("models").join("voxtral");
+                            if dir.join("voxtral-q4.gguf").exists() {
+                                crate::notify::send("Whisper Push", "Voxtral selected. Will load on first use.");
+                            } else {
+                                crate::notify::send("Whisper Push", "Voxtral model not found. Download it first.");
                             }
-                        });
+                        } else {
+                            std::thread::spawn(move || {
+                                info!("Switching to {bv}...");
+                                crate::notify::send("Whisper Push", &format!("Loading {bv}..."));
+                                let load_result = match bv.as_str() {
+                                    "parakeet" => crate::transcribe::parakeet::load_model(),
+                                    _ => crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin"),
+                                };
+                                match load_result {
+                                    Ok(()) => crate::notify::send("Whisper Push", &format!("{bv} ready!")),
+                                    Err(e) => crate::notify::send("Whisper Push", &format!("Failed: {e}")),
+                                }
+                            });
+                        }
                         return;
                     }
                 }
