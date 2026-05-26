@@ -476,7 +476,7 @@ def format_hotkey_display(hotkey_str):
 
 # On-screen size (points) of the menu-bar glyph. The bar is ~22pt tall; the wave
 # shape has padding in its canvas, so we render it large within the bar.
-MENUBAR_ICON_SIZE = 22
+MENUBAR_ICON_SIZE = 24
 
 # Menu-bar glyph colors (PADDOCK palette). The wave shape is identical across
 # states; only the color carries the state, so we load one image per color and
