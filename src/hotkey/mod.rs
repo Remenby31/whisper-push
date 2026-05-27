@@ -22,3 +22,18 @@ pub fn start_listener(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Re
 
     Ok(())
 }
+
+/// Apply a new hotkey to the running listener immediately (no restart).
+#[allow(unused_variables)]
+pub fn rebind(hotkey: &str, mode: &str) {
+    #[cfg(target_os = "macos")]
+    macos::rebind(hotkey, mode);
+}
+
+/// Arm capture of the next key combo; the result arrives as
+/// `Event::HotkeyCaptured` on `tx`. (macOS only for now.)
+#[allow(unused_variables)]
+pub fn start_capture(tx: Sender<Event>) {
+    #[cfg(target_os = "macos")]
+    macos::start_capture(tx);
+}

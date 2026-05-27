@@ -1,5 +1,7 @@
 use crossbeam_channel::Sender;
 use crate::state::Event;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info};
 
 // CGEvent types
@@ -21,13 +23,61 @@ const KEYCODE_RALT: i64 = 61;
 const KEYCODE_LCMD: i64 = 55;
 const KEYCODE_RCMD: i64 = 54;
 
-struct HotkeyConfig {
+/// Named non-modifier keys ↔ macOS virtual keycodes. Shared by the parser and
+/// the capture logic so custom toggle hotkeys round-trip correctly.
+const KEYCODES: &[(&str, i64)] = &[
+    ("a", 0), ("b", 11), ("c", 8), ("d", 2), ("e", 14), ("f", 3), ("g", 5),
+    ("h", 4), ("i", 34), ("j", 38), ("k", 40), ("l", 37), ("m", 46), ("n", 45),
+    ("o", 31), ("p", 35), ("q", 12), ("r", 15), ("s", 1), ("t", 17), ("u", 32),
+    ("v", 9), ("w", 13), ("x", 7), ("y", 16), ("z", 6),
+    ("0", 29), ("1", 18), ("2", 19), ("3", 20), ("4", 21),
+    ("5", 23), ("6", 22), ("7", 26), ("8", 28), ("9", 25),
+    ("space", 49), ("return", 36), ("tab", 48), ("escape", 53),
+];
+
+fn key_name_to_code(name: &str) -> Option<i64> {
+    KEYCODES.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
+}
+
+fn key_code_to_name(code: i64) -> Option<&'static str> {
+    KEYCODES.iter().find(|(_, c)| *c == code).map(|(n, _)| *n)
+}
+
+/// (keycode, flag, name) for the 8 modifier keys.
+const MODIFIERS: &[(i64, u64, &str)] = &[
+    (KEYCODE_LCTRL, CG_EVENT_FLAG_CONTROL, "lctrl"),
+    (KEYCODE_RCTRL, CG_EVENT_FLAG_CONTROL, "rctrl"),
+    (KEYCODE_LSHIFT, CG_EVENT_FLAG_SHIFT, "lshift"),
+    (KEYCODE_RSHIFT, CG_EVENT_FLAG_SHIFT, "rshift"),
+    (KEYCODE_LALT, CG_EVENT_FLAG_ALTERNATE, "lalt"),
+    (KEYCODE_RALT, CG_EVENT_FLAG_ALTERNATE, "ralt"),
+    (KEYCODE_LCMD, CG_EVENT_FLAG_COMMAND, "lcmd"),
+    (KEYCODE_RCMD, CG_EVENT_FLAG_COMMAND, "rcmd"),
+];
+
+fn modifier_by_keycode(code: i64) -> Option<(u64, &'static str)> {
+    MODIFIERS.iter().find(|(kc, _, _)| *kc == code).map(|(_, f, n)| (*f, *n))
+}
+
+/// Modifier names for the generic flags present (used to build a toggle string).
+fn flag_mod_names(flags: u64) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    if flags & CG_EVENT_FLAG_CONTROL != 0 { v.push("ctrl"); }
+    if flags & CG_EVENT_FLAG_ALTERNATE != 0 { v.push("alt"); }
+    if flags & CG_EVENT_FLAG_SHIFT != 0 { v.push("shift"); }
+    if flags & CG_EVENT_FLAG_COMMAND != 0 { v.push("cmd"); }
+    v
+}
+
+#[derive(Clone, Copy)]
+struct MatchConfig {
     modifier_flags: u64,
     key_code: Option<i64>,
     modifier_keycode: Option<i64>,
+    is_hold: bool,
 }
 
-fn parse_hotkey(hotkey: &str) -> HotkeyConfig {
+fn parse_hotkey(hotkey: &str, mode: &str) -> MatchConfig {
     let mut flags: u64 = 0;
     let mut key_code: Option<i64> = None;
     let mut modifier_keycode: Option<i64> = None;
@@ -47,55 +97,121 @@ fn parse_hotkey(hotkey: &str) -> HotkeyConfig {
             "ralt" => { modifier_keycode = Some(KEYCODE_RALT); flags |= CG_EVENT_FLAG_ALTERNATE; }
             "lcmd" => { modifier_keycode = Some(KEYCODE_LCMD); flags |= CG_EVENT_FLAG_COMMAND; }
             "rcmd" => { modifier_keycode = Some(KEYCODE_RCMD); flags |= CG_EVENT_FLAG_COMMAND; }
-            "space" => key_code = Some(49),
-            _ => {}
+            other => { if let Some(c) = key_name_to_code(other) { key_code = Some(c); } }
         }
     }
-    HotkeyConfig { modifier_flags: flags, key_code, modifier_keycode }
+    MatchConfig { modifier_flags: flags, key_code, modifier_keycode, is_hold: mode == "hold" }
+}
+
+// Live, mutable state shared with the running event tap.
+static MATCH_CFG: Mutex<Option<MatchConfig>> = Mutex::new(None);
+static CAPTURING: AtomicBool = AtomicBool::new(false);
+// Modifier seen going down during capture (keycode) — confirms a "hold" hotkey
+// only once it is released with no other key pressed in between.
+static CAPTURE_PENDING_MOD: Mutex<Option<i64>> = Mutex::new(None);
+// Where to deliver a captured hotkey (the main tray channel, not the pipeline).
+static CAPTURE_TX: Mutex<Option<Sender<Event>>> = Mutex::new(None);
+
+/// Apply a new hotkey to the running tap immediately (no restart).
+pub fn rebind(hotkey: &str, mode: &str) {
+    *MATCH_CFG.lock().unwrap() = Some(parse_hotkey(hotkey, mode));
+    info!("Hotkey rebound: '{hotkey}' ({mode})");
+}
+
+/// Arm capture of the next key combo. `tx` is the channel that receives the
+/// resulting `Event::HotkeyCaptured`.
+pub fn start_capture(tx: Sender<Event>) {
+    *CAPTURE_TX.lock().unwrap() = Some(tx);
+    *CAPTURE_PENDING_MOD.lock().unwrap() = None;
+    CAPTURING.store(true, Ordering::SeqCst);
+    info!("Hotkey capture armed — waiting for a key combo");
+}
+
+/// Tap a modifier => hold hotkey on it. Press modifier(s)+key => toggle hotkey.
+/// Returns Some((hotkey, mode)) once a combo is recognised.
+fn try_capture(event_type: u32, key_code: i64, flags: u64) -> Option<(String, String)> {
+    if event_type == K_CG_EVENT_KEY_DOWN {
+        // Non-modifier key with at least one modifier => toggle hotkey.
+        let mods = flag_mod_names(flags);
+        if !mods.is_empty() {
+            if let Some(key) = key_code_to_name(key_code) {
+                *CAPTURE_PENDING_MOD.lock().unwrap() = None;
+                let combo = format!("{}+{}", mods.join("+"), key);
+                return Some((combo, "toggle".to_string()));
+            }
+        }
+        None
+    } else if event_type == K_CG_EVENT_FLAGS_CHANGED {
+        if let Some((flag, name)) = modifier_by_keycode(key_code) {
+            let pressed = flags & flag != 0;
+            let mut pending = CAPTURE_PENDING_MOD.lock().unwrap();
+            if pressed {
+                *pending = Some(key_code); // remember; commit on release
+                None
+            } else if *pending == Some(key_code) {
+                *pending = None;
+                Some((name.to_string(), "hold".to_string())) // tapped & released
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 /// Start global hotkey listener using CGEventTap (works from any thread).
 pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> {
-    let config = parse_hotkey(hotkey);
-    let is_hold = mode == "hold";
+    rebind(hotkey, mode);
 
-    info!(
-        "macOS hotkey (CGEventTap): '{}' mode={} flags={:#x}",
-        hotkey, mode, config.modifier_flags
-    );
-
-    let expected_flags = config.modifier_flags;
-    let hold_keycode = config.modifier_keycode;
-    let toggle_keycode = config.key_code;
+    info!("macOS hotkey (CGEventTap): '{hotkey}' mode={mode}");
 
     std::thread::spawn(move || {
         use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType};
 
         let hold_active = std::sync::atomic::AtomicBool::new(false);
 
-        // Event mask: FlagsChanged (modifier keys) + KeyDown (for hold interrupt)
-        let _mask = (1u64 << K_CG_EVENT_FLAGS_CHANGED) | (1u64 << K_CG_EVENT_KEY_DOWN);
-
         let tap = CGEventTap::new(
             CGEventTapLocation::HID,
             CGEventTapPlacement::HeadInsertEventTap,
             CGEventTapOptions::ListenOnly,
-            vec![
-                CGEventType::FlagsChanged,
-                CGEventType::KeyDown,
-            ],
+            vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
             |_proxy, event_type, event| {
-                match event_type {
-                    CGEventType::FlagsChanged if is_hold => {
-                        let kc = event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
-                        let flags = event.get_flags().bits();
+                let raw_type = match event_type {
+                    CGEventType::FlagsChanged => K_CG_EVENT_FLAGS_CHANGED,
+                    CGEventType::KeyDown => K_CG_EVENT_KEY_DOWN,
+                    _ => return None,
+                };
+                let kc = event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
+                let flags = event.get_flags().bits();
 
-                        if let Some(expected_kc) = hold_keycode {
+                // Capture mode intercepts everything.
+                if CAPTURING.load(Ordering::SeqCst) {
+                    if let Some((hk, m)) = try_capture(raw_type, kc, flags) {
+                        CAPTURING.store(false, Ordering::SeqCst);
+                        rebind(&hk, &m);
+                        hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(tx) = CAPTURE_TX.lock().unwrap().as_ref() {
+                            let _ = tx.send(Event::HotkeyCaptured(hk, m));
+                        }
+                    }
+                    return None;
+                }
+
+                let cfg = match *MATCH_CFG.lock().unwrap() {
+                    Some(c) => c,
+                    None => return None,
+                };
+                let expected_flags = cfg.modifier_flags;
+
+                match raw_type {
+                    K_CG_EVENT_FLAGS_CHANGED if cfg.is_hold => {
+                        if let Some(expected_kc) = cfg.modifier_keycode {
                             if kc != expected_kc { return None; }
                         }
-
-                        let pressed = (flags & expected_flags) == expected_flags;
-
+                        let pressed = (flags & expected_flags) == expected_flags && expected_flags != 0;
                         if pressed && !hold_active.load(std::sync::atomic::Ordering::Relaxed) {
                             hold_active.store(true, std::sync::atomic::Ordering::Relaxed);
                             info!("HotkeyDown");
@@ -106,18 +222,16 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                             let _ = tx.send(Event::HotkeyUp);
                         }
                     }
-                    CGEventType::KeyDown if is_hold => {
-                        // Another key pressed during hold — discard
+                    K_CG_EVENT_KEY_DOWN if cfg.is_hold => {
+                        // Another key pressed during hold — discard.
                         if hold_active.load(std::sync::atomic::Ordering::Relaxed) {
                             debug!("Key during hold — discard");
                             hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
                             let _ = tx.send(Event::HotkeyUp);
                         }
                     }
-                    CGEventType::KeyDown if !is_hold => {
-                        let kc = event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
-                        let flags = event.get_flags().bits();
-                        if let Some(expected_kc) = toggle_keycode {
+                    K_CG_EVENT_KEY_DOWN => {
+                        if let Some(expected_kc) = cfg.key_code {
                             if kc == expected_kc && (flags & expected_flags) == expected_flags {
                                 info!("Toggle hotkey");
                                 let _ = tx.send(Event::HotkeyToggle);
@@ -132,7 +246,6 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
 
         info!("CGEventTap created — listening for hotkey events");
 
-        // Run the tap on the current thread's run loop
         let loop_source = tap.mach_port.create_runloop_source(0)
             .expect("Failed to create run loop source");
         let run_loop = core_foundation::runloop::CFRunLoop::get_current();

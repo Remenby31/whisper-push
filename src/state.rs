@@ -33,6 +33,8 @@ pub enum Event {
     HotkeyUp,
     /// Hotkey toggled (toggle mode)
     HotkeyToggle,
+    /// A custom hotkey was captured (hotkey string, mode)
+    HotkeyCaptured(String, String),
     /// Recording captured, ready to transcribe
     AudioCaptured(Vec<f32>),
     /// Transcription result

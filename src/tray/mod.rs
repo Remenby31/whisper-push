@@ -81,6 +81,8 @@ struct MenuItems {
     uninstall_id: String,
     hotkey_ids: Vec<(String, String, String)>,
     hotkey_items: Vec<(CheckMenuItem, String, String)>,
+    hotkey_submenu: Submenu,
+    custom_hotkey_id: String,
     input_ids: Vec<(String, String)>,
     input_device_items: Vec<(CheckMenuItem, String)>,
     input_submenu: Submenu,
@@ -128,8 +130,11 @@ impl App {
             None,
         );
 
-        // Hotkey submenu
-        let hotkey_submenu = Submenu::new("Hotkey", true);
+        // Hotkey submenu (titled with the current binding)
+        let hotkey_submenu = Submenu::new(
+            &format!("Hotkey: {}", format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
+            true,
+        );
         let mut hotkey_items = Vec::new();
         for (label, hotkey, mode) in HOTKEY_PRESETS {
             let checked = *hotkey == cfg.hotkey && *mode == cfg.hotkey_mode;
@@ -137,6 +142,10 @@ impl App {
             let _ = hotkey_submenu.append(&item);
             hotkey_items.push((item, hotkey.to_string(), mode.to_string()));
         }
+        let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
+        let custom_hotkey_item = MenuItem::new("Set Custom Hotkey\u{2026}", true, None);
+        let _ = hotkey_submenu.append(&custom_hotkey_item);
+        let custom_hotkey_id = custom_hotkey_item.id().0.clone();
 
         // Permissions (computed once here; reused for the Permissions section).
         let perms = crate::permissions::check_all();
@@ -259,6 +268,7 @@ impl App {
         let _ = menu.append(&PredefinedMenuItem::separator());
 
         // Settings (dropdowns to keep the menu compact)
+        let _ = menu.append(&hotkey_submenu);
         let _ = menu.append(&backend_submenu);
         let _ = menu.append(&input_submenu);
         let _ = menu.append(&output_submenu);
@@ -297,7 +307,7 @@ impl App {
             ],
             status_item, toggle_item,
             notifications_item, sound_item, debug_item,
-            hotkey_ids, hotkey_items,
+            hotkey_ids, hotkey_items, hotkey_submenu, custom_hotkey_id,
             input_ids, input_device_items, input_submenu,
             output_ids, output_device_items, output_submenu,
         });
@@ -436,11 +446,22 @@ impl App {
                     if id == item_id {
                         let mut c = self.config.lock().unwrap();
                         c.hotkey = hotkey.clone(); c.hotkey_mode = mode.clone(); let _ = c.save();
-                        for (item, hk, _) in &mi.hotkey_items { item.set_checked(hk == hotkey); }
-                        mi.status_item.set_text(&format!("Whisper Push ({})", format_hotkey_display(hotkey, mode)));
-                        crate::notify::send("Whisper Push", "Hotkey changed. Restart to apply.");
+                        for (item, hk, m) in &mi.hotkey_items { item.set_checked(hk == hotkey && m == mode); }
+                        let disp = format_hotkey_display(hotkey, mode);
+                        mi.status_item.set_text(&format!("Whisper Push ({disp})"));
+                        mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
+                        crate::hotkey::rebind(hotkey, mode); // live — no restart
+                        crate::notify::send("Whisper Push", &format!("Hotkey set to {disp}"));
                         return;
                     }
+                }
+                if id == &mi.custom_hotkey_id {
+                    crate::hotkey::start_capture(self.state.tx.clone());
+                    crate::notify::send(
+                        "Whisper Push",
+                        "Press your shortcut now: tap a modifier (e.g. Right \u{2318}) to hold, or a combo like \u{2318}\u{21e7}D to toggle.",
+                    );
+                    return;
                 }
                 for (item_id, name) in &mi.input_ids {
                     if id == item_id {
@@ -584,6 +605,22 @@ impl App {
                 mi.toggle_item.set_text("Start Recording");
                 mi.toggle_item.set_enabled(true);
                 set_tray_icon(&self.tray, State::Idle);
+            }
+
+            Event::HotkeyCaptured(hotkey, mode) => {
+                info!("Custom hotkey captured: '{hotkey}' ({mode})");
+                {
+                    let mut c = self.config.lock().unwrap();
+                    c.hotkey = hotkey.clone();
+                    c.hotkey_mode = mode.clone();
+                    let _ = c.save();
+                }
+                // Tap already rebound the live listener; just sync the UI.
+                for (item, hk, m) in &mi.hotkey_items { item.set_checked(hk == &hotkey && m == &mode); }
+                let disp = format_hotkey_display(&hotkey, &mode);
+                mi.status_item.set_text(&format!("Whisper Push ({disp})"));
+                mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
+                crate::notify::send("Whisper Push", &format!("Custom hotkey set: {disp}"));
             }
 
             Event::PromptPermissions => {
@@ -1093,7 +1130,9 @@ fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
 fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
     let symbols: &[(&str, &str)] = &[
         ("cmd", "\u{2318}"), ("shift", "\u{21e7}"), ("alt", "\u{2325}"), ("ctrl", "\u{2303}"),
-        ("rctrl", "\u{2303}R"), ("rcmd", "\u{2318}R"), ("ralt", "\u{2325}R"), ("space", "Space"),
+        ("rctrl", "\u{2303}R"), ("rcmd", "\u{2318}R"), ("ralt", "\u{2325}R"), ("rshift", "\u{21e7}R"),
+        ("lctrl", "\u{2303}L"), ("lcmd", "\u{2318}L"), ("lalt", "\u{2325}L"), ("lshift", "\u{21e7}L"),
+        ("space", "Space"),
     ];
     let mut r = if mode == "hold" { "Hold ".into() } else { String::new() };
     for (i, p) in hotkey.to_lowercase().split('+').enumerate() {
