@@ -15,8 +15,6 @@ pub struct Config {
     pub language: String,
     /// Whisper model name (used for HuggingFace download)
     pub model: String,
-    /// Transcription backend: "parakeet", "whisper", or "voxtral-local"
-    pub backend: String,
     /// Show OS notifications
     pub notifications: bool,
     /// Play start/stop sounds
@@ -39,7 +37,6 @@ impl Default for Config {
             hold_delay: 0.15,
             language: "auto".into(),
             model: "ggml-large-v3-turbo-q5_0.bin".into(),
-            backend: "whisper".into(),
             notifications: true,
             sound_feedback: true,
             input_device: "auto".into(),

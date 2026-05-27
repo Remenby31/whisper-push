@@ -221,8 +221,8 @@ mod app {
 
         // First-launch onboarding
         if crate::onboarding::check_first_launch() {
-            let backend = crate::onboarding::run();
-            cfg.backend = backend;
+            let model = crate::onboarding::run();
+            cfg.model = model;
         }
 
         tracing::info!("Starting whisper-push daemon");

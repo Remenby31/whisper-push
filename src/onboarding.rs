@@ -18,15 +18,16 @@ pub fn mark_complete() {
     info!("Onboarding complete");
 }
 
-/// Run the onboarding sequence. Returns the recommended backend.
+/// Run the onboarding sequence. Returns the recommended model name.
 pub fn run() -> String {
     info!("Running first-launch onboarding...");
 
     // 1. Detect hardware
     let hw = crate::hardware::detect();
-    let recommended = crate::hardware::recommend_backend(&hw);
+    let recommended_backend = crate::hardware::recommend_backend(&hw);
+    let recommended_model = crate::model_manager::model_for_backend(recommended_backend);
     info!("Hardware: {} {} — GPU: {}", hw.os, hw.arch, hw.gpu.label());
-    info!("Recommended backend: {recommended}");
+    info!("Recommended model: {recommended_model} (backend: {recommended_backend})");
 
     crate::notify::send(
         "Whisper Push",
@@ -41,24 +42,24 @@ pub fn run() -> String {
     }
 
     // 3. Ensure model is downloaded
-    info!("Checking model for backend '{recommended}'...");
-    if let Err(e) = crate::model_manager::ensure_model(recommended) {
+    info!("Checking model '{recommended_model}'...");
+    if let Err(e) = crate::model_manager::ensure_model(recommended_backend) {
         info!("Model download deferred: {e}");
     }
 
-    // 4. Save recommended backend to config
+    // 4. Save recommended model to config
     if let Ok(mut cfg) = crate::config::Config::load() {
-        cfg.backend = recommended.to_string();
+        cfg.model = recommended_model.to_string();
         let _ = cfg.save();
-        info!("Config updated: backend={recommended}");
+        info!("Config updated: model={recommended_model}");
     }
 
     mark_complete();
 
     crate::notify::send(
         "Whisper Push",
-        &format!("Ready! Using {} engine. Hold Control to dictate.", recommended),
+        &format!("Ready! Using {}. Hold Control to dictate.", recommended_model),
     );
 
-    recommended.to_string()
+    recommended_model.to_string()
 }

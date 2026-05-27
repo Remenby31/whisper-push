@@ -142,9 +142,9 @@ impl App {
         }
 
 
-        // Backend submenu (Whisper local vs Voxtral API)
-        let backend_submenu = Submenu::new("Transcription Engine", true);
+        // Model selector
         let models = crate::model_manager::list_models();
+        let current_backend = crate::model_manager::backend_for_model(&cfg.model);
         let parakeet_status = models.iter().find(|m| m.backend == "parakeet").map(|m| m.is_downloaded).unwrap_or(false);
         let voxtral_status = models.iter().find(|m| m.backend == "voxtral-local").map(|m| m.is_downloaded).unwrap_or(false);
         let whisper_status = models.iter().find(|m| m.backend == "whisper").map(|m| m.is_downloaded).unwrap_or(false);
@@ -156,20 +156,17 @@ impl App {
         };
 
         let backend_parakeet = MenuItem::new(
-            &engine_label("Parakeet TDT v3 (600 MB)", "parakeet", parakeet_status, &cfg.backend),
+            &engine_label("Parakeet TDT v3 (600 MB)", "parakeet", parakeet_status, current_backend),
             true, None,
         );
         let backend_voxtral_local = MenuItem::new(
-            &engine_label("Voxtral Realtime 2602 (2.3 GB, streaming)", "voxtral-local", voxtral_status, &cfg.backend),
+            &engine_label("Voxtral Realtime 2602 (2.3 GB, streaming)", "voxtral-local", voxtral_status, current_backend),
             true, None,
         );
         let backend_whisper = MenuItem::new(
-            &engine_label("Whisper large-v3-turbo (550 MB)", "whisper", whisper_status, &cfg.backend),
+            &engine_label("Whisper large-v3-turbo (550 MB)", "whisper", whisper_status, current_backend),
             true, None,
         );
-        let _ = backend_submenu.append(&backend_parakeet);
-        let _ = backend_submenu.append(&backend_voxtral_local);
-        let _ = backend_submenu.append(&backend_whisper);
 
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
@@ -338,14 +335,11 @@ impl App {
                                     return;
                                 }
 
-                                info!("=== TEST: Transcribing with '{}' ===", cfg.backend);
-                                crate::notify::send("Whisper Push", &format!("Transcribing with {}...", cfg.backend));
+                                let bk = crate::model_manager::backend_for_model(&cfg.model);
+                                info!("=== TEST: Transcribing with '{}' ===", bk);
+                                crate::notify::send("Whisper Push", &format!("Transcribing with {}...", bk));
 
-                                let backend = match cfg.backend.as_str() {
-                                    "parakeet" => crate::transcribe::Backend::Parakeet,
-                                    "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-                                    _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-                                };
+                                let backend = crate::model_manager::resolve_backend(&cfg.model);
 
                                 let start = std::time::Instant::now();
                                 match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
@@ -407,9 +401,10 @@ impl App {
                 // Backend selection
                 for (item, backend_value) in &mi.backend_items {
                     if id == &item.id().0 {
-                        // Save config and update active indicator
+                        // Save model in config (backend is derived automatically)
+                        let model_name = crate::model_manager::model_for_backend(backend_value);
                         let mut c = self.config.lock().unwrap();
-                        c.backend = backend_value.clone();
+                        c.model = model_name.to_string();
                         let _ = c.save();
                         drop(c);
                         // Update ● indicator on all items
@@ -428,7 +423,6 @@ impl App {
                         // For others: load immediately.
                         let bv = backend_value.clone();
                         if bv == "voxtral-local" {
-                            // Just check the model file exists
                             let dir = crate::config::data_dir().join("models").join("voxtral");
                             if dir.join("voxtral-q4.gguf").exists() {
                                 crate::notify::send("Whisper Push", "Voxtral selected. Will load on first use.");
@@ -613,11 +607,7 @@ impl App {
 
         let tx = self.state.tx.clone();
         let cfg = self.config.lock().unwrap().clone();
-        let backend = match cfg.backend.as_str() {
-            "parakeet" => crate::transcribe::Backend::Parakeet,
-            "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-            _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-        };
+        let backend = crate::model_manager::resolve_backend(&cfg.model);
         std::thread::spawn(move || {
             match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
                 Ok(text) if !text.is_empty() => { let _ = tx.send(Event::Transcribed(text)); }
@@ -652,11 +642,10 @@ impl ApplicationHandler<UserEvent> for App {
             // Load Whisper on main thread (always needed as fallback).
             // Voxtral/Parakeet are loaded LAZILY in the transcription thread
             // because WGPU/Metal doesn't support cross-thread model usage.
-            let backend = self.state.config.backend.clone();
-            info!("Config backend: {backend}");
+            let backend = crate::model_manager::backend_for_model(&self.state.config.model);
+            info!("Config model: {} (backend: {backend})", self.state.config.model);
             if backend != "voxtral-local" {
-                // Non-Voxtral backends can load on main thread
-                let load_result = match backend.as_str() {
+                let load_result = match backend {
                     "parakeet" => crate::transcribe::parakeet::load_model(),
                     _ => crate::transcribe::load_model(&self.state.config.model),
                 };
@@ -664,12 +653,10 @@ impl ApplicationHandler<UserEvent> for App {
                     Ok(()) => info!("{backend} model loaded"),
                     Err(e) => {
                         tracing::error!("{backend} load failed: {e}, falling back to whisper");
-                        let _ = crate::transcribe::load_model(&self.state.config.model);
+                        let _ = crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
                     }
                 }
             } else {
-                // Voxtral: don't load Whisper (its Metal cleanup crashes on exit).
-                // Voxtral loads lazy in the pipeline thread (WGPU requires same-thread).
                 info!("Voxtral selected — will load in transcription thread (WGPU requires same-thread)");
             }
             self.state.set(State::Idle);
@@ -775,7 +762,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let delay = cfg.hold_delay;
                 // Real-time streaming is too slow (re-encodes all audio each chunk).
                 // Use batch mode for now + progressive typing for visual effect.
-                let is_voxtral_streaming = cfg.backend == "voxtral-local";
+                let is_voxtral_streaming = crate::model_manager::backend_for_model(&cfg.model) == "voxtral-local";
                 drop(cfg);
 
                 if is_voxtral_streaming {
@@ -922,13 +909,8 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 }
 
                 let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
-                info!("Processing {:.1}s of audio with backend '{}' (RMS={:.4})...", audio.len() as f32 / 16000.0, cfg.backend, rms);
-
-                let backend = match cfg.backend.as_str() {
-                    "parakeet" => crate::transcribe::Backend::Parakeet,
-                    "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-                    _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-                };
+                let backend = crate::model_manager::resolve_backend(&cfg.model);
+                info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...", audio.len() as f32 / 16000.0, backend, rms);
 
                 let start = std::time::Instant::now();
                 // Use catch_unwind to catch WGPU/Metal panics from cross-thread access
@@ -992,11 +974,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                         .unwrap_or_default();
                     if audio.len() < 4800 { continue; }
 
-                    let backend = match cfg.backend.as_str() {
-                        "parakeet" => crate::transcribe::Backend::Parakeet,
-                        "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-                        _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-                    };
+                    let backend = crate::model_manager::resolve_backend(&cfg.model);
                     match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
                         Ok(text) if !text.is_empty() => {
                             let _ = crate::paste::paste_text(&text);

@@ -71,6 +71,35 @@ fn voxtral_model_dir() -> PathBuf {
     crate::config::data_dir().join("models").join("voxtral")
 }
 
+/// Derive the backend from a model name.
+pub fn backend_for_model(model: &str) -> &'static str {
+    if model.contains("parakeet") {
+        "parakeet"
+    } else if model.contains("voxtral") {
+        "voxtral-local"
+    } else {
+        "whisper"
+    }
+}
+
+/// Get the default model name for a backend (used by onboarding).
+pub fn model_for_backend(backend: &str) -> &'static str {
+    match backend {
+        "parakeet" => "parakeet-tdt-0.6b-v3",
+        "voxtral-local" => "voxtral-q4.gguf",
+        _ => "ggml-large-v3-turbo-q5_0.bin",
+    }
+}
+
+/// Resolve a model name to a transcribe::Backend enum.
+pub fn resolve_backend(model: &str) -> crate::transcribe::Backend {
+    match backend_for_model(model) {
+        "parakeet" => crate::transcribe::Backend::Parakeet,
+        "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
+        _ => crate::transcribe::Backend::WhisperLocal(model.to_string()),
+    }
+}
+
 /// Ensure the model for a given backend is downloaded.
 pub fn ensure_model(backend: &str) -> Result<()> {
     match backend {
