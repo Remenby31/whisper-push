@@ -127,18 +127,6 @@ impl AudioCapture {
         audio
     }
 
-    /// Get current RMS level (for UI metering).
-    #[allow(dead_code)]
-    pub fn current_rms(&self) -> f32 {
-        let buf = self.buffer.lock().unwrap();
-        if buf.is_empty() {
-            return 0.0;
-        }
-        // RMS of last 1600 samples (~100ms at 16kHz)
-        let window = &buf[buf.len().saturating_sub(1600)..];
-        let sum: f32 = window.iter().map(|s| s * s).sum();
-        (sum / window.len() as f32).sqrt()
-    }
 }
 
 impl Drop for AudioCapture {

@@ -6,7 +6,6 @@ mod hardware;
 mod model_manager;
 mod notify;
 mod onboarding;
-mod overlay;
 mod paste;
 mod permissions;
 mod state;
@@ -33,10 +32,6 @@ struct Cli {
     #[arg(short, long)]
     status: bool,
 
-    /// Force stop recording
-    #[arg(long)]
-    stop: bool,
-
     /// Run dependency/environment checks
     #[arg(long)]
     doctor: bool,
@@ -54,7 +49,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Init logging
-    let _guard = init_logging();
+    init_logging();
 
     info!("whisper-push v{}", env!("CARGO_PKG_VERSION"));
 
@@ -87,21 +82,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if cli.stop {
-        state::force_stop();
-        return Ok(());
-    }
-
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
     app::run(cfg)
 }
 
-struct LogGuard;
-impl Drop for LogGuard {
-    fn drop(&mut self) {}
-}
-
-fn init_logging() -> LogGuard {
+fn init_logging() {
     use tracing_subscriber::{fmt, EnvFilter};
 
     let filter = EnvFilter::try_from_default_env()
@@ -111,8 +96,6 @@ fn init_logging() -> LogGuard {
         .with_env_filter(filter)
         .with_target(false)
         .init();
-
-    LogGuard
 }
 
 mod doctor {
@@ -194,7 +177,8 @@ mod cli_transcribe {
         // Transcribe
         println!("Transcribing...");
         let start = Instant::now();
-        let text = crate::transcribe::transcribe(&samples, lang)?;
+        let backend = crate::model_manager::resolve_backend(&cfg.model);
+        let text = crate::transcribe::transcribe_with_backend(&samples, lang, &backend)?;
         let elapsed = start.elapsed();
 
         println!("\n--- Result ({:.2}s) ---", elapsed.as_secs_f64());

@@ -17,21 +17,6 @@ pub enum Backend {
     VoxtralLocal,
 }
 
-impl Backend {
-    #[allow(dead_code)]
-    pub fn label(&self) -> &str {
-        match self {
-            Backend::Parakeet => "Parakeet TDT 0.6B (fastest, ONNX GPU)",
-            Backend::WhisperLocal(m) => {
-                if m.contains("large-v3-turbo") { "Whisper large-v3-turbo (local)" }
-                else if m.contains("small") { "Whisper small (local)" }
-                else if m.contains("base") { "Whisper base (local)" }
-                else { "Whisper (local)" }
-            }
-            Backend::VoxtralLocal => "Voxtral Mini 4B (local, Q4 GPU)",
-        }
-    }
-}
 
 static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
 
@@ -63,14 +48,12 @@ pub fn load_model(model_name: &str) -> Result<()> {
 }
 
 /// Unload the model to free memory.
-#[allow(dead_code)]
 pub fn unload_model() {
     *MODEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
     info!("Model unloaded");
 }
 
 /// Check if the model is loaded.
-#[allow(dead_code)]
 pub fn is_loaded() -> bool {
     MODEL.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }
@@ -94,11 +77,6 @@ pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend)
             voxtral_local::transcribe(audio)
         }
     }
-}
-
-/// Transcribe a 16kHz mono f32 audio buffer to text (whisper local).
-pub fn transcribe(audio: &[f32], language: &str) -> Result<String> {
-    transcribe_whisper(audio, language)
 }
 
 fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {

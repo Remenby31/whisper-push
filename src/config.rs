@@ -94,10 +94,3 @@ pub fn data_dir() -> PathBuf {
         .join("whisper-push")
 }
 
-/// Platform-specific cache directory (temporary audio).
-#[allow(dead_code)]
-pub fn cache_dir() -> PathBuf {
-    dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("whisper-push")
-}

@@ -119,9 +119,3 @@ pub fn current_status() -> String {
     }
 }
 
-pub fn force_stop() {
-    // Send SIGTERM to running instance (Unix) or equivalent
-    tracing::info!("Force stop requested");
-    // For now, just print — will implement proper IPC later
-    println!("Stop signal sent");
-}

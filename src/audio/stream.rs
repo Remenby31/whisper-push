@@ -139,33 +139,6 @@ impl StreamingCapture {
         })
     }
 
-    /// Stop streaming and return any remaining audio as a final chunk.
-    pub fn stop(mut self) -> Option<AudioChunk> {
-        self.stream.take();
-        // Drain any remaining chunks
-        let mut all_samples = Vec::new();
-        while let Ok(chunk) = self.chunk_rx.try_recv() {
-            all_samples.extend(chunk.samples);
-        }
-        if all_samples.is_empty() {
-            None
-        } else {
-            Some(AudioChunk {
-                samples: all_samples,
-                offset_samples: self.total_samples.load(std::sync::atomic::Ordering::Relaxed),
-            })
-        }
-    }
-
-    /// Get total samples captured so far.
-    pub fn total_samples(&self) -> usize {
-        self.total_samples.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Get recording duration in seconds.
-    pub fn duration_secs(&self) -> f32 {
-        self.total_samples() as f32 / TARGET_SAMPLE_RATE as f32
-    }
 }
 
 impl Drop for StreamingCapture {

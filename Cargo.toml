@@ -41,7 +41,6 @@ arboard = "3"
 
 # System tray + event loop
 tray-icon = "0.19"
-muda = "0.16"
 winit = "0.30"
 
 # Config
@@ -61,7 +60,6 @@ clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # Async / threading
 crossbeam-channel = "0.5"
