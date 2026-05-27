@@ -9,220 +9,148 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> •
-  <a href="#platform-support">Platforms</a> •
-  <a href="#usage">Usage</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#how-it-works">How it works</a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple" alt="macOS Apple Silicon">
+  <a href="https://github.com/Remenby31/whisper-push/releases/latest"><img src="https://img.shields.io/github/v/release/Remenby31/whisper-push" alt="Release"></a>
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-black?logo=apple" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-supported-blue?logo=linux&logoColor=white" alt="Linux">
-  <img src="https://img.shields.io/badge/license-MIT-orange" alt="License">
+  <img src="https://img.shields.io/badge/Windows-supported-blue?logo=windows&logoColor=white" alt="Windows">
+  <img src="https://img.shields.io/badge/Rust-native-orange?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/binary-35MB-green" alt="35MB">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-orange" alt="MIT"></a>
 </p>
 
 ---
 
-No cloud, no account, no latency. Everything runs on your machine. On macOS it lives
-in the menu bar and transcribes in **~0.15 s** with NVIDIA Parakeet via Apple MLX; on
-Linux it's a CLI you bind to a hotkey, powered by faster-whisper.
+No cloud, no account, no latency. A **35MB native binary** that transcribes speech using GPU acceleration. Three transcription engines, every platform optimized.
 
-## Quick start
+## Transcription Engines
 
-### macOS (Apple Silicon — M1/M2/M3/M4)
+| | **macOS (Apple Silicon)** | **Linux NVIDIA** | **Linux AMD/Intel** | **Windows NVIDIA** | **Windows AMD/Intel** | **CPU (any)** |
+|---|---|---|---|---|---|---|
+| **Parakeet TDT v3** | Metal (WebGPU) | ONNX + CUDA | ONNX + WebGPU | ONNX + CUDA | ONNX + DirectML | ONNX CPU |
+| **Voxtral Realtime 2602** | Burn + WGPU | Burn + Vulkan | Burn + Vulkan | Burn + Vulkan | Burn + Vulkan | Burn CPU |
+| **Whisper large-v3-turbo** | whisper.cpp Metal | whisper.cpp CUDA | whisper.cpp Vulkan | whisper.cpp CUDA | whisper.cpp Vulkan | whisper.cpp CPU |
 
-**Option A — App (easiest):**
-1. Download `Whisper-Push-macOS-arm64.dmg` from the [latest release](../../releases/latest).
-2. Open it and drag **Whisper Push** to **Applications**.
-3. The app isn't notarized, so the first launch is blocked. Clear the quarantine flag once:
-   ```bash
-   xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"
-   ```
-   > No terminal? Double-click the app, then go to **System Settings → Privacy & Security**
-   > and click **Open Anyway**. (On macOS 15+ the old right-click → Open trick is gone.)
-4. Grant **Microphone**, **Accessibility**, and **Input Monitoring** when asked
-   (System Settings → Privacy & Security).
-5. Hold **Control**, speak, release. The first run downloads the model (~600 MB).
+### Performance (10 seconds of audio)
 
-**Option B — From source:**
+| Engine | macOS Metal | CUDA (RTX 4070) | CPU |
+|---|---|---|---|
+| **Parakeet** | ~27ms | ~50ms | ~500ms |
+| **Voxtral Q4** | ~400ms | ~300ms | ~3s |
+| **Whisper turbo Q5** | ~1.2s | ~200ms | ~5-10s |
+
+### Streaming
+
+| Engine | Streaming? | How |
+|---|---|---|
+| **Voxtral Realtime** | **Yes** — words appear while speaking | Causal encoder, incremental decode |
+| **Parakeet** (Nemotron) | Planned | Chunked audio, EOU detection |
+| **Whisper** | No | Batch only |
+
+### Accuracy (WER)
+
+| Engine | English | Multilingual |
+|---|---|---|
+| **Parakeet** | **1.69%** | 25 EU languages |
+| **Voxtral** | 4.90% | 13 languages |
+| **Whisper** | 2.70% | **99+ languages** |
+
+### Binary vs Python
+
+| | Python (v1) | Rust (v2) |
+|---|---|---|
+| **Binary** | ~600MB (PyInstaller) | **35MB** |
+| **Dependencies** | Python, PyObjC, sounddevice, scipy | **None** |
+| **Startup** | ~3s | **<100ms** |
+| **Memory (idle)** | ~200MB | **~15MB** |
+
+## Quick Start
+
+### macOS (Apple Silicon)
+
 ```bash
 git clone https://github.com/Remenby31/whisper-push.git
 cd whisper-push
-./macos/install.sh
+make deploy    # build + bundle + sign + launch
 ```
 
-→ Full macOS docs: **[macos/README.md](macos/README.md)**
+The model (~550MB) downloads automatically on first use.
 
 ### Linux
 
 ```bash
-git clone https://github.com/Remenby31/whisper-push.git
-cd whisper-push
-./install.sh
+curl -sSL https://raw.githubusercontent.com/Remenby31/whisper-push/main/scripts/install.sh | sh
 ```
 
-Then bind `whisper-push` to a hotkey (see [Linux setup](#linux-setup)).
+### Usage
 
-## Platform support
+| Action | How |
+|---|---|
+| **Dictate** | Hold **Control** → speak → release |
+| **Settings** | Click the menu bar icon |
+| **Switch engine** | Menu → select engine |
+| **Test** | Menu → "Test (record 3s + transcribe)" |
+| **Check setup** | `whisper-push --doctor` |
+| **Transcribe file** | `whisper-push --transcribe audio.mp3` |
+| **List models** | `whisper-push --models` |
 
-| Platform | Status | Engine | Interface |
-|----------|--------|--------|-----------|
-| **macOS — Apple Silicon** | ✅ Supported | Parakeet (MLX) | Menu-bar app, hold-to-talk |
-| **Linux** | ✅ Supported | faster-whisper | CLI + hotkey, toggle |
-| macOS — Intel | ❌ Not supported | — | MLX requires an M-series chip |
-| Windows | ❌ Not yet | — | Contributions welcome |
+### Configuration
 
-The macOS and Linux versions are independent implementations that share the same idea
-and a TOML config format; they use different speech engines.
+Settings are in the menu bar. Config file location:
+- macOS: `~/Library/Application Support/whisper-push/config.toml`
+- Linux: `~/.config/whisper-push/config.toml`
+- Windows: `%APPDATA%/whisper-push/config.toml`
 
-## macOS (Apple Silicon)
-
-A menu-bar app — no terminal needed once installed.
-
-- **Engine:** [NVIDIA Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (`parakeet-tdt-0.6b-v3`) running on Apple MLX.
-- **Latency:** ~0.15 s per phrase, kept warm in RAM (re-warms after sleep).
-- **Languages:** auto-detects 25 European languages (incl. FR, EN, ES, DE, IT…).
-- **Clipboard-safe:** your clipboard is restored after each paste.
-- **Settings in the menu bar:** input/output device, hotkey, idle-unload, notifications,
-  sounds — all written to a self-documenting `config.toml`.
-
-Default hotkey: **hold Control**, speak, release. Configure everything from the 🎙 menu
-bar icon or `Open Config (TOML)`.
-
-See **[macos/README.md](macos/README.md)** for details, troubleshooting, and building the DMG.
-
-## Linux
-
-The original faster-whisper CLI. Press a hotkey to start recording, press again to
-transcribe and type.
-
-### Requirements
-
-| Dependency | Purpose |
-|------------|---------|
-| [uv](https://github.com/astral-sh/uv) | Python package management |
-| PipeWire | Audio recording (`pw-record`) |
-| wl-clipboard | Clipboard access |
-| ydotool | Keyboard simulation |
-| NVIDIA GPU | CUDA acceleration (CPU fallback otherwise) |
-
-### Linux setup
-
-**One-file installer (recommended):**
-```bash
-./installer.sh
-# or, auto-install deps + configure a GNOME hotkey:
-WHISPER_PUSH_AUTO_DEPS=1 WHISPER_PUSH_HOTKEY="Super+V" ./installer.sh
-```
-
-**Manual:**
-```bash
-# 1. System dependencies (Arch example)
-sudo pacman -S pipewire wl-clipboard ydotool
-sudo usermod -aG input $USER   # required for ydotool; log out/in afterwards
-
-# 2. Install
-git clone https://github.com/Remenby31/whisper-push.git
-cd whisper-push
-./install.sh
-```
-
-Installer options: `WHISPER_PUSH_AUTO_DEPS=1` (auto deps), `WHISPER_PUSH_USE_CUDA=1`
-(force CUDA), `WHISPER_PUSH_HOTKEY="Super+V"` (GNOME hotkey).
-
-**Bind a hotkey:**
-- GNOME: `./setup-hotkey.sh "Super+V"`
-- KDE: System Settings → Shortcuts → Custom Shortcuts → command `~/.local/bin/whisper-push`
-
-## Usage
-
-**macOS:** hold the hotkey (default Control), speak, release → text is typed at the cursor.
-
-**Linux:** press the hotkey to start (beep), speak, press again to transcribe and type.
+## Building from Source
 
 ```bash
-whisper-push              # toggle recording/transcription (Linux)
-whisper-push --status     # show status
-whisper-push --stop       # force stop
-whisper-push -l fr        # override language
-whisper-push --doctor     # check dependencies
+# Prerequisites: Rust 1.83+, cmake
+
+# macOS (all engines)
+cargo build --release --features "metal,parakeet,voxtral"
+make deploy
+
+# Linux (CPU)
+cargo build --release
+
+# Linux (NVIDIA CUDA)
+cargo build --release --features cuda
+
+# Transcribe a file
+./target/release/whisper-push --transcribe audio.mp3
 ```
 
-## Configuration
+## Architecture
 
-**macOS:** use the menu bar, or edit `~/Library/Application Support/whisper-push/config.toml`
-(every option is documented inline).
-
-**Linux:** edit `~/.config/whisper-push/config.toml`:
-
-```toml
-language = "auto"          # "auto" or ISO code ("fr", "en", "de", ...)
-model = "large-v3-turbo"   # tiny, base, small, medium, large-v3, large-v3-turbo
-compute_type = "int8"      # int8 (fast), float16, float32 (CPU)
-device = "cuda"            # cuda, cpu, auto
-notifications = true
-sound_feedback = true
 ```
-
-### Linux models (faster-whisper)
-
-| Model | VRAM | Speed | Quality |
-|:------|:----:|:-----:|:-------:|
-| `tiny` | ~1 GB | ⚡⚡⚡⚡ | ★☆☆☆ |
-| `base` | ~1 GB | ⚡⚡⚡ | ★★☆☆ |
-| `small` | ~2 GB | ⚡⚡ | ★★★☆ |
-| `medium` | ~3 GB | ⚡ | ★★★★ |
-| `large-v3-turbo` | ~3 GB | ⚡⚡⚡ | ★★★★ |
-| `large-v3` | ~5 GB | ⚡ | ★★★★★ |
-
-**Recommended:** `large-v3-turbo` + `int8`. (macOS uses Parakeet and needs no model choice.)
-
-## How it works
-
-1. A global hotkey starts/stops capture (hold-to-talk on macOS, toggle on Linux).
-2. Audio is recorded locally and fed straight to the speech model — no files, no network.
-3. The transcript is placed at your cursor by simulating paste (clipboard restored on macOS).
-
-Everything is offline after the one-time model download.
-
-## Building the macOS DMG
-
-```bash
-brew install create-dmg          # optional, for a nicer DMG layout
-./macos/build-dmg.sh             # → dist/Whisper-Push-macOS-arm64.dmg
+src/
+├── main.rs               # CLI + app entry
+├── config.rs             # TOML config + platform paths
+├── state.rs              # State machine + events
+├── permissions.rs        # macOS TCC (mic, accessibility)
+├── hardware.rs           # GPU detection + engine recommendation
+├── model_manager.rs      # Model download + status
+├── onboarding.rs         # First-launch wizard
+├── autostart.rs          # Auto-start on login (all platforms)
+├── notify.rs             # OS notifications
+├── overlay.rs            # Floating overlay (live transcription)
+├── audio/
+│   ├── capture.rs        # cpal input → 16kHz mono f32
+│   ├── decode.rs         # MP3/WAV/OGG/FLAC decoder (symphonia)
+│   ├── playback.rs       # Start/stop sounds (embedded)
+│   └── stream.rs         # Streaming capture (500ms chunks)
+├── transcribe/
+│   ├── mod.rs            # Whisper backend (whisper-rs)
+│   ├── parakeet.rs       # Parakeet backend (ONNX)
+│   └── voxtral_local.rs  # Voxtral Q4 backend (Burn + WGPU) + streaming
+├── hotkey/
+│   ├── macos.rs          # CGEventTap
+│   ├── linux.rs          # evdev
+│   └── windows.rs        # WH_KEYBOARD_LL
+├── paste/
+│   └── mod.rs            # CGEvent paste (macOS) / enigo (Linux/Windows)
+└── tray/
+    └── mod.rs            # System tray + menus (winit + tray-icon)
 ```
-
-The app is unsigned (no Apple Developer ID), so users de-quarantine it on first launch.
-
-## Troubleshooting (Linux)
-
-<details>
-<summary><strong>ydotool not working</strong></summary>
-
-Ensure you're in the `input` group (`groups | grep input`); if not, `sudo usermod -aG input $USER` and log out/in. Check the daemon: `systemctl --user status ydotool`.
-</details>
-
-<details>
-<summary><strong>No sound recorded</strong></summary>
-
-Verify `pw-record test.wav` (Ctrl+C to stop) then `pw-play test.wav`.
-</details>
-
-<details>
-<summary><strong>CUDA errors</strong></summary>
-
-Switch to CPU in config: `device = "cpu"`, `compute_type = "float32"`.
-</details>
-
-## Uninstall
-
-- **macOS (app):** open the 🎙 menu → **Uninstall Whisper Push…**. This deletes
-  your settings and the downloaded model (~600 MB), then moves the app to the
-  Trash. Dragging the app to the Trash on its own leaves the model and settings
-  behind, since macOS runs no cleanup code when an app is trashed.
-- **macOS (source install):** `./macos/uninstall.sh`
-- **Linux:** `./uninstall.sh`
 
 ## License
 
