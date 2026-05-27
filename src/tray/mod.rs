@@ -75,6 +75,8 @@ struct MenuItems {
     input_ids: Vec<(String, String)>,
     input_device_items: Vec<(CheckMenuItem, String)>,
     input_submenu: Submenu,
+    output_ids: Vec<(String, String)>,
+    output_device_items: Vec<(CheckMenuItem, String)>,
     mic_perm_item: MenuItem,
     acc_perm_item: MenuItem,
     perms_submenu: Submenu,
@@ -126,18 +128,42 @@ impl App {
             hotkey_items.push((item, hotkey.to_string(), mode.to_string()));
         }
 
-        // Input device submenu
-        let input_submenu = Submenu::new(&format!("Input: {}", &cfg.input_device), true);
+        // Permissions (computed once here; reused for the Permissions section).
+        let perms = crate::permissions::check_all();
+
+        // Apply the configured output device to the playback module up front.
+        crate::audio::playback::set_output_device(&cfg.output_device);
+
+        // Device pickers are flat items (submenus crash on macOS Tahoe).
+        // Device *enumeration* does not require microphone permission on macOS —
+        // TCC only gates audio capture — so the input picker is always populated.
+        // Whether the mic is actually usable is surfaced in the Permissions section.
+        let input_submenu = Submenu::new("Input", true); // kept for struct compat; not shown
+        let mut input_device_items: Vec<(CheckMenuItem, String)> = Vec::new();
         let input_auto = CheckMenuItem::new("Auto", true, cfg.input_device == "auto", None);
-        let _ = input_submenu.append(&input_auto);
-        let _ = input_submenu.append(&PredefinedMenuItem::separator());
-        let mut input_device_items = vec![(input_auto, "auto".to_string())];
+        input_device_items.push((input_auto, "auto".to_string()));
         if let Ok(devices) = crate::audio::list_devices() {
+            info!("Input devices enumerated: {} (mic perm: {:?})", devices.len(), perms.microphone);
             for name in devices {
                 let checked = cfg.input_device == name;
-                let item = CheckMenuItem::new(&name, true, checked, None);
-                let _ = input_submenu.append(&item);
-                input_device_items.push((item, name));
+                input_device_items.push((CheckMenuItem::new(&name, true, checked, None), name));
+            }
+        }
+        // If the mic is explicitly denied, recording won't work — hint the user.
+        let input_needs_perm: Option<MenuItem> = if perms.microphone == crate::permissions::PermState::Denied {
+            Some(MenuItem::new("\u{26a0} Microphone denied \u{2014} grant to record", false, None))
+        } else {
+            None
+        };
+
+        // Output device picker (no permission needed).
+        let mut output_device_items: Vec<(CheckMenuItem, String)> = Vec::new();
+        let output_auto = CheckMenuItem::new("Auto", true, cfg.output_device == "auto", None);
+        output_device_items.push((output_auto, "auto".to_string()));
+        if let Ok(devices) = crate::audio::list_output_devices() {
+            for name in devices {
+                let checked = cfg.output_device == name;
+                output_device_items.push((CheckMenuItem::new(&name, true, checked, None), name));
             }
         }
 
@@ -179,8 +205,7 @@ impl App {
         let uninstall_item = MenuItem::new("Uninstall...", true, None);
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
-        // Permissions
-        let perms = crate::permissions::check_all();
+        // Permissions (perms already computed above for the input picker gate)
         let mic_label = format!("{} Microphone \u{2014} {}", perms.microphone.symbol(), perms.microphone.label());
         let acc_label = format!("{} Accessibility \u{2014} {}", perms.accessibility.symbol(), perms.accessibility.label());
         let mic_perm_item = MenuItem::new(&mic_label, true, None);
@@ -228,6 +253,20 @@ impl App {
         let _ = menu.append(&notifications_item);
         let _ = menu.append(&sound_item);
 
+        // Audio devices
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&MenuItem::new("Input (Microphone)", false, None));
+        for (item, _) in &input_device_items {
+            let _ = menu.append(item);
+        }
+        if let Some(np) = &input_needs_perm {
+            let _ = menu.append(np);
+        }
+        let _ = menu.append(&MenuItem::new("Output (Sound)", false, None));
+        for (item, _) in &output_device_items {
+            let _ = menu.append(item);
+        }
+
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&test_item);
         let _ = menu.append(&uninstall_item);
@@ -237,6 +276,7 @@ impl App {
         // Collect IDs
         let hotkey_ids: Vec<_> = hotkey_items.iter().map(|(i, h, m)| (i.id().0.clone(), h.clone(), m.clone())).collect();
         let input_ids: Vec<_> = input_device_items.iter().map(|(i, n)| (i.id().0.clone(), n.clone())).collect();
+        let output_ids: Vec<_> = output_device_items.iter().map(|(i, n)| (i.id().0.clone(), n.clone())).collect();
 
         self.menu_items = Some(MenuItems {
             toggle_id: toggle_item.id().0.clone(),
@@ -258,6 +298,7 @@ impl App {
             notifications_item, sound_item, debug_item,
             hotkey_ids, hotkey_items,
             input_ids, input_device_items, input_submenu,
+            output_ids, output_device_items,
         });
 
         // Build tray
@@ -401,6 +442,14 @@ impl App {
                         let mut c = self.config.lock().unwrap(); c.input_device = name.clone(); let _ = c.save();
                         for (item, n) in &mi.input_device_items { item.set_checked(n == name); }
                         mi.input_submenu.set_text(&format!("Input: {name}"));
+                        return;
+                    }
+                }
+                for (item_id, name) in &mi.output_ids {
+                    if id == item_id {
+                        let mut c = self.config.lock().unwrap(); c.output_device = name.clone(); let _ = c.save();
+                        crate::audio::playback::set_output_device(name);
+                        for (item, n) in &mi.output_device_items { item.set_checked(n == name); }
                         return;
                     }
                 }

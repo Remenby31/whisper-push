@@ -15,3 +15,14 @@ pub fn list_devices() -> Result<Vec<String>> {
         .collect();
     Ok(devices)
 }
+
+/// List available output audio devices (used for sound-feedback playback).
+pub fn list_output_devices() -> Result<Vec<String>> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let devices: Vec<String> = host
+        .output_devices()?
+        .filter_map(|d| d.name().ok())
+        .collect();
+    Ok(devices)
+}

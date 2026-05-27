@@ -137,10 +137,26 @@ mod doctor {
         println!("Features:  {}", if features.is_empty() { "none".into() } else { features.join(", ") });
 
         // Audio devices (with timeout — CoreAudio can hang without NSApp)
-        println!("\nAudio devices:");
+        println!("\nInput devices:");
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = crate::audio::list_devices();
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(devices)) => {
+                for (i, name) in devices.iter().enumerate() {
+                    println!("  [{i}] {name}");
+                }
+            }
+            Ok(Err(e)) => println!("  Error: {e}"),
+            Err(_) => println!("  (timeout — run as app for full device list)"),
+        }
+
+        println!("\nOutput devices:");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = crate::audio::list_output_devices();
             let _ = tx.send(result);
         });
         match rx.recv_timeout(std::time::Duration::from_secs(3)) {
