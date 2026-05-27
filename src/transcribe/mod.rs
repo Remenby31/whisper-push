@@ -36,9 +36,12 @@ pub fn load_model(model_name: &str) -> Result<()> {
 
     info!("Loading model from {}...", path.display());
 
+    let mut ctx_params = whisper_rs::WhisperContextParameters::default();
+    ctx_params.use_gpu(true);
+    ctx_params.flash_attn(true);
     let ctx = whisper_rs::WhisperContext::new_with_params(
         path.to_str().unwrap(),
-        whisper_rs::WhisperContextParameters::default(),
+        ctx_params,
     )
     .map_err(|e| anyhow::anyhow!("Failed to load model: {:?}", e))?;
 
