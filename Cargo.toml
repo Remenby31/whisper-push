@@ -104,4 +104,4 @@ evdev = "0.12"
 strip = true
 lto = true
 codegen-units = 1
-opt-level = "s"          # Optimize for size (binary stays small)
+opt-level = 3

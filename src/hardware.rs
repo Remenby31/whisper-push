@@ -60,8 +60,6 @@ pub fn recommend_backend(hw: &HardwareInfo) -> &'static str {
         GpuInfo::NvidiaCuda { .. } => {
             if cfg!(feature = "parakeet") {
                 "parakeet"
-            } else if cfg!(feature = "cuda") {
-                "whisper"
             } else {
                 "whisper"
             }

@@ -324,13 +324,13 @@ impl App {
                                 std::thread::sleep(std::time::Duration::from_secs(3));
                                 let audio = cap.stop();
                                 let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len().max(1) as f32).sqrt();
-                                info!("=== TEST: Captured {:.1}s, RMS={:.4} ===", audio.len() as f32 / 16000.0, rms);
+                                info!("=== TEST: Captured {:.1}s, RMS={:.4} ===", audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, rms);
 
-                                if audio.len() < 4800 {
+                                if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
                                     crate::notify::send("Whisper Push", "Test failed: audio too short");
                                     return;
                                 }
-                                if rms < 0.001 {
+                                if rms < crate::audio::capture::SILENCE_RMS_THRESHOLD {
                                     crate::notify::send("Whisper Push", "Test failed: silence (check mic permission)");
                                     return;
                                 }
@@ -377,14 +377,33 @@ impl App {
                     crate::permissions::open_settings("Privacy_Accessibility");
                     return;
                 }
-                if id == &mi.notif_id { let mut c = self.config.lock().unwrap(); c.notifications = !c.notifications; let _ = c.save(); return; }
-                if id == &mi.sound_id { let mut c = self.config.lock().unwrap(); c.sound_feedback = !c.sound_feedback; let _ = c.save(); return; }
-                if id == &mi.debug_id { let mut c = self.config.lock().unwrap(); c.debug = !c.debug; let _ = c.save(); return; }
+                if id == &mi.notif_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.notifications = !c.notifications;
+                    let _ = c.save();
+                    return;
+                }
+                if id == &mi.sound_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.sound_feedback = !c.sound_feedback;
+                    let _ = c.save();
+                    return;
+                }
+                if id == &mi.debug_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.debug = !c.debug;
+                    let _ = c.save();
+                    return;
+                }
                 for (item_id, hotkey, mode) in &mi.hotkey_ids {
                     if id == item_id {
                         let mut c = self.config.lock().unwrap();
-                        c.hotkey = hotkey.clone(); c.hotkey_mode = mode.clone(); let _ = c.save();
-                        for (item, hk, _) in &mi.hotkey_items { item.set_checked(hk == hotkey); }
+                        c.hotkey = hotkey.clone();
+                        c.hotkey_mode = mode.clone();
+                        let _ = c.save();
+                        for (item, hk, _) in &mi.hotkey_items {
+                            item.set_checked(hk == hotkey);
+                        }
                         mi.status_item.set_text(&format!("Whisper Push ({})", format_hotkey_display(hotkey, mode)));
                         crate::notify::send("Whisper Push", "Hotkey changed. Restart to apply.");
                         return;
@@ -392,8 +411,12 @@ impl App {
                 }
                 for (item_id, name) in &mi.input_ids {
                     if id == item_id {
-                        let mut c = self.config.lock().unwrap(); c.input_device = name.clone(); let _ = c.save();
-                        for (item, n) in &mi.input_device_items { item.set_checked(n == name); }
+                        let mut c = self.config.lock().unwrap();
+                        c.input_device = name.clone();
+                        let _ = c.save();
+                        for (item, n) in &mi.input_device_items {
+                            item.set_checked(n == name);
+                        }
                         mi.input_submenu.set_text(&format!("Input: {name}"));
                         return;
                     }
@@ -602,7 +625,7 @@ impl App {
         }
 
         let audio = self.capture.lock().unwrap().take().map(|c| c.stop()).unwrap_or_default();
-        if audio.len() < 4800 {
+        if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
             self.state.set(State::Idle);
             mi.toggle_item.set_text("Start Recording");
             mi.toggle_item.set_enabled(true);
@@ -908,14 +931,14 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     .map(|c| c.stop())
                     .unwrap_or_default();
 
-                if audio.len() < 4800 {
+                if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
                     info!("Too short, skipping");
                     continue;
                 }
 
                 let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
                 let backend = crate::model_manager::resolve_backend(&cfg.model);
-                info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...", audio.len() as f32 / 16000.0, backend, rms);
+                info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...", audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, backend, rms);
 
                 let start = std::time::Instant::now();
                 // Use catch_unwind to catch WGPU/Metal panics from cross-thread access
@@ -977,7 +1000,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     let audio = capture.lock().unwrap().take()
                         .map(|c| c.stop())
                         .unwrap_or_default();
-                    if audio.len() < 4800 { continue; }
+                    if audio.len() < crate::audio::MIN_AUDIO_SAMPLES { continue; }
 
                     let backend = crate::model_manager::resolve_backend(&cfg.model);
                     match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {

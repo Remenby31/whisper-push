@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use tracing::info;
 
 /// Available models with their sizes and download sources.
-#[allow(dead_code)]
 pub struct ModelInfo {
     pub name: &'static str,
     pub backend: &'static str,

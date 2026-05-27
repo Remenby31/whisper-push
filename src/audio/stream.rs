@@ -1,5 +1,4 @@
 //! Streaming audio capture — feeds chunks to a consumer in real-time.
-#![allow(dead_code)]
 //! Used for streaming transcription (Parakeet Nemotron, Voxtral Realtime).
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};

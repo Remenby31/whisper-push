@@ -5,14 +5,14 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 const TARGET_SAMPLE_RATE: u32 = 16_000;
-#[allow(dead_code)]
-const TARGET_CHANNELS: u16 = 1;
+const RESAMPLE_CHUNK_SIZE: usize = 1024;
+pub const SILENCE_RMS_THRESHOLD: f32 = 0.001;
 
 /// Audio recorder that captures to an in-memory f32 buffer at 16kHz mono.
 pub struct AudioCapture {
     stream: Option<cpal::Stream>,
     buffer: Arc<Mutex<Vec<f32>>>,
-        _device_sample_rate: u32,
+    _device_sample_rate: u32,
 }
 
 impl AudioCapture {
@@ -46,7 +46,7 @@ impl AudioCapture {
         // Set up resampler if needed
         let needs_resample = device_sr != TARGET_SAMPLE_RATE;
         let resampler = if needs_resample {
-            let chunk_size = 1024;
+            let chunk_size = RESAMPLE_CHUNK_SIZE;
             Some(Arc::new(Mutex::new(
                 FftFixedIn::<f32>::new(
                     device_sr as usize,
@@ -80,7 +80,7 @@ impl AudioCapture {
                     let mut acc = resample_buf.lock().unwrap();
                     acc.extend_from_slice(&mono);
 
-                    let chunk_size = 1024;
+                    let chunk_size = RESAMPLE_CHUNK_SIZE;
                     while acc.len() >= chunk_size {
                         let chunk: Vec<f32> = acc.drain(..chunk_size).collect();
                         if let Ok(mut r) = resampler.lock() {
@@ -104,7 +104,7 @@ impl AudioCapture {
         Ok(Self {
             stream: Some(stream),
             buffer,
-                _device_sample_rate: device_sr,
+            _device_sample_rate: device_sr,
         })
     }
 
@@ -121,7 +121,7 @@ impl AudioCapture {
         };
         let max = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
         info!("Captured {:.1}s of audio ({} samples, RMS={:.6}, max={:.6})", duration, audio.len(), rms, max);
-        if rms < 0.001 {
+        if rms < SILENCE_RMS_THRESHOLD {
             warn!("Audio is silence — microphone may not be captured. Check permission in System Settings → Privacy → Microphone");
         }
         audio
