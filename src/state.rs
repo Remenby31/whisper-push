@@ -47,6 +47,8 @@ pub enum Event {
     PromptPermissions,
     /// Refresh permission status in the menu
     RefreshPermissions,
+    /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
+    LoadModel(String),
     /// Request quit
     Quit,
 }

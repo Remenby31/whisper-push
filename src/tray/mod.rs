@@ -48,6 +48,7 @@ struct App {
     rx: Receiver<Event>,
     tray: Option<TrayIcon>,
     capture: Arc<Mutex<Option<AudioCapture>>>,
+    pipeline_tx: Option<crossbeam_channel::Sender<Event>>,
     // Menu items (created in init, kept alive)
     menu_items: Option<MenuItems>,
 }
@@ -89,6 +90,7 @@ impl App {
             state, config, rx,
             tray: None,
             capture: Arc::new(Mutex::new(None)),
+            pipeline_tx: None,
             menu_items: None,
         }
     }
@@ -436,36 +438,13 @@ impl App {
                             }
                         }
 
-                        // Unload previous models to free RAM
-                        crate::transcribe::unload_model();
-                        crate::transcribe::parakeet::unload_model();
-                        crate::transcribe::voxtral_local::unload_model();
-
-                        // For Voxtral: DON'T load here — WGPU requires same-thread.
-                        // It will lazy-load in the transcription thread on first use.
-                        // For others: load immediately.
-                        let bv = backend_value.clone();
-                        if bv == "voxtral-local" {
-                            let dir = crate::config::data_dir().join("models").join("voxtral");
-                            if dir.join("voxtral-q4.gguf").exists() {
-                                crate::notify::send("Whisper Push", "Voxtral selected. Will load on first use.");
-                            } else {
-                                crate::notify::send("Whisper Push", "Voxtral model not found. Download it first.");
-                            }
-                        } else {
-                            std::thread::spawn(move || {
-                                info!("Switching to {bv}...");
-                                crate::notify::send("Whisper Push", &format!("Loading {bv}..."));
-                                let load_result = match bv.as_str() {
-                                    "parakeet" => crate::transcribe::parakeet::load_model(),
-                                    _ => crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin"),
-                                };
-                                match load_result {
-                                    Ok(()) => crate::notify::send("Whisper Push", &format!("{bv} ready!")),
-                                    Err(e) => crate::notify::send("Whisper Push", &format!("Failed: {e}")),
-                                }
-                            });
+                        // Send LoadModel to pipeline thread — it handles unloading
+                        // old models and loading the new one on its own thread
+                        // (required for WGPU/Metal same-thread constraint).
+                        if let Some(ref tx) = self.pipeline_tx {
+                            let _ = tx.send(Event::LoadModel(model_name.to_string()));
                         }
+                        crate::notify::send("Whisper Push", &format!("Loading {}...", backend_value));
                         return;
                     }
                 }
@@ -631,29 +610,9 @@ impl ApplicationHandler<UserEvent> for App {
             // This avoids modifying menu items after creation (which closes
             // the menu on macOS Tahoe).
             // Load Whisper on main thread (always needed as fallback).
-            // Voxtral/Parakeet are loaded LAZILY in the transcription thread
-            // because WGPU/Metal doesn't support cross-thread model usage.
-            let backend = crate::model_manager::backend_for_model(&self.state.config.model);
-            info!("Config model: {} (backend: {backend})", self.state.config.model);
-            if backend != "voxtral-local" {
-                let load_result = match backend {
-                    "parakeet" => crate::transcribe::parakeet::load_model(),
-                    _ => crate::transcribe::load_model(&self.state.config.model),
-                };
-                match load_result {
-                    Ok(()) => info!("{backend} model loaded"),
-                    Err(e) => {
-                        tracing::error!("{backend} load failed: {e}, falling back to whisper");
-                        let _ = crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
-                    }
-                }
-            } else {
-                info!("Voxtral selected — will load in transcription thread (WGPU requires same-thread)");
-            }
             self.state.set(State::Idle);
-
-            // Create tray icon AFTER model is loaded (menu is born in "Ready" state)
             self.create_tray();
+            let startup_model = self.state.config.model.clone();
 
             // Wake the macOS run loop so the icon appears immediately
             #[cfg(target_os = "macos")]
@@ -669,16 +628,20 @@ impl ApplicationHandler<UserEvent> for App {
             let hotkey_cfg = self.state.config.hotkey.clone();
             let hotkey_mode = self.state.config.hotkey_mode.clone();
             let pipeline_cfg = self.config.clone();
-            let (htx, hrx) = crossbeam_channel::unbounded();
-            let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, htx);
+            let (ptx, prx) = crossbeam_channel::unbounded();
+            self.pipeline_tx = Some(ptx.clone());
+            let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx);
 
-            // Pipeline thread: hotkey events → capture → transcribe → paste
+            // Pipeline thread: hotkey events + model load → capture → transcribe → paste
             std::thread::spawn(move || {
-                pipeline_loop(hrx, pipeline_cfg);
+                pipeline_loop(prx, pipeline_cfg);
             });
 
-            // No startup notification — NSUserNotificationCenter delivery
-            // can disrupt the macOS run loop and close the tray menu.
+            // Load model on the pipeline thread (all backends, including Voxtral/WGPU)
+            if let Some(ref tx) = self.pipeline_tx {
+                let _ = tx.send(Event::LoadModel(startup_model));
+            }
+
             info!("Ready! Hold Control to dictate.");
         }
 
@@ -906,7 +869,35 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 }
             }
 
-            Ok(_) => {} // Ignore other events
+            Ok(Event::LoadModel(model_name)) => {
+                info!("Loading model '{model_name}' on pipeline thread...");
+                // Unload all backends
+                crate::transcribe::unload_model();
+                crate::transcribe::parakeet::unload_model();
+                crate::transcribe::voxtral_local::unload_model();
+
+                let backend = crate::model_manager::backend_for_model(&model_name);
+                let load_result = match backend {
+                    "voxtral-local" => {
+                        let dir = crate::config::data_dir().join("models").join("voxtral");
+                        crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
+                    }
+                    "parakeet" => crate::transcribe::parakeet::load_model(),
+                    _ => crate::transcribe::load_model(&model_name),
+                };
+                match load_result {
+                    Ok(()) => {
+                        info!("{backend} model loaded");
+                        crate::notify::send("Whisper Push", &format!("{backend} ready!"));
+                    }
+                    Err(e) => {
+                        tracing::error!("{backend} load failed: {e}");
+                        crate::notify::send("Whisper Push", &format!("Failed to load {backend}: {e}"));
+                    }
+                }
+            }
+
+            Ok(_) => {}
             Err(_) => break,
         }
     }
