@@ -9,7 +9,7 @@ categories = ["multimedia::audio", "accessibility"]
 keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
 
 [features]
-default = []
+default = ["voxtral", "parakeet"]
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]

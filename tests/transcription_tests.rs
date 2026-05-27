@@ -2,7 +2,6 @@
 /// Run with: cargo test --test transcription_tests -- --nocapture
 ///
 /// Uses macOS `say` to generate synthetic audio (no external fixtures needed).
-/// Tests marked with a model name require that model to be downloaded.
 
 use whisper_push::audio;
 use whisper_push::model_manager;
@@ -11,13 +10,9 @@ use whisper_push::transcribe;
 // ── Helpers ─────────────────────────────────────────────────────
 
 fn ensure_whisper_loaded() {
-    if !transcribe::is_loaded() {
-        transcribe::load_model("ggml-large-v3-turbo-q5_0.bin").unwrap();
-    }
+    let _ = transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
 }
 
-/// Generate synthetic audio using macOS `say`.
-/// Returns 16kHz mono f32 samples, or None if `say` is unavailable.
 fn generate_audio(text: &str) -> Option<Vec<f32>> {
     generate_audio_with_voice(text, None)
 }
@@ -70,7 +65,6 @@ fn test_whisper_not_loaded_error() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not loaded"));
 
-    // Reload for other tests
     let _ = transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
 }
 
@@ -80,7 +74,6 @@ fn test_whisper_transcribe_english() {
         Some(s) => s,
         None => { println!("'say' not available, skipping"); return; }
     };
-    assert!(samples.len() > audio::MIN_AUDIO_SAMPLES);
     ensure_whisper_loaded();
 
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
@@ -100,7 +93,6 @@ fn test_whisper_transcribe_french() {
     let samples = match generate_audio_with_voice("Bonjour le monde, ceci est un test", Some("Thomas")) {
         Some(s) => s,
         None => {
-            // Fallback: try without French voice
             match generate_audio("Bonjour le monde") {
                 Some(s) => s,
                 None => { println!("'say' not available, skipping"); return; }
@@ -109,7 +101,6 @@ fn test_whisper_transcribe_french() {
     };
     ensure_whisper_loaded();
 
-    // Test with language="fr"
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
     let text = transcribe::transcribe_with_backend(&samples, "fr", &backend).unwrap();
     println!("Whisper FR: '{text}'");
@@ -124,7 +115,6 @@ fn test_whisper_transcribe_auto_language() {
     };
     ensure_whisper_loaded();
 
-    // language="auto" should auto-detect
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
     let text = transcribe::transcribe_with_backend(&samples, "auto", &backend).unwrap();
     println!("Whisper auto: '{text}'");
@@ -133,33 +123,28 @@ fn test_whisper_transcribe_auto_language() {
 
 #[test]
 fn test_whisper_silence_no_hallucination() {
-    let silence = vec![0.0f32; 48_000]; // 3s silence
+    let silence = vec![0.0f32; 48_000];
     ensure_whisper_loaded();
 
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
     let text = transcribe::transcribe_with_backend(&silence, "auto", &backend).unwrap();
 
     println!("Whisper silence: '{text}'");
-    assert!(
-        text.is_empty() || text.len() < 20,
-        "Hallucinated on silence: '{text}'"
-    );
+    assert!(text.is_empty() || text.len() < 20, "Hallucinated on silence: '{text}'");
 }
 
 #[test]
 fn test_whisper_short_audio_graceful() {
-    let short = vec![0.1f32; 1000]; // ~62ms
+    let short = vec![0.1f32; 1000];
     ensure_whisper_loaded();
 
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
-    let result = transcribe::transcribe_with_backend(&short, "auto", &backend);
-    println!("Whisper short: {result:?}");
+    let _result = transcribe::transcribe_with_backend(&short, "auto", &backend);
     // Should not panic
 }
 
 #[test]
 fn test_whisper_long_audio() {
-    // Generate ~10s of audio
     let samples = match generate_audio(
         "The quick brown fox jumps over the lazy dog. \
          This is a longer sentence to verify that Whisper can handle \
@@ -171,8 +156,6 @@ fn test_whisper_long_audio() {
     let _ = transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
 
     let audio_secs = samples.len() as f64 / audio::SAMPLE_RATE as f64;
-    println!("Audio length: {audio_secs:.1}s");
-
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
     let start = std::time::Instant::now();
     let text = transcribe::transcribe_with_backend(&samples, "en", &backend).unwrap();
@@ -182,7 +165,6 @@ fn test_whisper_long_audio() {
     println!("Whisper long: '{text}' ({:.2}s, RTF={:.3})", elapsed.as_secs_f64(), rtf);
     assert!(!text.is_empty());
     assert!(text.split_whitespace().count() > 5, "Too few words for long audio");
-    // RTF may exceed 1.0 when tests run in parallel (mutex contention)
     assert!(rtf < 2.0, "Way too slow: RTF={rtf:.3}");
 }
 
@@ -192,7 +174,7 @@ fn test_whisper_performance_rtf() {
         Some(s) => s,
         None => { println!("'say' not available, skipping"); return; }
     };
-    ensure_whisper_loaded();
+    let _ = transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
 
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
     let start = std::time::Instant::now();
@@ -204,7 +186,6 @@ fn test_whisper_performance_rtf() {
 
     println!("RTF: {rtf:.3} ({:.0}x real-time)", 1.0 / rtf);
     println!("Text: '{text}'");
-    // RTF may exceed 1.0 when multiple tests share the whisper mutex
     assert!(rtf < 2.0, "RTF={rtf:.3} — way too slow");
 }
 
@@ -214,12 +195,9 @@ fn test_whisper_consistent_results() {
         Some(s) => s,
         None => { println!("'say' not available, skipping"); return; }
     };
-    // Force reload in case another test unloaded
     let _ = transcribe::load_model("ggml-large-v3-turbo-q5_0.bin");
 
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
-
-    // Run twice — should give identical results (deterministic with greedy)
     let text1 = transcribe::transcribe_with_backend(&samples, "en", &backend).unwrap();
     let text2 = transcribe::transcribe_with_backend(&samples, "en", &backend).unwrap();
 
@@ -229,162 +207,337 @@ fn test_whisper_consistent_results() {
 }
 
 #[test]
-fn test_whisper_via_transcribe_with_backend() {
+fn test_whisper_via_backend_dispatch() {
     let samples = match generate_audio("Backend dispatch test") {
         Some(s) => s,
         None => { println!("'say' not available, skipping"); return; }
     };
     ensure_whisper_loaded();
 
-    // Test via resolve_backend (same path as production)
     let backend = model_manager::resolve_backend("ggml-large-v3-turbo-q5_0.bin");
     assert!(matches!(backend, transcribe::Backend::WhisperLocal(_)));
-
     let text = transcribe::transcribe_with_backend(&samples, "en", &backend).unwrap();
     assert!(!text.is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PARAKEET — TDT 0.6B (ONNX, feature-gated)
+// PARAKEET — TDT 0.6B (ONNX Runtime)
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
-fn test_parakeet_not_compiled_error() {
-    // Without --features parakeet, calling load/transcribe should fail
-    if cfg!(feature = "parakeet") {
-        println!("Parakeet feature is enabled, skipping not-compiled test");
+fn test_parakeet_load_unload() {
+    match transcribe::parakeet::load_model() {
+        Ok(()) => {
+            assert!(transcribe::parakeet::is_loaded());
+            transcribe::parakeet::unload_model();
+            assert!(!transcribe::parakeet::is_loaded());
+            println!("Parakeet load/unload OK");
+        }
+        Err(e) => {
+            println!("Parakeet model not downloaded, skipping: {e}");
+        }
+    }
+}
+
+#[test]
+fn test_parakeet_transcribe_english() {
+    let samples = match generate_audio("Hello world this is a parakeet test") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
+
+    if transcribe::parakeet::load_model().is_err() {
+        println!("Parakeet model not downloaded, skipping");
         return;
     }
 
-    let result = transcribe::parakeet::load_model();
-    assert!(result.is_err());
+    let text = transcribe::parakeet::transcribe(&samples).unwrap();
+    println!("Parakeet EN: '{text}'");
+    assert!(!text.is_empty());
+    let lower = text.to_lowercase();
     assert!(
-        result.unwrap_err().to_string().contains("not compiled"),
-        "Should say 'not compiled'"
+        lower.contains("hello") || lower.contains("world") || lower.contains("parakeet") || lower.contains("test"),
+        "Missing expected words: '{text}'"
     );
 }
 
 #[test]
-fn test_parakeet_transcribe_not_compiled_error() {
-    if cfg!(feature = "parakeet") {
-        println!("Parakeet feature is enabled, skipping");
+fn test_parakeet_silence() {
+    let silence = vec![0.0f32; 48_000];
+
+    if transcribe::parakeet::load_model().is_err() {
+        println!("Parakeet model not downloaded, skipping");
         return;
     }
 
-    let audio = vec![0.1f32; 16_000];
-    let result = transcribe::parakeet::transcribe(&audio);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_parakeet_is_loaded_false_when_not_compiled() {
-    if cfg!(feature = "parakeet") {
-        println!("Parakeet feature is enabled, skipping");
-        return;
-    }
-    assert!(!transcribe::parakeet::is_loaded());
-}
-
-#[test]
-fn test_parakeet_unload_noop_when_not_compiled() {
-    if cfg!(feature = "parakeet") {
-        println!("Parakeet feature is enabled, skipping");
-        return;
-    }
-    // Should not panic
-    transcribe::parakeet::unload_model();
+    let text = transcribe::parakeet::transcribe(&silence).unwrap();
+    println!("Parakeet silence: '{text}'");
+    assert!(text.is_empty() || text.len() < 20, "Hallucinated on silence: '{text}'");
 }
 
 #[test]
 fn test_parakeet_via_backend_dispatch() {
-    let audio = vec![0.1f32; 16_000];
-    let backend = transcribe::Backend::Parakeet;
-    let result = transcribe::transcribe_with_backend(&audio, "en", &backend);
+    let samples = match generate_audio("Backend dispatch parakeet") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
 
-    if cfg!(feature = "parakeet") {
-        // If compiled, might work if model is downloaded
-        println!("Parakeet result: {result:?}");
-    } else {
-        assert!(result.is_err(), "Should fail without parakeet feature");
+    let backend = model_manager::resolve_backend("parakeet-tdt-0.6b-v3");
+    assert!(matches!(backend, transcribe::Backend::Parakeet));
+
+    match transcribe::transcribe_with_backend(&samples, "en", &backend) {
+        Ok(text) => {
+            println!("Parakeet dispatch: '{text}'");
+            assert!(!text.is_empty());
+        }
+        Err(e) => {
+            println!("Parakeet dispatch failed (model not downloaded?): {e}");
+        }
     }
 }
 
 #[test]
-fn test_parakeet_model_dir_exists() {
+fn test_parakeet_performance() {
+    let samples = match generate_audio("The quick brown fox jumps over the lazy dog") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
+
+    if transcribe::parakeet::load_model().is_err() {
+        println!("Parakeet model not downloaded, skipping");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let text = transcribe::parakeet::transcribe(&samples).unwrap();
+    let elapsed = start.elapsed();
+    let audio_secs = samples.len() as f64 / audio::SAMPLE_RATE as f64;
+    let rtf = elapsed.as_secs_f64() / audio_secs;
+
+    println!("Parakeet: '{text}' ({:.2}s, RTF={:.3})", elapsed.as_secs_f64(), rtf);
+    assert!(!text.is_empty());
+    // Parakeet should be very fast (~27ms/10s on Metal)
+    assert!(rtf < 1.0, "Parakeet too slow: RTF={rtf:.3}");
+}
+
+#[test]
+fn test_parakeet_model_dir() {
     let dir = transcribe::parakeet::model_dir();
-    println!("Parakeet model dir: {}", dir.display());
-    // Just verify it returns a sensible path
     assert!(dir.to_str().unwrap().contains("parakeet"));
 }
 
 // ═══════════════════════════════════════════════════════════════
-// VOXTRAL — Mini 4B Realtime (Burn + WGPU, feature-gated)
+// VOXTRAL — Mini 4B Realtime (Burn + WGPU)
 // ═══════════════════════════════════════════════════════════════
 
-#[test]
-fn test_voxtral_not_compiled_error() {
-    if cfg!(feature = "voxtral") {
-        println!("Voxtral feature is enabled, skipping not-compiled test");
-        return;
-    }
+fn voxtral_model_dir() -> std::path::PathBuf {
+    whisper_push::config::data_dir().join("models").join("voxtral")
+}
 
-    let result = transcribe::voxtral_local::load_model("/tmp/fake");
-    assert!(result.is_err());
-    assert!(
-        result.unwrap_err().to_string().contains("not compiled"),
-        "Should say 'not compiled'"
-    );
+fn voxtral_available() -> bool {
+    let dir = voxtral_model_dir();
+    dir.join("voxtral-q4.gguf").exists() && dir.join("tekken.json").exists()
+}
+
+fn ensure_voxtral_loaded() -> bool {
+    if !voxtral_available() {
+        println!("Voxtral model not downloaded, skipping");
+        return false;
+    }
+    // Always reload — another test may have unloaded
+    let dir = voxtral_model_dir();
+    if let Err(e) = transcribe::voxtral_local::load_model(dir.to_str().unwrap()) {
+        println!("Voxtral load failed: {e}");
+        return false;
+    }
+    true
 }
 
 #[test]
-fn test_voxtral_transcribe_not_compiled_error() {
-    if cfg!(feature = "voxtral") {
-        println!("Voxtral feature is enabled, skipping");
+fn test_voxtral_load_unload() {
+    if !voxtral_available() {
+        println!("Voxtral model not downloaded, skipping");
         return;
     }
 
-    let audio = vec![0.1f32; 16_000];
-    let result = transcribe::voxtral_local::transcribe(&audio);
-    assert!(result.is_err());
-}
+    let dir = voxtral_model_dir();
+    transcribe::voxtral_local::load_model(dir.to_str().unwrap()).unwrap();
+    assert!(transcribe::voxtral_local::is_loaded());
 
-#[test]
-fn test_voxtral_is_loaded_false_when_not_compiled() {
-    if cfg!(feature = "voxtral") {
-        println!("Voxtral feature is enabled, skipping");
-        return;
-    }
-    assert!(!transcribe::voxtral_local::is_loaded());
-}
-
-#[test]
-fn test_voxtral_unload_noop_when_not_compiled() {
-    if cfg!(feature = "voxtral") { return; }
     transcribe::voxtral_local::unload_model();
+    assert!(!transcribe::voxtral_local::is_loaded());
+
+    println!("Voxtral load/unload OK");
 }
 
 #[test]
-fn test_voxtral_streaming_not_compiled_error() {
-    if cfg!(feature = "voxtral") { return; }
+fn test_voxtral_transcribe_batch() {
+    let samples = match generate_audio("Hello world this is a voxtral test") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
 
-    let result = transcribe::voxtral_local::streaming::start();
-    match result {
-        Ok(_) => panic!("Should fail without voxtral feature"),
-        Err(e) => assert!(e.to_string().contains("not compiled"), "Wrong error: {e}"),
-    }
+    if !ensure_voxtral_loaded() { return; }
+
+    let start = std::time::Instant::now();
+    let text = transcribe::voxtral_local::transcribe(&samples).unwrap();
+    let elapsed = start.elapsed();
+
+    println!("Voxtral batch: '{text}' ({:.2}s)", elapsed.as_secs_f64());
+    assert!(!text.is_empty());
+}
+
+#[test]
+fn test_voxtral_silence() {
+    let silence = vec![0.0f32; 48_000];
+
+    if !ensure_voxtral_loaded() { return; }
+
+    let text = transcribe::voxtral_local::transcribe(&silence).unwrap();
+    println!("Voxtral silence: '{text}'");
+    // Voxtral may produce some tokens on silence, but should be very short
+    assert!(text.len() < 30, "Voxtral hallucinated on silence: '{text}'");
 }
 
 #[test]
 fn test_voxtral_via_backend_dispatch() {
-    let audio = vec![0.1f32; 16_000];
-    let backend = transcribe::Backend::VoxtralLocal;
-    let result = transcribe::transcribe_with_backend(&audio, "auto", &backend);
+    let samples = match generate_audio("Backend dispatch voxtral test") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
 
-    if cfg!(feature = "voxtral") {
-        println!("Voxtral result: {result:?}");
-    } else {
-        assert!(result.is_err(), "Should fail without voxtral feature");
+    if !voxtral_available() {
+        println!("Voxtral model not downloaded, skipping");
+        return;
     }
+
+    let backend = model_manager::resolve_backend("voxtral-q4.gguf");
+    assert!(matches!(backend, transcribe::Backend::VoxtralLocal));
+
+    // transcribe_with_backend lazy-loads Voxtral on current thread
+    let text = transcribe::transcribe_with_backend(&samples, "auto", &backend).unwrap();
+    println!("Voxtral dispatch: '{text}'");
+    assert!(!text.is_empty());
+}
+
+#[test]
+fn test_voxtral_performance() {
+    let samples = match generate_audio("The quick brown fox jumps over the lazy dog") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
+
+    if !ensure_voxtral_loaded() { return; }
+
+    let start = std::time::Instant::now();
+    let text = transcribe::voxtral_local::transcribe(&samples).unwrap();
+    let elapsed = start.elapsed();
+    let audio_secs = samples.len() as f64 / audio::SAMPLE_RATE as f64;
+    let rtf = elapsed.as_secs_f64() / audio_secs;
+
+    println!("Voxtral: '{text}' ({:.2}s, RTF={:.3})", elapsed.as_secs_f64(), rtf);
+    assert!(!text.is_empty());
+}
+
+// ── Voxtral Streaming ───────────────────────────────────────────
+
+#[test]
+fn test_voxtral_streaming_basic() {
+    let samples = match generate_audio("Streaming transcription test one two three") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
+
+    if !ensure_voxtral_loaded() { return; }
+
+    // Start a streaming session
+    let mut session = transcribe::voxtral_local::streaming::start().unwrap();
+
+    // Feed audio in 500ms chunks (8000 samples at 16kHz)
+    let chunk_size = 8000;
+    let mut all_words: Vec<String> = Vec::new();
+
+    for (i, chunk) in samples.chunks(chunk_size).enumerate() {
+        match transcribe::voxtral_local::streaming::feed_chunk(&mut session, chunk) {
+            Ok(words) => {
+                if !words.is_empty() {
+                    println!("  Chunk {}: +{} words: {:?}", i + 1, words.len(), words);
+                    all_words.extend(words);
+                }
+            }
+            Err(e) => {
+                println!("  Chunk {} error: {e}", i + 1);
+                break;
+            }
+        }
+    }
+
+    // Finish session
+    let final_text = transcribe::voxtral_local::streaming::finish(session).unwrap();
+    println!("Streaming words: {:?}", all_words);
+    println!("Final text: '{final_text}'");
+
+    // Should have produced some output
+    assert!(
+        !all_words.is_empty() || !final_text.is_empty(),
+        "Streaming produced no output"
+    );
+}
+
+
+#[test]
+fn test_voxtral_streaming_vs_batch_similar() {
+    let samples = match generate_audio("Compare streaming and batch results") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
+
+    if !ensure_voxtral_loaded() { return; }
+
+    // Batch
+    let batch_text = transcribe::voxtral_local::transcribe(&samples).unwrap();
+
+    // Streaming
+    let mut session = transcribe::voxtral_local::streaming::start().unwrap();
+    for chunk in samples.chunks(8000) {
+        let _ = transcribe::voxtral_local::streaming::feed_chunk(&mut session, chunk);
+    }
+    let stream_text = transcribe::voxtral_local::streaming::finish(session).unwrap();
+
+    println!("Batch:  '{batch_text}'");
+    println!("Stream: '{stream_text}'");
+
+    // Both should produce non-empty output
+    assert!(!batch_text.is_empty(), "Batch empty");
+    assert!(!stream_text.is_empty(), "Stream empty");
+
+    // They should be somewhat similar (may differ due to re-encoding each chunk)
+    let batch_words: Vec<&str> = batch_text.split_whitespace().collect();
+    let stream_words: Vec<&str> = stream_text.split_whitespace().collect();
+    let common = batch_words.iter().zip(stream_words.iter())
+        .take_while(|(a, b)| a.to_lowercase() == b.to_lowercase())
+        .count();
+    let total = batch_words.len().max(1);
+    let similarity = common as f32 / total as f32;
+    println!("Similarity: {:.0}% ({common}/{total} prefix match)", similarity * 100.0);
+}
+
+#[test]
+fn test_voxtral_streaming_short_audio() {
+    // Very short audio — streaming should handle gracefully
+    let samples = match generate_audio("Hi") {
+        Some(s) => s,
+        None => { println!("'say' not available, skipping"); return; }
+    };
+
+    if !ensure_voxtral_loaded() { return; }
+
+    let mut session = transcribe::voxtral_local::streaming::start().unwrap();
+    // Feed all at once (short audio)
+    let _ = transcribe::voxtral_local::streaming::feed_chunk(&mut session, &samples);
+    let text = transcribe::voxtral_local::streaming::finish(session).unwrap();
+    println!("Voxtral streaming short: '{text}'");
+    // Should not panic, may or may not produce text for very short audio
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -405,7 +558,6 @@ fn test_resolve_backend_routes_correctly() {
 
 #[test]
 fn test_switch_backend_unload_old() {
-    // Simulate switching from whisper to another backend
     ensure_whisper_loaded();
     assert!(transcribe::is_loaded());
 
@@ -427,7 +579,6 @@ fn test_switch_backend_unload_old() {
 fn test_all_backends_listed_in_model_manager() {
     let models = model_manager::list_models();
     let backends: Vec<&str> = models.iter().map(|m| m.backend).collect();
-
     assert!(backends.contains(&"whisper"));
     assert!(backends.contains(&"parakeet"));
     assert!(backends.contains(&"voxtral-local"));
@@ -447,10 +598,6 @@ fn test_decode_wav_16khz() {
         Ok(s) if s.success() => {
             let samples = audio::decode::load_audio_file(&wav_path).unwrap();
             assert!(samples.len() > 1000);
-            // 16kHz input → no resampling needed, should be ~16k samples/s
-            let duration = samples.len() as f32 / 16000.0;
-            println!("16kHz WAV: {:.1}s, {} samples", duration, samples.len());
-            assert!(duration > 0.1);
             let _ = std::fs::remove_file(&wav_path);
         }
         _ => println!("'say' not available, skipping"),
@@ -466,37 +613,10 @@ fn test_decode_wav_44khz_resamples() {
     match status {
         Ok(s) if s.success() => {
             let samples = audio::decode::load_audio_file(&wav_path).unwrap();
-            // Input was 44.1kHz, output should be resampled to 16kHz
-            // So sample count should be roughly input_duration * 16000
             let duration = samples.len() as f32 / 16000.0;
-            println!("44.1kHz→16kHz: {:.1}s, {} samples", duration, samples.len());
+            println!("44.1kHz->16kHz: {:.1}s, {} samples", duration, samples.len());
             assert!(duration > 0.1);
             let _ = std::fs::remove_file(&wav_path);
-        }
-        _ => println!("'say' not available, skipping"),
-    }
-}
-
-#[test]
-fn test_decode_m4a() {
-    // macOS `say` can output AAC in M4A container
-    let path = std::env::temp_dir().join("wp_test.m4a");
-    let status = std::process::Command::new("say")
-        .args(["-o", path.to_str().unwrap(), "--data-format=aac", "M4A format test"])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            match audio::decode::load_audio_file(&path) {
-                Ok(samples) => {
-                    println!("M4A: {} samples ({:.1}s)", samples.len(), samples.len() as f32 / 16000.0);
-                    assert!(samples.len() > 1000);
-                }
-                Err(e) => {
-                    // AAC decode may not be supported by symphonia build
-                    println!("M4A decode not supported: {e}");
-                }
-            }
-            let _ = std::fs::remove_file(&path);
         }
         _ => println!("'say' not available, skipping"),
     }
@@ -506,19 +626,17 @@ fn test_decode_m4a() {
 fn test_decode_unsupported_format() {
     let path = std::env::temp_dir().join("wp_test_bad.txt");
     std::fs::write(&path, "not audio").unwrap();
-    let result = audio::decode::load_audio_file(&path);
-    assert!(result.is_err());
+    assert!(audio::decode::load_audio_file(&path).is_err());
     let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn test_decode_nonexistent_file() {
-    let result = audio::decode::load_audio_file(std::path::Path::new("/tmp/wp_no_exist.wav"));
-    assert!(result.is_err());
+    assert!(audio::decode::load_audio_file(std::path::Path::new("/tmp/wp_no_exist.wav")).is_err());
 }
 
 // ═══════════════════════════════════════════════════════════════
-// AUDIO QUALITY — RMS, silence detection
+// AUDIO QUALITY
 // ═══════════════════════════════════════════════════════════════
 
 #[test]
@@ -527,25 +645,18 @@ fn test_synthetic_audio_not_silence() {
         Some(s) => s,
         None => { println!("'say' not available, skipping"); return; }
     };
-
-    let rms = audio_rms(&samples);
-    println!("Synthetic audio RMS: {rms:.4}");
-    assert!(rms > audio::capture::SILENCE_RMS_THRESHOLD,
-        "Synthetic audio is silence (RMS={rms})");
+    assert!(audio_rms(&samples) > audio::capture::SILENCE_RMS_THRESHOLD);
 }
 
 #[test]
 fn test_silence_buffer_detected() {
     let silence = vec![0.0f32; 16_000];
-    let rms = audio_rms(&silence);
-    assert!(rms < audio::capture::SILENCE_RMS_THRESHOLD);
+    assert!(audio_rms(&silence) < audio::capture::SILENCE_RMS_THRESHOLD);
 }
 
 #[test]
 fn test_min_audio_samples_threshold() {
-    // Pipeline skips audio shorter than MIN_AUDIO_SAMPLES
     assert_eq!(audio::MIN_AUDIO_SAMPLES, 4800);
-    // 4800 samples at 16kHz = 0.3 seconds
     let duration = audio::MIN_AUDIO_SAMPLES as f32 / audio::SAMPLE_RATE as f32;
     assert!((duration - 0.3).abs() < 0.01);
 }

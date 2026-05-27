@@ -226,7 +226,7 @@ mod inner {
 }
 
 #[cfg(feature = "voxtral")]
-pub use inner::{load_model, is_loaded, transcribe};
+pub use inner::{load_model, unload_model, is_loaded, transcribe};
 #[cfg(feature = "voxtral")]
 pub use inner::streaming;
 
