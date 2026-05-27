@@ -1,5 +1,63 @@
 /// macOS permission checking and prompting.
 
+/// Guided setup: fire the system prompts, open the panes that need a manual
+/// toggle, then poll until everything is granted and restart the daemon so the
+/// keyboard event tap is re-created with permissions. Runs in the background.
+pub fn guided_setup() {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        use std::time::Duration;
+
+        let initial = check_all();
+        if initial.all_granted() {
+            crate::notify::send("Whisper Push", "All permissions already granted \u{2713}");
+            return;
+        }
+
+        // Fire the OS prompts (adds the app to each Privacy list).
+        prompt_missing(&initial);
+
+        // Open the panes that require a manual toggle (mic is a one-tap prompt).
+        if initial.accessibility != PermState::Granted {
+            open_settings("Privacy_Accessibility");
+            std::thread::sleep(Duration::from_millis(900));
+        }
+        if initial.input_monitoring != PermState::Granted {
+            open_settings("Privacy_ListenEvent");
+        }
+        crate::notify::send(
+            "Whisper Push \u{2014} Setup",
+            "Enable Whisper Push in Accessibility and Input Monitoring to turn on dictation.",
+        );
+
+        // Poll up to ~3 min for everything to be granted.
+        for _ in 0..60 {
+            std::thread::sleep(Duration::from_secs(3));
+            if check_all().all_granted() {
+                crate::notify::send("Whisper Push", "\u{2713} All set! Restarting to enable the hotkey\u{2026}");
+                std::thread::sleep(Duration::from_millis(1500));
+                restart_daemon();
+                return;
+            }
+        }
+        crate::notify::send(
+            "Whisper Push",
+            "Still missing a permission. Open the menu \u{2192} Permissions to finish setup.",
+        );
+    });
+}
+
+/// Restart the launchd-managed daemon so a fresh process picks up newly granted
+/// permissions (the keyboard tap must be created after the grant).
+#[cfg(target_os = "macos")]
+fn restart_daemon() {
+    // Detached so it survives this process being killed by `-k`.
+    let _ = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("launchctl kickstart -k gui/$(id -u)/com.whisper-push.app")
+        .spawn();
+}
+
 /// Summary of all permission states.
 #[derive(Debug, Clone)]
 pub struct PermissionStatus {

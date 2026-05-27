@@ -97,6 +97,7 @@ struct MenuItems {
     mic_perm_id: String,
     acc_perm_id: String,
     input_mon_perm_id: String,
+    setup_id: String,
     backend_items: Vec<(MenuItem, String)>, // (item, config value)
 }
 
@@ -123,11 +124,11 @@ impl App {
         let status_text = if is_ready {
             format!("Whisper Push ({disp})")
         } else {
-            "Whisper Push \u{2014} Loading...".into()
+            "Whisper Push \u{2014} \u{231b} Loading model\u{2026}".into()
         };
         let status_item = MenuItem::new(&status_text, false, None);
         let toggle_item = MenuItem::new(
-            if is_ready { "Start Recording" } else { "Loading model..." },
+            if is_ready { "Start Recording" } else { "\u{231b} Loading model\u{2026} (unavailable)" },
             is_ready,
             None,
         );
@@ -245,6 +246,9 @@ impl App {
         let _ = perms_submenu.append(&mic_perm_item);
         let _ = perms_submenu.append(&acc_perm_item);
         let _ = perms_submenu.append(&input_mon_perm_item);
+        let _ = perms_submenu.append(&PredefinedMenuItem::separator());
+        let setup_item = MenuItem::new("\u{2699} Run Guided Setup\u{2026}", true, None);
+        let _ = perms_submenu.append(&setup_item);
 
         // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
@@ -263,13 +267,9 @@ impl App {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&toggle_item);
 
-        // Permissions (only show if something is missing)
-        if !perms.all_granted() {
-            let _ = menu.append(&PredefinedMenuItem::separator());
-            let _ = menu.append(&mic_perm_item);
-            let _ = menu.append(&acc_perm_item);
-            let _ = menu.append(&input_mon_perm_item);
-        }
+        // Permissions submenu (always available; titled ✓ or ⚠).
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        let _ = menu.append(&perms_submenu);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
@@ -306,6 +306,7 @@ impl App {
             mic_perm_id: mic_perm_item.id().0.clone(),
             acc_perm_id: acc_perm_item.id().0.clone(),
             input_mon_perm_id: input_mon_perm_item.id().0.clone(),
+            setup_id: setup_item.id().0.clone(),
             mic_perm_item, acc_perm_item, input_mon_perm_item, perms_submenu, warn_item,
             backend_items: vec![
                 (backend_parakeet, "parakeet".into()),
@@ -449,6 +450,10 @@ impl App {
                 if id == &mi.input_mon_perm_id {
                     #[cfg(target_os = "macos")]
                     crate::permissions::open_settings("Privacy_ListenEvent");
+                    return;
+                }
+                if id == &mi.setup_id {
+                    crate::permissions::guided_setup();
                     return;
                 }
                 if id == &mi.notif_id { let mut c = self.config.lock().unwrap(); c.notifications = !c.notifications; let _ = c.save(); return; }
@@ -639,7 +644,8 @@ impl App {
                 info!("Checking/prompting permissions...");
                 let status = crate::permissions::check_all();
                 if !status.all_granted() {
-                    crate::permissions::prompt_missing(&status);
+                    // Guided flow: prompts + opens panes + polls + restarts.
+                    crate::permissions::guided_setup();
                 }
                 // Schedule a re-check to update the menu
                 let tx = self.state.tx.clone();
