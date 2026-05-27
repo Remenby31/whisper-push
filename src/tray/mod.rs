@@ -418,6 +418,11 @@ impl App {
                             }
                         }
 
+                        // Unload previous models to free RAM
+                        crate::transcribe::unload_model();
+                        crate::transcribe::parakeet::unload_model();
+                        crate::transcribe::voxtral_local::unload_model();
+
                         // For Voxtral: DON'T load here — WGPU requires same-thread.
                         // It will lazy-load in the transcription thread on first use.
                         // For others: load immediately.
