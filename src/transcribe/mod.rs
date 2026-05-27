@@ -78,7 +78,18 @@ pub fn is_loaded() -> bool {
 /// Transcribe audio using the active backend.
 pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend) -> Result<String> {
     match backend {
-        Backend::Parakeet => parakeet::transcribe(audio),
+        Backend::Parakeet => {
+            // Parakeet may have failed to download/load at startup (in which
+            // case Whisper was loaded as the fallback). Don't hard-fail the
+            // transcription — fall back to Whisper transparently.
+            match parakeet::transcribe(audio) {
+                Ok(text) => Ok(text),
+                Err(e) => {
+                    tracing::warn!("Parakeet unavailable ({e}); using Whisper instead");
+                    transcribe_whisper(audio, language)
+                }
+            }
+        }
         Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
         Backend::VoxtralLocal => {
             // Voxtral must be loaded on the SAME thread that transcribes

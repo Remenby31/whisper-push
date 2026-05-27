@@ -91,10 +91,12 @@ struct MenuItems {
     output_submenu: Submenu,
     mic_perm_item: MenuItem,
     acc_perm_item: MenuItem,
+    input_mon_perm_item: MenuItem,
     perms_submenu: Submenu,
     warn_item: Option<MenuItem>,
     mic_perm_id: String,
     acc_perm_id: String,
+    input_mon_perm_id: String,
     backend_items: Vec<(MenuItem, String)>, // (item, config value)
 }
 
@@ -232,14 +234,17 @@ impl App {
         // Permissions (perms already computed above for the input picker gate)
         let mic_label = format!("{} Microphone \u{2014} {}", perms.microphone.symbol(), perms.microphone.label());
         let acc_label = format!("{} Accessibility \u{2014} {}", perms.accessibility.symbol(), perms.accessibility.label());
+        let input_mon_label = format!("{} Input Monitoring \u{2014} {}", perms.input_monitoring.symbol(), perms.input_monitoring.label());
         let mic_perm_item = MenuItem::new(&mic_label, true, None);
         let acc_perm_item = MenuItem::new(&acc_label, true, None);
+        let input_mon_perm_item = MenuItem::new(&input_mon_label, true, None);
         let perms_submenu = Submenu::new(
             if perms.all_granted() { "Permissions \u{2713}" } else { "\u{26a0} Permissions" },
             true,
         );
         let _ = perms_submenu.append(&mic_perm_item);
         let _ = perms_submenu.append(&acc_perm_item);
+        let _ = perms_submenu.append(&input_mon_perm_item);
 
         // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
@@ -263,6 +268,7 @@ impl App {
             let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&mic_perm_item);
             let _ = menu.append(&acc_perm_item);
+            let _ = menu.append(&input_mon_perm_item);
         }
 
         let _ = menu.append(&PredefinedMenuItem::separator());
@@ -299,7 +305,8 @@ impl App {
             debug_id: debug_item.id().0.clone(),
             mic_perm_id: mic_perm_item.id().0.clone(),
             acc_perm_id: acc_perm_item.id().0.clone(),
-            mic_perm_item, acc_perm_item, perms_submenu, warn_item,
+            input_mon_perm_id: input_mon_perm_item.id().0.clone(),
+            mic_perm_item, acc_perm_item, input_mon_perm_item, perms_submenu, warn_item,
             backend_items: vec![
                 (backend_parakeet, "parakeet".into()),
                 (backend_voxtral_local, "voxtral-local".into()),
@@ -437,6 +444,11 @@ impl App {
                 if id == &mi.acc_perm_id {
                     #[cfg(target_os = "macos")]
                     crate::permissions::open_settings("Privacy_Accessibility");
+                    return;
+                }
+                if id == &mi.input_mon_perm_id {
+                    #[cfg(target_os = "macos")]
+                    crate::permissions::open_settings("Privacy_ListenEvent");
                     return;
                 }
                 if id == &mi.notif_id { let mut c = self.config.lock().unwrap(); c.notifications = !c.notifications; let _ = c.save(); return; }
@@ -642,10 +654,13 @@ impl App {
                 if let Some(mi) = &self.menu_items {
                     let mic_label = format!("{} Microphone \u{2014} {}", status.microphone.symbol(), status.microphone.label());
                     let acc_label = format!("{} Accessibility \u{2014} {}", status.accessibility.symbol(), status.accessibility.label());
+                    let input_mon_label = format!("{} Input Monitoring \u{2014} {}", status.input_monitoring.symbol(), status.input_monitoring.label());
                     mi.mic_perm_item.set_text(&mic_label);
                     mi.mic_perm_item.set_enabled(status.microphone != crate::permissions::PermState::Granted);
                     mi.acc_perm_item.set_text(&acc_label);
                     mi.acc_perm_item.set_enabled(status.accessibility != crate::permissions::PermState::Granted);
+                    mi.input_mon_perm_item.set_text(&input_mon_label);
+                    mi.input_mon_perm_item.set_enabled(status.input_monitoring != crate::permissions::PermState::Granted);
                     mi.perms_submenu.set_text(
                         if status.all_granted() { "Permissions \u{2713}" } else { "\u{26a0} Permissions" }
                     );

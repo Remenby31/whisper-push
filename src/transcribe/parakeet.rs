@@ -62,21 +62,31 @@ mod inner {
         Ok(text)
     }
 
-    /// Download Parakeet TDT v3 model from HuggingFace.
+    /// Download the Parakeet ONNX model from HuggingFace.
+    ///
+    /// `parakeet_rs::Parakeet` (the CTC model) expects `model.onnx` +
+    /// `tokenizer.json` in the directory (the previous `nvidia/...` repo only
+    /// ships `.nemo` files, hence the download 404'd). The onnx-community
+    /// export keeps the weights in `onnx/`.
     fn download_model(dest: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(dest)?;
 
         let api = hf_hub::api::sync::Api::new()?;
-        let repo = api.model("nvidia/parakeet-tdt-0.6b-v3".to_string());
+        let repo = api.model("onnx-community/parakeet-ctc-0.6b-ONNX".to_string());
 
-        // Download required files
-        let files = ["model.onnx", "tokenizer.json", "model_config.yaml", "preprocessor_config.json"];
-        for filename in &files {
-            info!("Downloading {filename}...");
-            let src = repo.get(filename)
-                .with_context(|| format!("Failed to download {filename}"))?;
-            std::fs::copy(&src, dest.join(filename))
-                .with_context(|| format!("Failed to copy {filename}"))?;
+        // (path in repo, local filename). model.onnx + tokenizer.json are
+        // required; the external-weights .onnx_data is only present for large
+        // exports, so it is best-effort.
+        let required = [("onnx/model.onnx", "model.onnx"), ("tokenizer.json", "tokenizer.json")];
+        for (src_name, local) in &required {
+            info!("Downloading {src_name}...");
+            let src = repo.get(src_name)
+                .with_context(|| format!("Failed to download {src_name}"))?;
+            std::fs::copy(&src, dest.join(local))
+                .with_context(|| format!("Failed to copy {local}"))?;
+        }
+        if let Ok(src) = repo.get("onnx/model.onnx_data") {
+            let _ = std::fs::copy(&src, dest.join("model.onnx_data"));
         }
 
         info!("Parakeet model downloaded to {}", dest.display());
@@ -85,7 +95,7 @@ mod inner {
 }
 
 #[cfg(feature = "parakeet")]
-pub use inner::{load_model, transcribe};
+pub use inner::{is_loaded, load_model, transcribe};
 
 #[cfg(not(feature = "parakeet"))]
 pub fn load_model() -> anyhow::Result<()> {

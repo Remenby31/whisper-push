@@ -180,8 +180,10 @@ mod doctor {
         // Permissions (macOS)
         #[cfg(target_os = "macos")]
         {
-            let trusted = crate::permissions::is_accessibility_trusted();
-            println!("\nAccessibility: {}", if trusted { "granted" } else { "NOT granted" });
+            let perms = crate::permissions::check_all();
+            println!("\nMicrophone:       {}", perms.microphone.label());
+            println!("Accessibility:    {}", perms.accessibility.label());
+            println!("Input Monitoring: {}  (required for the global hotkey)", perms.input_monitoring.label());
         }
 
         println!("\nAll checks complete.");
