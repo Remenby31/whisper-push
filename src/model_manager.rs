@@ -11,7 +11,6 @@ pub struct ModelInfo {
     pub size_mb: u32,
     pub description: &'static str,
     pub is_downloaded: bool,
-    pub path: PathBuf,
 }
 
 /// List all available models and their download status.
@@ -23,7 +22,6 @@ pub fn list_models() -> Vec<ModelInfo> {
             size_mb: 547,
             description: "Whisper large-v3-turbo Q5 — 99 languages, ~1.2s/10s audio",
             is_downloaded: whisper_model_path().exists(),
-            path: whisper_model_path(),
         },
         ModelInfo {
             name: "parakeet-tdt-0.6b-v3",
@@ -31,7 +29,6 @@ pub fn list_models() -> Vec<ModelInfo> {
             size_mb: 600,
             description: "Parakeet TDT 0.6B — fastest, 25 EU languages, ~27ms/10s audio",
             is_downloaded: parakeet_model_dir().join("tokenizer.json").exists(),
-            path: parakeet_model_dir(),
         },
         ModelInfo {
             name: "voxtral-q4.gguf",
@@ -39,7 +36,6 @@ pub fn list_models() -> Vec<ModelInfo> {
             size_mb: 2300,
             description: "Voxtral Mini 4B Q4 — streaming, 13 languages, ~400ms/10s audio",
             is_downloaded: voxtral_model_dir().join("voxtral-q4.gguf").exists(),
-            path: voxtral_model_dir(),
         },
     ]
 }

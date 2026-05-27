@@ -48,8 +48,6 @@ struct App {
     rx: Receiver<Event>,
     tray: Option<TrayIcon>,
     capture: Arc<Mutex<Option<AudioCapture>>>,
-    hold_pending: Arc<std::sync::atomic::AtomicBool>,
-    hold_delay: f64,
     // Menu items (created in init, kept alive)
     menu_items: Option<MenuItems>,
 }
@@ -86,14 +84,11 @@ struct MenuItems {
 
 impl App {
     fn new(state: AppState, rx: Receiver<Event>) -> Self {
-        let hold_delay = state.config.hold_delay;
         let config = Arc::new(Mutex::new(state.config.clone()));
         Self {
             state, config, rx,
             tray: None,
             capture: Arc::new(Mutex::new(None)),
-            hold_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hold_delay,
             menu_items: None,
         }
     }
@@ -474,38 +469,6 @@ impl App {
                         return;
                     }
                 }
-            }
-
-            Event::HotkeyDown => {
-                if self.state.current() != State::Idle { return; }
-                let device = self.config.lock().unwrap().input_device.clone();
-                match AudioCapture::start(&device) {
-                    Ok(cap) => {
-                        *self.capture.lock().unwrap() = Some(cap);
-                        self.hold_pending.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let pending = self.hold_pending.clone();
-                        let tx = self.state.tx.clone();
-                        let delay_ms = (self.hold_delay * 1000.0) as u64;
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                            if pending.load(std::sync::atomic::Ordering::Relaxed) {
-                                pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                                let _ = tx.send(Event::StateChanged(State::Recording));
-                            }
-                        });
-                    }
-                    Err(e) => warn!("Capture failed: {e}"),
-                }
-            }
-
-            Event::HotkeyUp => {
-                if self.hold_pending.load(std::sync::atomic::Ordering::Relaxed) {
-                    self.hold_pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.capture.lock().unwrap().take();
-                    return;
-                }
-                if self.state.current() != State::Recording { return; }
-                self.finish_recording();
             }
 
             Event::HotkeyToggle => {
@@ -914,70 +877,17 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 
             Ok(Event::HotkeyUp) => {
                 if hold_pending.load(Ordering::Relaxed) {
-                    // Quick tap — discard
                     hold_pending.store(false, Ordering::Relaxed);
                     capture.lock().unwrap().take();
                     continue;
                 }
                 if !recording.load(Ordering::Relaxed) { continue; }
                 recording.store(false, Ordering::Relaxed);
-
-                let cfg = config.lock().unwrap().clone();
-                if cfg.sound_feedback {
-                    crate::audio::playback::play_sound("stop");
-                }
-
-                let audio = capture.lock().unwrap().take()
-                    .map(|c| c.stop())
-                    .unwrap_or_default();
-
-                if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
-                    info!("Too short, skipping");
-                    continue;
-                }
-
-                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
-                let backend = crate::model_manager::resolve_backend(&cfg.model);
-                info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...", audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, backend, rms);
-
-                let start = std::time::Instant::now();
-                // Use catch_unwind to catch WGPU/Metal panics from cross-thread access
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend)
-                }));
-                let result = match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
-                            else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
-                            else { "unknown panic".into() };
-                        Err(anyhow::anyhow!("Transcription panicked: {msg}"))
-                    }
-                };
-                match result {
-                    Ok(text) if !text.is_empty() => {
-                        info!("Pasting ({:.2}s): '{}'", start.elapsed().as_secs_f64(), if text.len() > 80 { &text[..80] } else { &text });
-                        if let Err(e) = crate::paste::paste_text(&text) {
-                            tracing::error!("Paste failed: {e}");
-                        }
-                        if cfg.notifications {
-                            let preview = if text.len() > 50 {
-                                format!("{}...", &text[..50])
-                            } else { text };
-                            crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
-                        }
-                    }
-                    Ok(_) => info!("No speech detected"),
-                    Err(e) => {
-                        tracing::error!("Transcription: {e}");
-                        crate::notify::send("Whisper Push", &format!("Error: {e}"));
-                    }
-                }
+                stop_and_transcribe(&config, &capture);
             }
 
             Ok(Event::HotkeyToggle) => {
                 if !recording.load(Ordering::Relaxed) {
-                    // Start recording
                     let device = config.lock().unwrap().input_device.clone();
                     match crate::audio::capture::AudioCapture::start(&device) {
                         Ok(cap) => {
@@ -991,31 +901,8 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                         Err(e) => warn!("Capture failed: {e}"),
                     }
                 } else {
-                    // Stop and transcribe (same as HotkeyUp)
                     recording.store(false, Ordering::Relaxed);
-                    let cfg = config.lock().unwrap().clone();
-                    if cfg.sound_feedback {
-                        crate::audio::playback::play_sound("stop");
-                    }
-                    let audio = capture.lock().unwrap().take()
-                        .map(|c| c.stop())
-                        .unwrap_or_default();
-                    if audio.len() < crate::audio::MIN_AUDIO_SAMPLES { continue; }
-
-                    let backend = crate::model_manager::resolve_backend(&cfg.model);
-                    match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
-                        Ok(text) if !text.is_empty() => {
-                            let _ = crate::paste::paste_text(&text);
-                            if cfg.notifications {
-                                crate::notify::send("Whisper Push", &format!("Typed: {}", &text));
-                            }
-                        }
-                        Ok(_) => info!("No speech"),
-                        Err(e) => {
-                        tracing::error!("Transcription: {e}");
-                        crate::notify::send("Whisper Push", &format!("Error: {e}"));
-                    }
-                    }
+                    stop_and_transcribe(&config, &capture);
                 }
             }
 
@@ -1033,6 +920,65 @@ fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
     };
     if let (Some(tray), Some(icon)) = (tray, load_icon(data)) {
         let _ = tray.set_icon(Some(icon));
+    }
+}
+
+/// Stop capture, transcribe audio, and paste result.
+fn stop_and_transcribe(
+    config: &Arc<Mutex<Config>>,
+    capture: &Arc<Mutex<Option<crate::audio::capture::AudioCapture>>>,
+) {
+    let cfg = config.lock().unwrap().clone();
+    if cfg.sound_feedback {
+        crate::audio::playback::play_sound("stop");
+    }
+
+    let audio = capture.lock().unwrap().take()
+        .map(|c| c.stop())
+        .unwrap_or_default();
+
+    if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
+        info!("Too short, skipping");
+        return;
+    }
+
+    let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
+    let backend = crate::model_manager::resolve_backend(&cfg.model);
+    info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...",
+        audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, backend, rms);
+
+    let start = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend)
+    }));
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
+                else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
+                else { "unknown panic".into() };
+            Err(anyhow::anyhow!("Transcription panicked: {msg}"))
+        }
+    };
+    match result {
+        Ok(text) if !text.is_empty() => {
+            info!("Pasting ({:.2}s): '{}'", start.elapsed().as_secs_f64(),
+                if text.len() > 80 { &text[..80] } else { &text });
+            if let Err(e) = crate::paste::paste_text(&text) {
+                tracing::error!("Paste failed: {e}");
+            }
+            if cfg.notifications {
+                let preview = if text.len() > 50 {
+                    format!("{}...", &text[..50])
+                } else { text };
+                crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
+            }
+        }
+        Ok(_) => info!("No speech detected"),
+        Err(e) => {
+            tracing::error!("Transcription: {e}");
+            crate::notify::send("Whisper Push", &format!("Error: {e}"));
+        }
     }
 }
 

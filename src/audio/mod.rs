@@ -4,19 +4,61 @@ pub mod playback;
 pub mod stream;
 
 use anyhow::Result;
+use cpal::traits::{DeviceTrait, HostTrait};
+use rubato::FftFixedIn;
+use std::sync::{Arc, Mutex};
 
 /// Whisper expects 16kHz mono audio.
 pub const SAMPLE_RATE: u32 = 16_000;
 /// Minimum audio length to attempt transcription (0.3s at 16kHz).
 pub const MIN_AUDIO_SAMPLES: usize = 4800;
+/// Resampler chunk size.
+pub const RESAMPLE_CHUNK_SIZE: usize = 1024;
 
 /// List available input audio devices.
 pub fn list_devices() -> Result<Vec<String>> {
-    use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
     let devices: Vec<String> = host
         .input_devices()?
         .filter_map(|d| d.name().ok())
         .collect();
     Ok(devices)
+}
+
+/// Find an input device by name ("auto" = default).
+pub fn find_input_device(name: &str) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    if name == "auto" {
+        host.default_input_device()
+            .ok_or_else(|| anyhow::anyhow!("No input device found"))
+    } else {
+        host.input_devices()?
+            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+            .ok_or_else(|| anyhow::anyhow!("Device '{}' not found", name))
+    }
+}
+
+/// Create a resampler from device sample rate to 16kHz, if needed.
+pub fn create_resampler(device_sr: u32) -> Result<Option<Arc<Mutex<FftFixedIn<f32>>>>> {
+    if device_sr == SAMPLE_RATE {
+        return Ok(None);
+    }
+    let resampler = FftFixedIn::<f32>::new(
+        device_sr as usize,
+        SAMPLE_RATE as usize,
+        RESAMPLE_CHUNK_SIZE,
+        1, 1,
+    )?;
+    Ok(Some(Arc::new(Mutex::new(resampler))))
+}
+
+/// Downmix interleaved multi-channel audio to mono.
+pub fn downmix_to_mono(data: &[f32], channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        data.to_vec()
+    } else {
+        data.chunks(channels)
+            .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+            .collect()
+    }
 }
