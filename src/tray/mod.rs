@@ -22,6 +22,15 @@ fn load_icon(data: &[u8]) -> Option<Icon> {
     Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
+/// Submenu title showing the current device selection, e.g. "Input: Auto".
+fn device_title(label: &str, value: &str) -> String {
+    if value == "auto" {
+        format!("{label}: Auto")
+    } else {
+        format!("{label}: {value}")
+    }
+}
+
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Hold \u{2014} Control", "ctrl", "hold"),
     ("Hold \u{2014} Right Control", "rctrl", "hold"),
@@ -77,6 +86,7 @@ struct MenuItems {
     input_submenu: Submenu,
     output_ids: Vec<(String, String)>,
     output_device_items: Vec<(CheckMenuItem, String)>,
+    output_submenu: Submenu,
     mic_perm_item: MenuItem,
     acc_perm_item: MenuItem,
     perms_submenu: Submenu,
@@ -134,36 +144,41 @@ impl App {
         // Apply the configured output device to the playback module up front.
         crate::audio::playback::set_output_device(&cfg.output_device);
 
-        // Device pickers are flat items (submenus crash on macOS Tahoe).
-        // Device *enumeration* does not require microphone permission on macOS —
-        // TCC only gates audio capture — so the input picker is always populated.
-        // Whether the mic is actually usable is surfaced in the Permissions section.
-        let input_submenu = Submenu::new("Input", true); // kept for struct compat; not shown
+        // Device pickers are real submenus (the old Tahoe hover-close bug was a
+        // muda 0.16 issue, fixed by the 0.19 upgrade). Device *enumeration* needs
+        // no microphone permission on macOS — TCC only gates capture — so both
+        // pickers are always populated; mic usability is shown in Permissions.
+        let input_submenu = Submenu::new(&device_title("Input", &cfg.input_device), true);
         let mut input_device_items: Vec<(CheckMenuItem, String)> = Vec::new();
         let input_auto = CheckMenuItem::new("Auto", true, cfg.input_device == "auto", None);
+        let _ = input_submenu.append(&input_auto);
         input_device_items.push((input_auto, "auto".to_string()));
         if let Ok(devices) = crate::audio::list_devices() {
-            info!("Input devices enumerated: {} (mic perm: {:?})", devices.len(), perms.microphone);
             for name in devices {
                 let checked = cfg.input_device == name;
-                input_device_items.push((CheckMenuItem::new(&name, true, checked, None), name));
+                let item = CheckMenuItem::new(&name, true, checked, None);
+                let _ = input_submenu.append(&item);
+                input_device_items.push((item, name));
             }
         }
         // If the mic is explicitly denied, recording won't work — hint the user.
-        let input_needs_perm: Option<MenuItem> = if perms.microphone == crate::permissions::PermState::Denied {
-            Some(MenuItem::new("\u{26a0} Microphone denied \u{2014} grant to record", false, None))
-        } else {
-            None
-        };
+        if perms.microphone == crate::permissions::PermState::Denied {
+            let _ = input_submenu.append(&PredefinedMenuItem::separator());
+            let _ = input_submenu.append(&MenuItem::new("\u{26a0} Microphone denied \u{2014} grant to record", false, None));
+        }
 
         // Output device picker (no permission needed).
+        let output_submenu = Submenu::new(&device_title("Output", &cfg.output_device), true);
         let mut output_device_items: Vec<(CheckMenuItem, String)> = Vec::new();
         let output_auto = CheckMenuItem::new("Auto", true, cfg.output_device == "auto", None);
+        let _ = output_submenu.append(&output_auto);
         output_device_items.push((output_auto, "auto".to_string()));
         if let Ok(devices) = crate::audio::list_output_devices() {
             for name in devices {
                 let checked = cfg.output_device == name;
-                output_device_items.push((CheckMenuItem::new(&name, true, checked, None), name));
+                let item = CheckMenuItem::new(&name, true, checked, None);
+                let _ = output_submenu.append(&item);
+                output_device_items.push((item, name));
             }
         }
 
@@ -243,29 +258,15 @@ impl App {
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
-        // Engine selector
-        let _ = menu.append(&backend_parakeet);
-        let _ = menu.append(&backend_voxtral_local);
-        let _ = menu.append(&backend_whisper);
+        // Settings (dropdowns to keep the menu compact)
+        let _ = menu.append(&backend_submenu);
+        let _ = menu.append(&input_submenu);
+        let _ = menu.append(&output_submenu);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
         let _ = menu.append(&notifications_item);
         let _ = menu.append(&sound_item);
-
-        // Audio devices
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&MenuItem::new("Input (Microphone)", false, None));
-        for (item, _) in &input_device_items {
-            let _ = menu.append(item);
-        }
-        if let Some(np) = &input_needs_perm {
-            let _ = menu.append(np);
-        }
-        let _ = menu.append(&MenuItem::new("Output (Sound)", false, None));
-        for (item, _) in &output_device_items {
-            let _ = menu.append(item);
-        }
 
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&test_item);
@@ -298,7 +299,7 @@ impl App {
             notifications_item, sound_item, debug_item,
             hotkey_ids, hotkey_items,
             input_ids, input_device_items, input_submenu,
-            output_ids, output_device_items,
+            output_ids, output_device_items, output_submenu,
         });
 
         // Build tray
@@ -307,6 +308,10 @@ impl App {
             .with_tooltip("Whisper Push");
         if let Some(icon) = load_icon(ICON_IDLE) {
             builder = builder.with_icon(icon);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.with_icon_as_template(true);
         }
         self.tray = Some(builder.build().expect("failed to create tray icon"));
 
@@ -441,7 +446,7 @@ impl App {
                     if id == item_id {
                         let mut c = self.config.lock().unwrap(); c.input_device = name.clone(); let _ = c.save();
                         for (item, n) in &mi.input_device_items { item.set_checked(n == name); }
-                        mi.input_submenu.set_text(&format!("Input: {name}"));
+                        mi.input_submenu.set_text(device_title("Input", name));
                         return;
                     }
                 }
@@ -450,6 +455,7 @@ impl App {
                         let mut c = self.config.lock().unwrap(); c.output_device = name.clone(); let _ = c.save();
                         crate::audio::playback::set_output_device(name);
                         for (item, n) in &mi.output_device_items { item.set_checked(n == name); }
+                        mi.output_submenu.set_text(device_title("Output", name));
                         return;
                     }
                 }
@@ -1069,13 +1075,18 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 }
 
 fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
-    let data = match state {
-        State::Loading | State::Processing => ICON_PROCESSING,
-        State::Idle => ICON_IDLE,
-        State::Recording => ICON_RECORDING,
+    // idle/processing are monochrome → template mode lets macOS auto-adapt them
+    // to the menu-bar appearance (white on dark, black on light). Recording is
+    // the citron brand accent, so it is NOT a template (keeps its color).
+    let (data, is_template) = match state {
+        State::Loading | State::Processing => (ICON_PROCESSING, false),
+        State::Idle => (ICON_IDLE, true),
+        State::Recording => (ICON_RECORDING, false),
     };
     if let (Some(tray), Some(icon)) = (tray, load_icon(data)) {
         let _ = tray.set_icon(Some(icon));
+        #[cfg(target_os = "macos")]
+        tray.set_icon_as_template(is_template);
     }
 }
 

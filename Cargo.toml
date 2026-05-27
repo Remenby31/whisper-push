@@ -40,8 +40,8 @@ enigo = "0.3"            # Cross-platform keystroke simulation (paste)
 arboard = "3"
 
 # System tray + event loop
-tray-icon = "0.19"
-muda = "0.16"
+tray-icon = "0.24"
+muda = "0.19"
 winit = "0.30"
 
 # Config

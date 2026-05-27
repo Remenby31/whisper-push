@@ -1,11 +1,16 @@
 # Whisper Push — Rust build helpers
-.PHONY: build release bundle sign dmg clean check
+.PHONY: build release bundle sign dmg clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
 BINARY = target/release/whisper-push
 SIGN_ID = Developer ID Application: Baptiste Cruvellier (3SNT64YKAS)
 BUNDLE_ID = com.whisper-push.app
+
+# Install target: a stable /Applications location + login autostart agent
+INSTALL_DIR = /Applications
+INSTALLED_APP = $(INSTALL_DIR)/$(APP_NAME).app
+LAUNCH_AGENT = $(HOME)/Library/LaunchAgents/$(BUNDLE_ID).plist
 
 # Debug build
 build:
@@ -30,8 +35,8 @@ bundle: release
 	@cp $(BINARY) "$(APP_DIR)/Contents/MacOS/whisper-push"
 	@cp resources/Info.plist "$(APP_DIR)/Contents/"
 	@echo "APPL????" > "$(APP_DIR)/Contents/PkgInfo"
-	@# Copy icon if available
-	@test -f macos/whisper-push.icns && cp macos/whisper-push.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns" || true
+	@# Brand app icon (PADDOCK squircle, generated from the brand kit)
+	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns" || echo "  (warning: resources/AppIcon.icns missing — bundle will have no icon)"
 	@echo "✓ App bundle created at $(APP_DIR)"
 
 # Sign the app with Developer ID
@@ -93,6 +98,27 @@ deploy: sign
 	fi
 	@open "$(APP_DIR)"
 	@echo "✓ Whisper Push relaunched"
+
+# Install into /Applications (shows in Launchpad/Finder) + register the
+# login autostart agent pointing at the installed copy.
+install: sign
+	@echo "Installing to $(INSTALLED_APP)..."
+	@pkill -f "Whisper Push.app/Contents/MacOS/whisper-push" 2>/dev/null || true
+	@sleep 1
+	@rm -rf "$(INSTALLED_APP)"
+	@cp -R "$(APP_DIR)" "$(INSTALL_DIR)/"
+	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>Label</key>\n\t<string>$(BUNDLE_ID)</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>$(INSTALLED_APP)/Contents/MacOS/whisper-push</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>StandardOutPath</key>\n\t<string>/tmp/whisper-push.out.log</string>\n\t<key>StandardErrorPath</key>\n\t<string>/tmp/whisper-push.err.log</string>\n</dict>\n</plist>\n' > "$(LAUNCH_AGENT)"
+	@launchctl bootout gui/$$(id -u)/$(BUNDLE_ID) 2>/dev/null || true
+	@launchctl bootstrap gui/$$(id -u) "$(LAUNCH_AGENT)" 2>/dev/null || true
+	@echo "✓ Installed to /Applications + registered login autostart"
+	@echo "  (ad-hoc signed: you may need to re-grant Accessibility/Mic on first launch)"
+
+# Remove the installed app + autostart agent
+uninstall:
+	@launchctl bootout gui/$$(id -u)/$(BUNDLE_ID) 2>/dev/null || true
+	@rm -f "$(LAUNCH_AGENT)"
+	@rm -rf "$(INSTALLED_APP)"
+	@echo "✓ Uninstalled from /Applications + removed autostart agent"
 
 # Clean
 clean:
