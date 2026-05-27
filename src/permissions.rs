@@ -169,6 +169,56 @@ pub fn is_accessibility_trusted() -> bool {
     true
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_perm_state_symbols() {
+        assert_eq!(PermState::Granted.symbol(), "✓");
+        assert_eq!(PermState::Denied.symbol(), "✗");
+        assert_eq!(PermState::NotRequested.symbol(), "?");
+        assert_eq!(PermState::Unknown.symbol(), "?");
+    }
+
+    #[test]
+    fn test_perm_state_labels() {
+        assert_eq!(PermState::Granted.label(), "Granted");
+        assert!(PermState::Denied.label().contains("Denied"));
+        assert!(PermState::NotRequested.label().contains("Not requested"));
+    }
+
+    #[test]
+    fn test_all_granted() {
+        let status = PermissionStatus {
+            microphone: PermState::Granted,
+            accessibility: PermState::Granted,
+        };
+        assert!(status.all_granted());
+        assert_eq!(status.missing_count(), 0);
+    }
+
+    #[test]
+    fn test_not_all_granted() {
+        let status = PermissionStatus {
+            microphone: PermState::Granted,
+            accessibility: PermState::Denied,
+        };
+        assert!(!status.all_granted());
+        assert_eq!(status.missing_count(), 1);
+    }
+
+    #[test]
+    fn test_both_missing() {
+        let status = PermissionStatus {
+            microphone: PermState::NotRequested,
+            accessibility: PermState::Denied,
+        };
+        assert!(!status.all_granted());
+        assert_eq!(status.missing_count(), 2);
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn request_accessibility() {
     use core_foundation::base::TCFType;

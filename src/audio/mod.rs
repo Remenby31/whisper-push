@@ -62,3 +62,57 @@ pub fn downmix_to_mono(data: &[f32], channels: usize) -> Vec<f32> {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_downmix_mono_passthrough() {
+        let data = vec![0.1, 0.2, 0.3];
+        let result = downmix_to_mono(&data, 1);
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_downmix_stereo() {
+        // L=1.0 R=0.0 → mono=0.5, L=0.0 R=1.0 → mono=0.5
+        let data = vec![1.0, 0.0, 0.0, 1.0];
+        let result = downmix_to_mono(&data, 2);
+        assert_eq!(result, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn test_downmix_surround_51() {
+        // 6 channels, all 0.6 → mono = 0.6
+        let data = vec![0.6; 6];
+        let result = downmix_to_mono(&data, 6);
+        assert_eq!(result.len(), 1);
+        assert!((result[0] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_downmix_empty() {
+        let result = downmix_to_mono(&[], 2);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_constants() {
+        assert_eq!(SAMPLE_RATE, 16_000);
+        assert_eq!(MIN_AUDIO_SAMPLES, 4800); // 0.3s at 16kHz
+        assert_eq!(RESAMPLE_CHUNK_SIZE, 1024);
+    }
+
+    #[test]
+    fn test_create_resampler_same_rate_returns_none() {
+        let r = create_resampler(16_000).unwrap();
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn test_create_resampler_different_rate_returns_some() {
+        let r = create_resampler(44_100).unwrap();
+        assert!(r.is_some());
+    }
+}

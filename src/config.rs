@@ -94,3 +94,81 @@ pub fn data_dir() -> PathBuf {
         .join("whisper-push")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.hotkey, "ctrl");
+        assert_eq!(cfg.hotkey_mode, "hold");
+        assert_eq!(cfg.hold_delay, 0.15);
+        assert_eq!(cfg.language, "auto");
+        assert_eq!(cfg.model, "ggml-large-v3-turbo-q5_0.bin");
+        assert!(cfg.notifications);
+        assert!(cfg.sound_feedback);
+        assert_eq!(cfg.input_device, "auto");
+        assert_eq!(cfg.output_device, "auto");
+        assert!(!cfg.debug);
+        assert!(!cfg.auto_start);
+    }
+
+    #[test]
+    fn test_config_roundtrip() {
+        let cfg = Config::default();
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(cfg.hotkey, deserialized.hotkey);
+        assert_eq!(cfg.model, deserialized.model);
+        assert_eq!(cfg.language, deserialized.language);
+    }
+
+    #[test]
+    fn test_config_load_missing_fields() {
+        let partial = r#"
+            hotkey = "rctrl"
+            language = "fr"
+        "#;
+        let cfg: Config = toml::from_str(partial).unwrap();
+        assert_eq!(cfg.hotkey, "rctrl");
+        assert_eq!(cfg.language, "fr");
+        // Defaults for missing fields
+        assert_eq!(cfg.hotkey_mode, "hold");
+        assert_eq!(cfg.model, "ggml-large-v3-turbo-q5_0.bin");
+        assert!(cfg.notifications);
+    }
+
+    #[test]
+    fn test_config_ignores_unknown_fields() {
+        let with_unknown = r#"
+            hotkey = "ctrl"
+            backend = "whisper"
+            some_future_field = true
+        "#;
+        // Should not panic — serde(default) + deny_unknown_fields not set
+        let cfg: Config = toml::from_str(with_unknown).unwrap();
+        assert_eq!(cfg.hotkey, "ctrl");
+    }
+
+    #[test]
+    fn test_config_load_save_roundtrip() {
+        let dir = std::env::temp_dir().join("whisper_push_test_config");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test_config.toml");
+
+        let mut cfg = Config::default();
+        cfg.language = "fr".into();
+        cfg.hotkey = "rctrl".into();
+        let content = toml::to_string_pretty(&cfg).unwrap();
+        std::fs::write(&path, &content).unwrap();
+
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.language, "fr");
+        assert_eq!(loaded.hotkey, "rctrl");
+        assert_eq!(loaded.model, "ggml-large-v3-turbo-q5_0.bin");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+

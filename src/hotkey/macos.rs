@@ -21,13 +21,13 @@ const KEYCODE_RALT: i64 = 61;
 const KEYCODE_LCMD: i64 = 55;
 const KEYCODE_RCMD: i64 = 54;
 
-struct HotkeyConfig {
-    modifier_flags: u64,
-    key_code: Option<i64>,
-    modifier_keycode: Option<i64>,
+pub(crate) struct HotkeyConfig {
+    pub(crate) modifier_flags: u64,
+    pub(crate) key_code: Option<i64>,
+    pub(crate) modifier_keycode: Option<i64>,
 }
 
-fn parse_hotkey(hotkey: &str) -> HotkeyConfig {
+pub(crate) fn parse_hotkey(hotkey: &str) -> HotkeyConfig {
     let mut flags: u64 = 0;
     let mut key_code: Option<i64> = None;
     let mut modifier_keycode: Option<i64> = None;
@@ -52,6 +52,48 @@ fn parse_hotkey(hotkey: &str) -> HotkeyConfig {
         }
     }
     HotkeyConfig { modifier_flags: flags, key_code, modifier_keycode }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_hotkey_ctrl() {
+        let hk = parse_hotkey("ctrl");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_CONTROL);
+        assert!(hk.key_code.is_none());
+        assert!(hk.modifier_keycode.is_none());
+    }
+
+    #[test]
+    fn test_parse_hotkey_rctrl() {
+        let hk = parse_hotkey("rctrl");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_CONTROL);
+        assert_eq!(hk.modifier_keycode, Some(KEYCODE_RCTRL));
+    }
+
+    #[test]
+    fn test_parse_hotkey_combo() {
+        let hk = parse_hotkey("cmd+shift+space");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_COMMAND | CG_EVENT_FLAG_SHIFT);
+        assert_eq!(hk.key_code, Some(49)); // space
+    }
+
+    #[test]
+    fn test_parse_hotkey_rcmd() {
+        let hk = parse_hotkey("rcmd");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_COMMAND);
+        assert_eq!(hk.modifier_keycode, Some(KEYCODE_RCMD));
+    }
+
+    #[test]
+    fn test_parse_hotkey_unknown_gives_zero_flags() {
+        let hk = parse_hotkey("unknown");
+        assert_eq!(hk.modifier_flags, 0);
+        assert!(hk.key_code.is_none());
+        assert!(hk.modifier_keycode.is_none());
+    }
 }
 
 /// Start global hotkey listener using CGEventTap (works from any thread).

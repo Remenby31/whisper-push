@@ -128,3 +128,77 @@ pub fn ensure_model(backend: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_for_model_whisper() {
+        assert_eq!(backend_for_model("ggml-large-v3-turbo-q5_0.bin"), "whisper");
+    }
+
+    #[test]
+    fn test_backend_for_model_parakeet() {
+        assert_eq!(backend_for_model("parakeet-tdt-0.6b-v3"), "parakeet");
+    }
+
+    #[test]
+    fn test_backend_for_model_voxtral() {
+        assert_eq!(backend_for_model("voxtral-q4.gguf"), "voxtral-local");
+    }
+
+    #[test]
+    fn test_backend_for_model_unknown_defaults_to_whisper() {
+        assert_eq!(backend_for_model("some-unknown-model.bin"), "whisper");
+    }
+
+    #[test]
+    fn test_model_for_backend_roundtrip() {
+        for backend in &["whisper", "parakeet", "voxtral-local"] {
+            let model = model_for_backend(backend);
+            assert_eq!(backend_for_model(model), *backend);
+        }
+    }
+
+    #[test]
+    fn test_model_for_backend_unknown_defaults_to_whisper() {
+        assert_eq!(model_for_backend("unknown"), "ggml-large-v3-turbo-q5_0.bin");
+    }
+
+    #[test]
+    fn test_resolve_backend_whisper() {
+        let b = resolve_backend("ggml-large-v3-turbo-q5_0.bin");
+        assert!(matches!(b, crate::transcribe::Backend::WhisperLocal(_)));
+    }
+
+    #[test]
+    fn test_resolve_backend_parakeet() {
+        let b = resolve_backend("parakeet-tdt-0.6b-v3");
+        assert!(matches!(b, crate::transcribe::Backend::Parakeet));
+    }
+
+    #[test]
+    fn test_resolve_backend_voxtral() {
+        let b = resolve_backend("voxtral-q4.gguf");
+        assert!(matches!(b, crate::transcribe::Backend::VoxtralLocal));
+    }
+
+    #[test]
+    fn test_list_models_has_three_entries() {
+        let models = list_models();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].backend, "whisper");
+        assert_eq!(models[1].backend, "parakeet");
+        assert_eq!(models[2].backend, "voxtral-local");
+    }
+
+    #[test]
+    fn test_list_models_sizes_positive() {
+        for m in list_models() {
+            assert!(m.size_mb > 0, "Model {} has 0 size", m.name);
+            assert!(!m.name.is_empty());
+            assert!(!m.description.is_empty());
+        }
+    }
+}

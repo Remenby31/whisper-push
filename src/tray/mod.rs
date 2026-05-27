@@ -982,7 +982,7 @@ fn stop_and_transcribe(
     }
 }
 
-fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
+pub fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
     let symbols: &[(&str, &str)] = &[
         ("cmd", "\u{2318}"), ("shift", "\u{21e7}"), ("alt", "\u{2325}"), ("ctrl", "\u{2303}"),
         ("rctrl", "\u{2303}R"), ("rcmd", "\u{2318}R"), ("ralt", "\u{2325}R"), ("space", "Space"),
