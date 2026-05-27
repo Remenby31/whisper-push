@@ -1,6 +1,6 @@
 [package]
 name = "whisper-push"
-version = "2.0.0"
+version = "0.1.0-beta"
 edition = "2024"
 description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
 license = "MIT"
