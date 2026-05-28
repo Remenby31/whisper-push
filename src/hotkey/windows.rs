@@ -97,7 +97,7 @@ fn run_keyboard_hook(target_vk: u32, is_hold: bool, tx: Sender<Event>) -> anyhow
                 }
             }
         }
-        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+        CallNextHookEx(None, code, wparam, lparam)
     }
 
     unsafe {
