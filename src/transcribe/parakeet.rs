@@ -7,9 +7,9 @@ mod inner {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use tracing::info;
-    use parakeet_rs::{Parakeet, Transcriber};
+    use parakeet_rs::{ParakeetTDT, Transcriber};
 
-    static PARAKEET: Mutex<Option<Parakeet>> = Mutex::new(None);
+    static PARAKEET: Mutex<Option<ParakeetTDT>> = Mutex::new(None);
 
     pub fn model_dir() -> PathBuf {
         crate::config::data_dir().join("models").join("parakeet")
@@ -19,13 +19,13 @@ mod inner {
     pub fn load_model() -> Result<()> {
         let dir = model_dir();
 
-        if !dir.join("tokenizer.json").exists() {
+        if !dir.join("vocab.txt").exists() {
             info!("Parakeet model not found, downloading...");
             download_model(&dir)?;
         }
 
-        info!("Loading Parakeet from {}...", dir.display());
-        let parakeet = Parakeet::from_pretrained(&dir, None)
+        info!("Loading Parakeet TDT from {}...", dir.display());
+        let parakeet = ParakeetTDT::from_pretrained(&dir, None)
             .map_err(|e| anyhow::anyhow!("Failed to load Parakeet: {e}"))?;
 
         *PARAKEET.lock().unwrap() = Some(parakeet);
@@ -62,31 +62,26 @@ mod inner {
         Ok(text)
     }
 
-    /// Download the Parakeet ONNX model from HuggingFace.
-    ///
-    /// `parakeet_rs::Parakeet` (the CTC model) expects `model.onnx` +
-    /// `tokenizer.json` in the directory (the previous `nvidia/...` repo only
-    /// ships `.nemo` files, hence the download 404'd). The onnx-community
-    /// export keeps the weights in `onnx/`.
+    /// Download Parakeet TDT v3 ONNX model from HuggingFace.
+    /// Required files for ParakeetTDT: encoder + decoder + vocab.
     fn download_model(dest: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(dest)?;
 
         let api = hf_hub::api::sync::Api::new()?;
-        let repo = api.model("onnx-community/parakeet-ctc-0.6b-ONNX".to_string());
+        let repo = api.model("istupakov/parakeet-tdt-0.6b-v3-onnx".to_string());
 
-        // (path in repo, local filename). model.onnx + tokenizer.json are
-        // required; the external-weights .onnx_data is only present for large
-        // exports, so it is best-effort.
-        let required = [("onnx/model.onnx", "model.onnx"), ("tokenizer.json", "tokenizer.json")];
-        for (src_name, local) in &required {
-            info!("Downloading {src_name}...");
-            let src = repo.get(src_name)
-                .with_context(|| format!("Failed to download {src_name}"))?;
-            std::fs::copy(&src, dest.join(local))
-                .with_context(|| format!("Failed to copy {local}"))?;
-        }
-        if let Ok(src) = repo.get("onnx/model.onnx_data") {
-            let _ = std::fs::copy(&src, dest.join("model.onnx_data"));
+        let files = [
+            "encoder-model.onnx",
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "vocab.txt",
+        ];
+        for filename in &files {
+            info!("Downloading {filename}...");
+            let src = repo.get(filename)
+                .with_context(|| format!("Failed to download {filename}"))?;
+            std::fs::copy(&src, dest.join(filename))
+                .with_context(|| format!("Failed to copy {filename}"))?;
         }
 
         info!("Parakeet model downloaded to {}", dest.display());

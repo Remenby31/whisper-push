@@ -28,7 +28,7 @@ pub fn list_models() -> Vec<ModelInfo> {
             backend: "parakeet",
             size_mb: 600,
             description: "Parakeet TDT 0.6B — fastest, 25 EU languages, ~27ms/10s audio",
-            is_downloaded: parakeet_model_dir().join("tokenizer.json").exists(),
+            is_downloaded: parakeet_model_dir().join("vocab.txt").exists(),
         },
         ModelInfo {
             name: "voxtral-q4.gguf",
@@ -107,7 +107,7 @@ pub fn ensure_model(backend: &str) -> Result<()> {
             }
         }
         "parakeet" => {
-            if !parakeet_model_dir().join("tokenizer.json").exists() {
+            if !parakeet_model_dir().join("vocab.txt").exists() {
                 info!("Downloading Parakeet model...");
                 crate::notify::send("Whisper Push", "Downloading Parakeet model (~600MB)...");
                 crate::transcribe::parakeet::load_model()?;
