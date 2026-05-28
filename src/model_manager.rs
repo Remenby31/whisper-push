@@ -95,6 +95,26 @@ pub fn resolve_backend(model: &str) -> crate::transcribe::Backend {
     }
 }
 
+/// Check if the model for a backend is already downloaded.
+pub fn is_model_downloaded(backend: &str) -> bool {
+    match backend {
+        "whisper" => whisper_model_path().exists(),
+        "parakeet" => parakeet_model_dir().join("vocab.txt").exists(),
+        "voxtral-local" => voxtral_model_dir().join("voxtral-q4.gguf").exists(),
+        _ => false,
+    }
+}
+
+/// Get the approximate download size in MB for a backend.
+pub fn model_size_mb(backend: &str) -> u32 {
+    match backend {
+        "whisper" => 547,
+        "parakeet" => 600,
+        "voxtral-local" => 2300,
+        _ => 0,
+    }
+}
+
 /// Ensure the model for a given backend is downloaded.
 pub fn ensure_model(backend: &str) -> Result<()> {
     match backend {

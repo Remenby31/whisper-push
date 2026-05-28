@@ -1221,6 +1221,15 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 crate::transcribe::voxtral_local::unload_model();
 
                 let backend = crate::model_manager::backend_for_model(&model_name);
+
+                // Check if model needs downloading and notify user
+                let needs_download = !crate::model_manager::is_model_downloaded(backend);
+                if needs_download {
+                    let size = crate::model_manager::model_size_mb(backend);
+                    crate::notify::send("Whisper Push",
+                        &format!("Downloading {} (~{}MB)... This may take a few minutes.", backend, size));
+                }
+
                 let load_result = match backend {
                     "voxtral-local" => {
                         let dir = crate::config::data_dir().join("models").join("voxtral");
