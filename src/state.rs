@@ -49,6 +49,8 @@ pub enum Event {
     PromptPermissions,
     /// Refresh permission status in the menu
     RefreshPermissions,
+    /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
+    LoadModel(String),
     /// Request quit
     Quit,
 }
@@ -121,9 +123,57 @@ pub fn current_status() -> String {
     }
 }
 
-pub fn force_stop() {
-    // Send SIGTERM to running instance (Unix) or equivalent
-    tracing::info!("Force stop requested");
-    // For now, just print — will implement proper IPC later
-    println!("Stop signal sent");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_display() {
+        assert_eq!(format!("{}", State::Loading), "Loading model...");
+        assert_eq!(format!("{}", State::Idle), "Ready");
+        assert_eq!(format!("{}", State::Recording), "Recording");
+        assert_eq!(format!("{}", State::Processing), "Processing");
+    }
+
+    #[test]
+    fn test_state_starts_loading() {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        let state = AppState::new(Config::default(), tx);
+        assert_eq!(state.current(), State::Loading);
+    }
+
+    #[test]
+    fn test_state_transitions() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let state = AppState::new(Config::default(), tx);
+
+        state.set(State::Idle);
+        assert_eq!(state.current(), State::Idle);
+        // Should have emitted a StateChanged event
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, Event::StateChanged(State::Idle)));
+
+        state.set(State::Recording);
+        assert_eq!(state.current(), State::Recording);
+
+        state.set(State::Processing);
+        assert_eq!(state.current(), State::Processing);
+
+        state.set(State::Idle);
+        assert_eq!(state.current(), State::Idle);
+    }
+
+    #[test]
+    fn test_state_no_duplicate_events() {
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let state = AppState::new(Config::default(), tx);
+
+        state.set(State::Idle);
+        state.set(State::Idle); // same state — should not emit
+
+        // Only one event
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_err());
+    }
 }
+

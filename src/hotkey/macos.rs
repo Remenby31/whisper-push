@@ -70,14 +70,14 @@ fn flag_mod_names(flags: u64) -> Vec<&'static str> {
 }
 
 #[derive(Clone, Copy)]
-struct MatchConfig {
-    modifier_flags: u64,
-    key_code: Option<i64>,
-    modifier_keycode: Option<i64>,
-    is_hold: bool,
+pub(crate) struct MatchConfig {
+    pub(crate) modifier_flags: u64,
+    pub(crate) key_code: Option<i64>,
+    pub(crate) modifier_keycode: Option<i64>,
+    pub(crate) is_hold: bool,
 }
 
-fn parse_hotkey(hotkey: &str, mode: &str) -> MatchConfig {
+pub(crate) fn parse_hotkey(hotkey: &str, mode: &str) -> MatchConfig {
     let mut flags: u64 = 0;
     let mut key_code: Option<i64> = None;
     let mut modifier_keycode: Option<i64> = None;
@@ -159,6 +159,48 @@ fn try_capture(event_type: u32, key_code: i64, flags: u64) -> Option<(String, St
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_hotkey_ctrl() {
+        let hk = parse_hotkey("ctrl");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_CONTROL);
+        assert!(hk.key_code.is_none());
+        assert!(hk.modifier_keycode.is_none());
+    }
+
+    #[test]
+    fn test_parse_hotkey_rctrl() {
+        let hk = parse_hotkey("rctrl");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_CONTROL);
+        assert_eq!(hk.modifier_keycode, Some(KEYCODE_RCTRL));
+    }
+
+    #[test]
+    fn test_parse_hotkey_combo() {
+        let hk = parse_hotkey("cmd+shift+space");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_COMMAND | CG_EVENT_FLAG_SHIFT);
+        assert_eq!(hk.key_code, Some(49)); // space
+    }
+
+    #[test]
+    fn test_parse_hotkey_rcmd() {
+        let hk = parse_hotkey("rcmd");
+        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_COMMAND);
+        assert_eq!(hk.modifier_keycode, Some(KEYCODE_RCMD));
+    }
+
+    #[test]
+    fn test_parse_hotkey_unknown_gives_zero_flags() {
+        let hk = parse_hotkey("unknown");
+        assert_eq!(hk.modifier_flags, 0);
+        assert!(hk.key_code.is_none());
+        assert!(hk.modifier_keycode.is_none());
     }
 }
 

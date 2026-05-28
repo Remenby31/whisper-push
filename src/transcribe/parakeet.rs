@@ -95,7 +95,7 @@ mod inner {
 }
 
 #[cfg(feature = "parakeet")]
-pub use inner::{is_loaded, load_model, transcribe};
+pub use inner::{is_loaded, load_model, model_dir, transcribe, unload_model};
 
 #[cfg(not(feature = "parakeet"))]
 pub fn load_model() -> anyhow::Result<()> {

@@ -54,12 +54,13 @@ fn run_keyboard_hook(target_vk: u32, is_hold: bool, tx: Sender<Event>) -> anyhow
         MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // Store state in thread-local statics (hook callback can't capture closures)
     static TARGET_VK: OnceLock<u32> = OnceLock::new();
     static IS_HOLD: OnceLock<bool> = OnceLock::new();
     static TX: OnceLock<Sender<Event>> = OnceLock::new();
-    static mut RECORDING: bool = false;
+    static RECORDING: AtomicBool = AtomicBool::new(false);
 
     TARGET_VK.set(target_vk).ok();
     IS_HOLD.set(is_hold).ok();
@@ -81,15 +82,9 @@ fn run_keyboard_hook(target_vk: u32, is_hold: bool, tx: Sender<Event>) -> anyhow
                             if hold {
                                 let _ = tx.send(Event::HotkeyDown);
                             } else {
-                                unsafe {
-                                    if !RECORDING {
-                                        RECORDING = true;
-                                        let _ = tx.send(Event::HotkeyToggle);
-                                    } else {
-                                        RECORDING = false;
-                                        let _ = tx.send(Event::HotkeyToggle);
-                                    }
-                                }
+                                let was_recording = RECORDING.fetch_xor(true, Ordering::Relaxed);
+                                let _ = tx.send(Event::HotkeyToggle);
+                                let _ = was_recording; // toggle flips the state
                             }
                         }
                         x if x == WM_KEYUP || x == WM_SYSKEYUP => {

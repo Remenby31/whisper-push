@@ -6,7 +6,6 @@ pub mod hardware;
 pub mod model_manager;
 pub mod notify;
 pub mod onboarding;
-pub mod overlay;
 pub mod paste;
 pub mod permissions;
 pub mod state;

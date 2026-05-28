@@ -9,7 +9,7 @@ categories = ["multimedia::audio", "accessibility"]
 keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
 
 [features]
-default = []
+default = ["voxtral", "parakeet", "metal"]
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
@@ -40,6 +40,7 @@ enigo = "0.3"            # Cross-platform keystroke simulation (paste)
 arboard = "3"
 
 # System tray + event loop
+# Bumped to fix the macOS Tahoe submenu hover-close bug present in muda 0.16.
 tray-icon = "0.24"
 muda = "0.19"
 winit = "0.30"
@@ -61,7 +62,6 @@ clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # Async / threading
 crossbeam-channel = "0.5"
@@ -106,4 +106,4 @@ evdev = "0.12"
 strip = true
 lto = true
 codegen-units = 1
-opt-level = "s"          # Optimize for size (binary stays small)
+opt-level = 3

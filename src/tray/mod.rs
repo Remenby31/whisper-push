@@ -57,8 +57,7 @@ struct App {
     rx: Receiver<Event>,
     tray: Option<TrayIcon>,
     capture: Arc<Mutex<Option<AudioCapture>>>,
-    hold_pending: Arc<std::sync::atomic::AtomicBool>,
-    hold_delay: f64,
+    pipeline_tx: Option<crossbeam_channel::Sender<Event>>,
     // Menu items (created in init, kept alive)
     menu_items: Option<MenuItems>,
 }
@@ -103,14 +102,12 @@ struct MenuItems {
 
 impl App {
     fn new(state: AppState, rx: Receiver<Event>) -> Self {
-        let hold_delay = state.config.hold_delay;
         let config = Arc::new(Mutex::new(state.config.clone()));
         Self {
             state, config, rx,
             tray: None,
             capture: Arc::new(Mutex::new(None)),
-            hold_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hold_delay,
+            pipeline_tx: None,
             menu_items: None,
         }
     }
@@ -195,9 +192,9 @@ impl App {
         }
 
 
-        // Backend submenu (Whisper local vs Voxtral API)
-        let backend_submenu = Submenu::new("Transcription Engine", true);
+        // Model selector
         let models = crate::model_manager::list_models();
+        let current_backend = crate::model_manager::backend_for_model(&cfg.model);
         let parakeet_status = models.iter().find(|m| m.backend == "parakeet").map(|m| m.is_downloaded).unwrap_or(false);
         let voxtral_status = models.iter().find(|m| m.backend == "voxtral-local").map(|m| m.is_downloaded).unwrap_or(false);
         let whisper_status = models.iter().find(|m| m.backend == "whisper").map(|m| m.is_downloaded).unwrap_or(false);
@@ -209,20 +206,17 @@ impl App {
         };
 
         let backend_parakeet = MenuItem::new(
-            &engine_label("Parakeet TDT v3 (600 MB)", "parakeet", parakeet_status, &cfg.backend),
+            &engine_label("Parakeet TDT v3 (600 MB)", "parakeet", parakeet_status, current_backend),
             true, None,
         );
         let backend_voxtral_local = MenuItem::new(
-            &engine_label("Voxtral Realtime 2602 (2.3 GB, streaming)", "voxtral-local", voxtral_status, &cfg.backend),
+            &engine_label("Voxtral Realtime 2602 (2.3 GB, streaming)", "voxtral-local", voxtral_status, current_backend),
             true, None,
         );
         let backend_whisper = MenuItem::new(
-            &engine_label("Whisper large-v3-turbo (550 MB)", "whisper", whisper_status, &cfg.backend),
+            &engine_label("Whisper large-v3-turbo (550 MB)", "whisper", whisper_status, current_backend),
             true, None,
         );
-        let _ = backend_submenu.append(&backend_parakeet);
-        let _ = backend_submenu.append(&backend_voxtral_local);
-        let _ = backend_submenu.append(&backend_whisper);
 
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
@@ -391,25 +385,22 @@ impl App {
                                 std::thread::sleep(std::time::Duration::from_secs(3));
                                 let audio = cap.stop();
                                 let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len().max(1) as f32).sqrt();
-                                info!("=== TEST: Captured {:.1}s, RMS={:.4} ===", audio.len() as f32 / 16000.0, rms);
+                                info!("=== TEST: Captured {:.1}s, RMS={:.4} ===", audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, rms);
 
-                                if audio.len() < 4800 {
+                                if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
                                     crate::notify::send("Whisper Push", "Test failed: audio too short");
                                     return;
                                 }
-                                if rms < 0.001 {
+                                if rms < crate::audio::capture::SILENCE_RMS_THRESHOLD {
                                     crate::notify::send("Whisper Push", "Test failed: silence (check mic permission)");
                                     return;
                                 }
 
-                                info!("=== TEST: Transcribing with '{}' ===", cfg.backend);
-                                crate::notify::send("Whisper Push", &format!("Transcribing with {}...", cfg.backend));
+                                let bk = crate::model_manager::backend_for_model(&cfg.model);
+                                info!("=== TEST: Transcribing with '{}' ===", bk);
+                                crate::notify::send("Whisper Push", &format!("Transcribing with {}...", bk));
 
-                                let backend = match cfg.backend.as_str() {
-                                    "parakeet" => crate::transcribe::Backend::Parakeet,
-                                    "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-                                    _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-                                };
+                                let backend = crate::model_manager::resolve_backend(&cfg.model);
 
                                 let start = std::time::Instant::now();
                                 match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
@@ -500,9 +491,10 @@ impl App {
                 // Backend selection
                 for (item, backend_value) in &mi.backend_items {
                     if id == &item.id().0 {
-                        // Save config and update active indicator
+                        // Save model in config (backend is derived automatically)
+                        let model_name = crate::model_manager::model_for_backend(backend_value);
                         let mut c = self.config.lock().unwrap();
-                        c.backend = backend_value.clone();
+                        c.model = model_name.to_string();
                         let _ = c.save();
                         drop(c);
                         // Update ● indicator on all items
@@ -516,67 +508,16 @@ impl App {
                             }
                         }
 
-                        // For Voxtral: DON'T load here — WGPU requires same-thread.
-                        // It will lazy-load in the transcription thread on first use.
-                        // For others: load immediately.
-                        let bv = backend_value.clone();
-                        if bv == "voxtral-local" {
-                            // Just check the model file exists
-                            let dir = crate::config::data_dir().join("models").join("voxtral");
-                            if dir.join("voxtral-q4.gguf").exists() {
-                                crate::notify::send("Whisper Push", "Voxtral selected. Will load on first use.");
-                            } else {
-                                crate::notify::send("Whisper Push", "Voxtral model not found. Download it first.");
-                            }
-                        } else {
-                            std::thread::spawn(move || {
-                                info!("Switching to {bv}...");
-                                crate::notify::send("Whisper Push", &format!("Loading {bv}..."));
-                                let load_result = match bv.as_str() {
-                                    "parakeet" => crate::transcribe::parakeet::load_model(),
-                                    _ => crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin"),
-                                };
-                                match load_result {
-                                    Ok(()) => crate::notify::send("Whisper Push", &format!("{bv} ready!")),
-                                    Err(e) => crate::notify::send("Whisper Push", &format!("Failed: {e}")),
-                                }
-                            });
+                        // Send LoadModel to pipeline thread — it handles unloading
+                        // old models and loading the new one on its own thread
+                        // (required for WGPU/Metal same-thread constraint).
+                        if let Some(ref tx) = self.pipeline_tx {
+                            let _ = tx.send(Event::LoadModel(model_name.to_string()));
                         }
+                        crate::notify::send("Whisper Push", &format!("Loading {}...", backend_value));
                         return;
                     }
                 }
-            }
-
-            Event::HotkeyDown => {
-                if self.state.current() != State::Idle { return; }
-                let device = self.config.lock().unwrap().input_device.clone();
-                match AudioCapture::start(&device) {
-                    Ok(cap) => {
-                        *self.capture.lock().unwrap() = Some(cap);
-                        self.hold_pending.store(true, std::sync::atomic::Ordering::Relaxed);
-                        let pending = self.hold_pending.clone();
-                        let tx = self.state.tx.clone();
-                        let delay_ms = (self.hold_delay * 1000.0) as u64;
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-                            if pending.load(std::sync::atomic::Ordering::Relaxed) {
-                                pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                                let _ = tx.send(Event::StateChanged(State::Recording));
-                            }
-                        });
-                    }
-                    Err(e) => warn!("Capture failed: {e}"),
-                }
-            }
-
-            Event::HotkeyUp => {
-                if self.hold_pending.load(std::sync::atomic::Ordering::Relaxed) {
-                    self.hold_pending.store(false, std::sync::atomic::Ordering::Relaxed);
-                    self.capture.lock().unwrap().take();
-                    return;
-                }
-                if self.state.current() != State::Recording { return; }
-                self.finish_recording();
             }
 
             Event::HotkeyToggle => {
@@ -716,7 +657,7 @@ impl App {
         }
 
         let audio = self.capture.lock().unwrap().take().map(|c| c.stop()).unwrap_or_default();
-        if audio.len() < 4800 {
+        if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
             self.state.set(State::Idle);
             mi.toggle_item.set_text("Start Recording");
             mi.toggle_item.set_enabled(true);
@@ -726,11 +667,7 @@ impl App {
 
         let tx = self.state.tx.clone();
         let cfg = self.config.lock().unwrap().clone();
-        let backend = match cfg.backend.as_str() {
-            "parakeet" => crate::transcribe::Backend::Parakeet,
-            "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-            _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-        };
+        let backend = crate::model_manager::resolve_backend(&cfg.model);
         std::thread::spawn(move || {
             match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
                 Ok(text) if !text.is_empty() => { let _ = tx.send(Event::Transcribed(text)); }
@@ -763,32 +700,9 @@ impl ApplicationHandler<UserEvent> for App {
             // This avoids modifying menu items after creation (which closes
             // the menu on macOS Tahoe).
             // Load Whisper on main thread (always needed as fallback).
-            // Voxtral/Parakeet are loaded LAZILY in the transcription thread
-            // because WGPU/Metal doesn't support cross-thread model usage.
-            let backend = self.state.config.backend.clone();
-            info!("Config backend: {backend}");
-            if backend != "voxtral-local" {
-                // Non-Voxtral backends can load on main thread
-                let load_result = match backend.as_str() {
-                    "parakeet" => crate::transcribe::parakeet::load_model(),
-                    _ => crate::transcribe::load_model(&self.state.config.model),
-                };
-                match load_result {
-                    Ok(()) => info!("{backend} model loaded"),
-                    Err(e) => {
-                        tracing::error!("{backend} load failed: {e}, falling back to whisper");
-                        let _ = crate::transcribe::load_model(&self.state.config.model);
-                    }
-                }
-            } else {
-                // Voxtral: don't load Whisper (its Metal cleanup crashes on exit).
-                // Voxtral loads lazy in the pipeline thread (WGPU requires same-thread).
-                info!("Voxtral selected — will load in transcription thread (WGPU requires same-thread)");
-            }
             self.state.set(State::Idle);
-
-            // Create tray icon AFTER model is loaded (menu is born in "Ready" state)
             self.create_tray();
+            let startup_model = self.state.config.model.clone();
 
             // Wake the macOS run loop so the icon appears immediately
             #[cfg(target_os = "macos")]
@@ -804,16 +718,20 @@ impl ApplicationHandler<UserEvent> for App {
             let hotkey_cfg = self.state.config.hotkey.clone();
             let hotkey_mode = self.state.config.hotkey_mode.clone();
             let pipeline_cfg = self.config.clone();
-            let (htx, hrx) = crossbeam_channel::unbounded();
-            let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, htx);
+            let (ptx, prx) = crossbeam_channel::unbounded();
+            self.pipeline_tx = Some(ptx.clone());
+            let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx);
 
-            // Pipeline thread: hotkey events → capture → transcribe → paste
+            // Pipeline thread: hotkey events + model load → capture → transcribe → paste
             std::thread::spawn(move || {
-                pipeline_loop(hrx, pipeline_cfg);
+                pipeline_loop(prx, pipeline_cfg);
             });
 
-            // No startup notification — NSUserNotificationCenter delivery
-            // can disrupt the macOS run loop and close the tray menu.
+            // Load model on the pipeline thread (all backends, including Voxtral/WGPU)
+            if let Some(ref tx) = self.pipeline_tx {
+                let _ = tx.send(Event::LoadModel(startup_model));
+            }
+
             info!("Ready! Hold Control to dictate.");
         }
 
@@ -889,7 +807,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let sound_feedback = cfg.sound_feedback;
                 // Real-time streaming is too slow (re-encodes all audio each chunk).
                 // Use batch mode for now + progressive typing for visual effect.
-                let is_voxtral_streaming = cfg.backend == "voxtral-local";
+                let is_voxtral_streaming = crate::model_manager::backend_for_model(&cfg.model) == "voxtral-local";
                 drop(cfg);
 
                 // Immediate audio acknowledgement — a 70 ms blip the moment the
@@ -1014,75 +932,17 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 
             Ok(Event::HotkeyUp) => {
                 if hold_pending.load(Ordering::Relaxed) {
-                    // Quick tap — discard
                     hold_pending.store(false, Ordering::Relaxed);
                     capture.lock().unwrap().take();
                     continue;
                 }
                 if !recording.load(Ordering::Relaxed) { continue; }
                 recording.store(false, Ordering::Relaxed);
-
-                let cfg = config.lock().unwrap().clone();
-                if cfg.sound_feedback {
-                    crate::audio::playback::play_sound("stop");
-                }
-
-                let audio = capture.lock().unwrap().take()
-                    .map(|c| c.stop())
-                    .unwrap_or_default();
-
-                if audio.len() < 4800 {
-                    info!("Too short, skipping");
-                    continue;
-                }
-
-                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
-                info!("Processing {:.1}s of audio with backend '{}' (RMS={:.4})...", audio.len() as f32 / 16000.0, cfg.backend, rms);
-
-                let backend = match cfg.backend.as_str() {
-                    "parakeet" => crate::transcribe::Backend::Parakeet,
-                    "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-                    _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-                };
-
-                let start = std::time::Instant::now();
-                // Use catch_unwind to catch WGPU/Metal panics from cross-thread access
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend)
-                }));
-                let result = match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
-                            else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
-                            else { "unknown panic".into() };
-                        Err(anyhow::anyhow!("Transcription panicked: {msg}"))
-                    }
-                };
-                match result {
-                    Ok(text) if !text.is_empty() => {
-                        info!("Pasting ({:.2}s): '{}'", start.elapsed().as_secs_f64(), if text.len() > 80 { &text[..80] } else { &text });
-                        if let Err(e) = crate::paste::paste_text(&text) {
-                            tracing::error!("Paste failed: {e}");
-                        }
-                        if cfg.notifications {
-                            let preview = if text.len() > 50 {
-                                format!("{}...", &text[..50])
-                            } else { text };
-                            crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
-                        }
-                    }
-                    Ok(_) => info!("No speech detected"),
-                    Err(e) => {
-                        tracing::error!("Transcription: {e}");
-                        crate::notify::send("Whisper Push", &format!("Error: {e}"));
-                    }
-                }
+                stop_and_transcribe(&config, &capture);
             }
 
             Ok(Event::HotkeyToggle) => {
                 if !recording.load(Ordering::Relaxed) {
-                    // Start recording
                     let device = config.lock().unwrap().input_device.clone();
                     match crate::audio::capture::AudioCapture::start(&device) {
                         Ok(cap) => {
@@ -1096,39 +956,40 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                         Err(e) => warn!("Capture failed: {e}"),
                     }
                 } else {
-                    // Stop and transcribe (same as HotkeyUp)
                     recording.store(false, Ordering::Relaxed);
-                    let cfg = config.lock().unwrap().clone();
-                    if cfg.sound_feedback {
-                        crate::audio::playback::play_sound("stop");
-                    }
-                    let audio = capture.lock().unwrap().take()
-                        .map(|c| c.stop())
-                        .unwrap_or_default();
-                    if audio.len() < 4800 { continue; }
+                    stop_and_transcribe(&config, &capture);
+                }
+            }
 
-                    let backend = match cfg.backend.as_str() {
-                        "parakeet" => crate::transcribe::Backend::Parakeet,
-                        "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
-                        _ => crate::transcribe::Backend::WhisperLocal(cfg.model.clone()),
-                    };
-                    match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
-                        Ok(text) if !text.is_empty() => {
-                            let _ = crate::paste::paste_text(&text);
-                            if cfg.notifications {
-                                crate::notify::send("Whisper Push", &format!("Typed: {}", &text));
-                            }
-                        }
-                        Ok(_) => info!("No speech"),
-                        Err(e) => {
-                        tracing::error!("Transcription: {e}");
-                        crate::notify::send("Whisper Push", &format!("Error: {e}"));
+            Ok(Event::LoadModel(model_name)) => {
+                info!("Loading model '{model_name}' on pipeline thread...");
+                // Unload all backends
+                crate::transcribe::unload_model();
+                crate::transcribe::parakeet::unload_model();
+                crate::transcribe::voxtral_local::unload_model();
+
+                let backend = crate::model_manager::backend_for_model(&model_name);
+                let load_result = match backend {
+                    "voxtral-local" => {
+                        let dir = crate::config::data_dir().join("models").join("voxtral");
+                        crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
                     }
+                    "parakeet" => crate::transcribe::parakeet::load_model(),
+                    _ => crate::transcribe::load_model(&model_name),
+                };
+                match load_result {
+                    Ok(()) => {
+                        info!("{backend} model loaded");
+                        crate::notify::send("Whisper Push", &format!("{backend} ready!"));
+                    }
+                    Err(e) => {
+                        tracing::error!("{backend} load failed: {e}");
+                        crate::notify::send("Whisper Push", &format!("Failed to load {backend}: {e}"));
                     }
                 }
             }
 
-            Ok(_) => {} // Ignore other events
+            Ok(_) => {}
             Err(_) => break,
         }
     }
@@ -1150,7 +1011,66 @@ fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
     }
 }
 
-fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
+/// Stop capture, transcribe audio, and paste result.
+fn stop_and_transcribe(
+    config: &Arc<Mutex<Config>>,
+    capture: &Arc<Mutex<Option<crate::audio::capture::AudioCapture>>>,
+) {
+    let cfg = config.lock().unwrap().clone();
+    if cfg.sound_feedback {
+        crate::audio::playback::play_sound("stop");
+    }
+
+    let audio = capture.lock().unwrap().take()
+        .map(|c| c.stop())
+        .unwrap_or_default();
+
+    if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
+        info!("Too short, skipping");
+        return;
+    }
+
+    let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
+    let backend = crate::model_manager::resolve_backend(&cfg.model);
+    info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...",
+        audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, backend, rms);
+
+    let start = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend)
+    }));
+    let result = match result {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
+                else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
+                else { "unknown panic".into() };
+            Err(anyhow::anyhow!("Transcription panicked: {msg}"))
+        }
+    };
+    match result {
+        Ok(text) if !text.is_empty() => {
+            info!("Pasting ({:.2}s): '{}'", start.elapsed().as_secs_f64(),
+                if text.len() > 80 { &text[..80] } else { &text });
+            if let Err(e) = crate::paste::paste_text(&text) {
+                tracing::error!("Paste failed: {e}");
+            }
+            if cfg.notifications {
+                let preview = if text.len() > 50 {
+                    format!("{}...", &text[..50])
+                } else { text };
+                crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
+            }
+        }
+        Ok(_) => info!("No speech detected"),
+        Err(e) => {
+            tracing::error!("Transcription: {e}");
+            crate::notify::send("Whisper Push", &format!("Error: {e}"));
+        }
+    }
+}
+
+pub fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
     let symbols: &[(&str, &str)] = &[
         ("cmd", "\u{2318}"), ("shift", "\u{21e7}"), ("alt", "\u{2325}"), ("ctrl", "\u{2303}"),
         ("rctrl", "\u{2303}R"), ("rcmd", "\u{2318}R"), ("ralt", "\u{2325}R"), ("rshift", "\u{21e7}R"),
