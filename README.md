@@ -67,13 +67,23 @@ No cloud, no account, no latency. A **35MB native binary** that transcribes spee
 
 ### macOS (Apple Silicon)
 
+**Easiest — download the DMG** (the Whisper model is bundled, so first launch is instant):
+
+1. Grab **[Whisper-Push-macOS-arm64.dmg](https://github.com/Remenby31/whisper-push/releases/latest)** (~528 MB)
+2. Open it and drag **Whisper Push** to **Applications**
+3. Launch from Launchpad / Applications — a guided setup opens to walk you through the three macOS permissions (Microphone, Accessibility, Input Monitoring). It detects when you toggle each one and restarts the app automatically.
+
+> Ad-hoc signed for now. On first launch macOS shows "unverified" — open **System Settings → Privacy & Security → Open Anyway**, or, if you prefer the command line: `xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"`. A notarized build (Developer ID) is on the roadmap.
+
+**Build from source instead:**
+
 ```bash
 git clone https://github.com/Remenby31/whisper-push.git
 cd whisper-push
-make deploy    # build + bundle + sign + launch
+make install SIGN_ID="-"   # build + bundle + ad-hoc sign + copy to /Applications + login autostart
 ```
 
-The model (~550MB) downloads automatically on first use.
+The model (~550MB) downloads automatically on first run when built from source (the bundled-model is only in the DMG path).
 
 ### Linux
 
@@ -85,9 +95,12 @@ curl -sSL https://raw.githubusercontent.com/Remenby31/whisper-push/main/scripts/
 
 | Action | How |
 |---|---|
-| **Dictate** | Hold **Control** → speak → release |
-| **Settings** | Click the menu bar icon |
-| **Switch engine** | Menu → select engine |
+| **Dictate** | Hold **Control** → speak → release. Menu-bar icon turns citron while you speak. |
+| **Settings** | Click the menu-bar icon — submenus for **Engine**, **Hotkey**, **Input Device**, **Output Device**, **Permissions** |
+| **Change hotkey** | Menu → **Hotkey** → pick a preset, or **Set Custom Hotkey…** then press any combo |
+| **Switch engine** | Menu → **Engine** → Parakeet / Voxtral / Whisper |
+| **Pick microphone / output** | Menu → **Input Device** / **Output Device** |
+| **Fix permissions** | Menu → **Permissions → ⚙ Run Guided Setup…** (opens the right Settings panes + auto-restarts) |
 | **Test** | Menu → "Test (record 3s + transcribe)" |
 | **Check setup** | `whisper-push --doctor` |
 | **Transcribe file** | `whisper-push --transcribe audio.mp3` |
