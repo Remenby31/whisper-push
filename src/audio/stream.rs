@@ -7,7 +7,7 @@ use rubato::Resampler;
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use super::{SAMPLE_RATE, RESAMPLE_CHUNK_SIZE};
+use super::{RESAMPLE_CHUNK_SIZE, SAMPLE_RATE};
 
 /// A chunk of audio ready for transcription.
 #[derive(Debug, Clone)]
@@ -34,7 +34,9 @@ impl StreamingCapture {
         info!(
             "Streaming from '{}' @ {}Hz {}ch, chunk={}ms",
             device.name().unwrap_or_default(),
-            device_sr, device_channels, chunk_duration_ms
+            device_sr,
+            device_channels,
+            chunk_duration_ms
         );
 
         let (chunk_tx, chunk_rx) = crossbeam_channel::bounded(32);
@@ -42,7 +44,8 @@ impl StreamingCapture {
         let chunk_size_target = (SAMPLE_RATE * chunk_duration_ms / 1000) as usize;
         let resampler = super::create_resampler(device_sr)?;
         let acc_buf: Arc<std::sync::Mutex<Vec<f32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let resample_acc: Arc<std::sync::Mutex<Vec<f32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resample_acc: Arc<std::sync::Mutex<Vec<f32>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let stream = device.build_input_stream(
             &config.into(),

@@ -1,5 +1,5 @@
-use crossbeam_channel::Sender;
 use crate::state::Event;
+use crossbeam_channel::Sender;
 use tracing::{debug, info, warn};
 
 /// Key codes for common modifier keys (evdev).
@@ -33,8 +33,8 @@ fn parse_key(hotkey: &str) -> Option<u16> {
 /// Reads from /dev/input/event* devices directly (works on both X11 and Wayland).
 /// Requires the user to be in the 'input' group.
 pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> {
-    let target_key = parse_key(hotkey)
-        .ok_or_else(|| anyhow::anyhow!("Unknown hotkey: {hotkey}"))?;
+    let target_key =
+        parse_key(hotkey).ok_or_else(|| anyhow::anyhow!("Unknown hotkey: {hotkey}"))?;
     let is_hold = mode == "hold";
 
     info!("Linux hotkey listener: evdev key={target_key} mode={mode}");
@@ -58,7 +58,11 @@ fn listen_evdev(target_key: u16, is_hold: bool, tx: Sender<Event>) -> anyhow::Re
                 .is_some_and(|keys| keys.contains(Key::KEY_A))
         })
         .map(|(path, dev)| {
-            info!("Found keyboard: {} ({})", dev.name().unwrap_or("?"), path.display());
+            info!(
+                "Found keyboard: {} ({})",
+                dev.name().unwrap_or("?"),
+                path.display()
+            );
             dev
         })
         .collect::<Vec<_>>();

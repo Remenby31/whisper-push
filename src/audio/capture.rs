@@ -4,7 +4,7 @@ use rubato::Resampler;
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
-use super::{SAMPLE_RATE, RESAMPLE_CHUNK_SIZE};
+use super::{RESAMPLE_CHUNK_SIZE, SAMPLE_RATE};
 
 pub const SILENCE_RMS_THRESHOLD: f32 = 0.001;
 
@@ -80,9 +80,17 @@ impl AudioCapture {
             (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt()
         };
         let max = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-        info!("Captured {:.1}s of audio ({} samples, RMS={:.6}, max={:.6})", duration, audio.len(), rms, max);
+        info!(
+            "Captured {:.1}s of audio ({} samples, RMS={:.6}, max={:.6})",
+            duration,
+            audio.len(),
+            rms,
+            max
+        );
         if rms < SILENCE_RMS_THRESHOLD {
-            warn!("Audio is silence — microphone may not be captured. Check permission in System Settings → Privacy → Microphone");
+            warn!(
+                "Audio is silence — microphone may not be captured. Check permission in System Settings → Privacy → Microphone"
+            );
         }
         audio
     }

@@ -3,7 +3,7 @@
 
 #[cfg(feature = "voxtral")]
 mod inner {
-    use anyhow::{bail, Context, Result};
+    use anyhow::{Context, Result, bail};
     use burn::backend::Wgpu;
     use burn::tensor::Tensor;
     use std::path::PathBuf;
@@ -11,13 +11,13 @@ mod inner {
     use tracing::info;
 
     use voxtral_mini_realtime::audio::{
-        pad::{pad_audio, PadConfig},
-        mel::{MelConfig, MelSpectrogram},
         AudioBuffer,
+        mel::{MelConfig, MelSpectrogram},
+        pad::{PadConfig, pad_audio},
     };
+    use voxtral_mini_realtime::gguf::{loader::Q4ModelLoader, model::Q4VoxtralModel};
     use voxtral_mini_realtime::models::time_embedding::TimeEmbedding;
     use voxtral_mini_realtime::tokenizer::VoxtralTokenizer;
-    use voxtral_mini_realtime::gguf::{loader::Q4ModelLoader, model::Q4VoxtralModel};
 
     type Backend = Wgpu;
 
@@ -48,7 +48,8 @@ mod inner {
         let model = loader.load(&device).context("Failed to load Q4 model")?;
 
         info!("Loading tokenizer from {}...", tokenizer_path.display());
-        let tokenizer = VoxtralTokenizer::from_file(&tokenizer_path).context("Failed to load tokenizer")?;
+        let tokenizer =
+            VoxtralTokenizer::from_file(&tokenizer_path).context("Failed to load tokenizer")?;
 
         let mel_extractor = MelSpectrogram::new(MelConfig::voxtral());
         let pad_config = PadConfig::voxtral();
@@ -56,7 +57,11 @@ mod inner {
         let t_embed = time_embed.embed::<Backend>(6.0, &device);
 
         *VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(VoxtralState {
-            model, tokenizer, mel_extractor, pad_config, t_embed,
+            model,
+            tokenizer,
+            mel_extractor,
+            pad_config,
+            t_embed,
         });
 
         // Warmup GPU shaders with 1s of silence
@@ -68,7 +73,9 @@ mod inner {
             let padded = pad_audio(&silence, &state.pad_config);
             let mel = state.mel_extractor.compute_log(&padded.samples);
             if let Some((mel_tensor, _, _)) = mel_to_tensor(&mel) {
-                let _ = state.model.transcribe_streaming(mel_tensor, state.t_embed.clone());
+                let _ = state
+                    .model
+                    .transcribe_streaming(mel_tensor, state.t_embed.clone());
             }
         }
 
@@ -87,14 +94,18 @@ mod inner {
 
     pub fn transcribe(audio: &[f32]) -> Result<String> {
         let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
-        let state = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Voxtral not loaded"))?;
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Voxtral not loaded"))?;
 
         let audio_buf = AudioBuffer::new(audio.to_vec(), 16000);
         let padded = pad_audio(&audio_buf, &state.pad_config);
         let mel = state.mel_extractor.compute_log(&padded.samples);
         let (mel_tensor, _, _) = mel_to_tensor(&mel).ok_or_else(|| anyhow::anyhow!("Empty mel"))?;
 
-        let generated = state.model.transcribe_streaming(mel_tensor, state.t_embed.clone());
+        let generated = state
+            .model
+            .transcribe_streaming(mel_tensor, state.t_embed.clone());
         let text = decode_tokens(&generated, &state.tokenizer)?;
         info!("Voxtral: '{}'", text.trim());
         Ok(text.trim().to_string())
@@ -103,22 +114,35 @@ mod inner {
     /// Helper: mel frames → Burn tensor [1, n_mels, n_frames]
     fn mel_to_tensor(mel: &[Vec<f32>]) -> Option<(Tensor<Backend, 3>, usize, usize)> {
         let nf = mel.len();
-        if nf == 0 { return None; }
+        if nf == 0 {
+            return None;
+        }
         let nm = mel[0].len();
         let mut mt = vec![vec![0.0f32; nf]; nm];
         for (fi, frame) in mel.iter().enumerate() {
-            for (mi, &v) in frame.iter().enumerate() { mt[mi][fi] = v; }
+            for (mi, &v) in frame.iter().enumerate() {
+                mt[mi][fi] = v;
+            }
         }
         let flat: Vec<f32> = mt.into_iter().flatten().collect();
         let dev: burn::backend::wgpu::WgpuDevice = Default::default();
-        Some((Tensor::from_data(burn::tensor::TensorData::new(flat, [1, nm, nf]), &dev), nm, nf))
+        Some((
+            Tensor::from_data(burn::tensor::TensorData::new(flat, [1, nm, nf]), &dev),
+            nm,
+            nf,
+        ))
     }
 
     /// Helper: decode token IDs (>= 1000) to text
     fn decode_tokens(tokens: &[i32], tokenizer: &VoxtralTokenizer) -> Result<String> {
-        let text_tokens: Vec<u32> = tokens.iter()
-            .filter(|&&t| t >= 1000).map(|&t| t as u32).collect();
-        if text_tokens.is_empty() { return Ok(String::new()); }
+        let text_tokens: Vec<u32> = tokens
+            .iter()
+            .filter(|&&t| t >= 1000)
+            .map(|&t| t as u32)
+            .collect();
+        if text_tokens.is_empty() {
+            return Ok(String::new());
+        }
         tokenizer.decode(&text_tokens).context("Decode failed")
     }
 
@@ -127,11 +151,11 @@ mod inner {
     /// persists decoder KV cache to only decode NEW positions (~5ms/token).
     pub mod streaming {
         use anyhow::{Context, Result};
-        use tracing::info;
-        use voxtral_mini_realtime::audio::mel::{MelConfig, MelSpectrogram};
-        use voxtral_mini_realtime::audio::pad::{pad_audio, PadConfig};
-        use voxtral_mini_realtime::audio::AudioBuffer;
         use burn::prelude::ElementConversion;
+        use tracing::info;
+        use voxtral_mini_realtime::audio::AudioBuffer;
+        use voxtral_mini_realtime::audio::mel::{MelConfig, MelSpectrogram};
+        use voxtral_mini_realtime::audio::pad::{PadConfig, pad_audio};
 
         use super::VOXTRAL;
 
@@ -141,7 +165,8 @@ mod inner {
             mel_extractor: MelSpectrogram,
             pad_config: PadConfig,
             all_audio: Vec<f32>,
-            decoder_cache: Option<voxtral_mini_realtime::models::layers::LayerCaches<burn::backend::Wgpu>>,
+            decoder_cache:
+                Option<voxtral_mini_realtime::models::layers::LayerCaches<burn::backend::Wgpu>>,
             generated_tokens: Vec<i32>,
             decoded_positions: usize,
             prefill_done: bool,
@@ -170,14 +195,16 @@ mod inner {
             }
 
             let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
-            let state = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Not loaded"))?;
+            let state = guard
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Not loaded"))?;
 
             // Encode ALL accumulated audio (~50ms on M4 Pro Metal)
             let audio_buf = AudioBuffer::new(session.all_audio.clone(), 16000);
             let padded = pad_audio(&audio_buf, &session.pad_config);
             let mel = session.mel_extractor.compute_log(&padded.samples);
-            let (mel_tensor, _, _) = super::mel_to_tensor(&mel)
-                .ok_or_else(|| anyhow::anyhow!("Empty mel"))?;
+            let (mel_tensor, _, _) =
+                super::mel_to_tensor(&mel).ok_or_else(|| anyhow::anyhow!("Empty mel"))?;
             let audio_embeds = state.model.encode_audio(mel_tensor);
             let [_, seq_len, d_model] = audio_embeds.dims();
 
@@ -187,13 +214,17 @@ mod inner {
 
             let mut new_tokens = Vec::new();
 
-            if seq_len < PREFIX_LEN { return Ok(Vec::new()); }
+            if seq_len < PREFIX_LEN {
+                return Ok(Vec::new());
+            }
 
             // Full re-decode each time (encoder embeddings change when more audio is added).
             // Use transcribe_streaming which handles prefill + decode internally.
-            let (mel2, _, _) = super::mel_to_tensor(&mel)
-                .ok_or_else(|| anyhow::anyhow!("Empty mel"))?;
-            let all_tokens = state.model.transcribe_streaming(mel2, state.t_embed.clone());
+            let (mel2, _, _) =
+                super::mel_to_tensor(&mel).ok_or_else(|| anyhow::anyhow!("Empty mel"))?;
+            let all_tokens = state
+                .model
+                .transcribe_streaming(mel2, state.t_embed.clone());
 
             // Extract only NEW tokens (diff with previous run)
             let prev_count = session.decoded_positions;
@@ -208,16 +239,28 @@ mod inner {
             session.prefill_done = true;
 
             let text = super::decode_tokens(&new_tokens, &state.tokenizer)?;
-            if text.trim().is_empty() { return Ok(Vec::new()); }
-            let words: Vec<String> = text.trim().split_whitespace().map(|s| s.to_string()).collect();
-            if !words.is_empty() { info!("Streaming: +{} words: {:?}", words.len(), words); }
+            if text.trim().is_empty() {
+                return Ok(Vec::new());
+            }
+            let words: Vec<String> = text
+                .trim()
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+            if !words.is_empty() {
+                info!("Streaming: +{} words: {:?}", words.len(), words);
+            }
             Ok(words)
         }
 
         pub fn finish(session: StreamingSession) -> Result<String> {
             let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
             let state = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Unloaded"))?;
-            let all: Vec<i32> = session.generated_tokens.into_iter().skip(PREFIX_LEN).collect();
+            let all: Vec<i32> = session
+                .generated_tokens
+                .into_iter()
+                .skip(PREFIX_LEN)
+                .collect();
             let text = super::decode_tokens(&all, &state.tokenizer)?;
             info!("Streaming finished: '{}'", text.trim());
             Ok(text.trim().to_string())
@@ -226,24 +269,36 @@ mod inner {
 }
 
 #[cfg(feature = "voxtral")]
-pub use inner::{load_model, unload_model, is_loaded, transcribe};
-#[cfg(feature = "voxtral")]
 pub use inner::streaming;
+#[cfg(feature = "voxtral")]
+pub use inner::{is_loaded, load_model, transcribe, unload_model};
 
 #[cfg(not(feature = "voxtral"))]
 pub mod streaming {
     pub struct StreamingSession;
-    pub fn start() -> anyhow::Result<StreamingSession> { anyhow::bail!("Voxtral not compiled") }
-    pub fn feed_chunk(_s: &mut StreamingSession, _a: &[f32]) -> anyhow::Result<Vec<String>> { anyhow::bail!("Voxtral not compiled") }
-    pub fn finish(_s: StreamingSession) -> anyhow::Result<String> { anyhow::bail!("Voxtral not compiled") }
+    pub fn start() -> anyhow::Result<StreamingSession> {
+        anyhow::bail!("Voxtral not compiled")
+    }
+    pub fn feed_chunk(_s: &mut StreamingSession, _a: &[f32]) -> anyhow::Result<Vec<String>> {
+        anyhow::bail!("Voxtral not compiled")
+    }
+    pub fn finish(_s: StreamingSession) -> anyhow::Result<String> {
+        anyhow::bail!("Voxtral not compiled")
+    }
 }
 
 #[cfg(not(feature = "voxtral"))]
-pub fn load_model(_: &str) -> anyhow::Result<()> { anyhow::bail!("Voxtral not compiled") }
+pub fn load_model(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Voxtral not compiled")
+}
 #[cfg(not(feature = "voxtral"))]
-pub fn is_loaded() -> bool { false }
+pub fn is_loaded() -> bool {
+    false
+}
 #[cfg(not(feature = "voxtral"))]
 #[allow(dead_code)]
 pub fn unload_model() {}
 #[cfg(not(feature = "voxtral"))]
-pub fn transcribe(_: &[f32]) -> anyhow::Result<String> { anyhow::bail!("Voxtral not compiled") }
+pub fn transcribe(_: &[f32]) -> anyhow::Result<String> {
+    anyhow::bail!("Voxtral not compiled")
+}

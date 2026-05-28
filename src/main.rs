@@ -1,8 +1,8 @@
 mod audio;
-mod config;
-mod hotkey;
 mod autostart;
+mod config;
 mod hardware;
+mod hotkey;
 mod model_manager;
 mod notify;
 mod onboarding;
@@ -87,15 +87,11 @@ fn main() -> Result<()> {
 }
 
 fn init_logging() {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    fmt().with_env_filter(filter).with_target(false).init();
 }
 
 mod doctor {
@@ -112,12 +108,29 @@ mod doctor {
 
         // Compiled features
         let mut features = Vec::new();
-        if cfg!(feature = "metal") { features.push("metal"); }
-        if cfg!(feature = "cuda") { features.push("cuda"); }
-        if cfg!(feature = "vulkan") { features.push("vulkan"); }
-        if cfg!(feature = "parakeet") { features.push("parakeet"); }
-        if cfg!(feature = "voxtral") { features.push("voxtral"); }
-        println!("Features:  {}", if features.is_empty() { "none".into() } else { features.join(", ") });
+        if cfg!(feature = "metal") {
+            features.push("metal");
+        }
+        if cfg!(feature = "cuda") {
+            features.push("cuda");
+        }
+        if cfg!(feature = "vulkan") {
+            features.push("vulkan");
+        }
+        if cfg!(feature = "parakeet") {
+            features.push("parakeet");
+        }
+        if cfg!(feature = "voxtral") {
+            features.push("voxtral");
+        }
+        println!(
+            "Features:  {}",
+            if features.is_empty() {
+                "none".into()
+            } else {
+                features.join(", ")
+            }
+        );
 
         // Audio devices (with timeout — CoreAudio can hang without NSApp)
         println!("\nInput devices:");
@@ -166,7 +179,10 @@ mod doctor {
             let perms = crate::permissions::check_all();
             println!("\nMicrophone:       {}", perms.microphone.label());
             println!("Accessibility:    {}", perms.accessibility.label());
-            println!("Input Monitoring: {}  (required for the global hotkey)", perms.input_monitoring.label());
+            println!(
+                "Input Monitoring: {}  (required for the global hotkey)",
+                perms.input_monitoring.label()
+            );
         }
 
         println!("\nAll checks complete.");
@@ -185,7 +201,11 @@ mod cli_transcribe {
         // Load audio
         println!("Loading {}...", path.display());
         let samples = crate::audio::decode::load_audio_file(path)?;
-        println!("Audio: {:.1}s ({} samples @ 16kHz)", samples.len() as f32 / 16000.0, samples.len());
+        println!(
+            "Audio: {:.1}s ({} samples @ 16kHz)",
+            samples.len() as f32 / 16000.0,
+            samples.len()
+        );
 
         // Load model
         let cfg = crate::config::Config::load()?;
@@ -214,8 +234,8 @@ mod cli_transcribe {
 }
 
 mod app {
-    use anyhow::Result;
     use crate::config::Config;
+    use anyhow::Result;
 
     pub fn run(mut cfg: Config) -> Result<()> {
         // Ensure single instance

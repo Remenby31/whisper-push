@@ -1,5 +1,5 @@
-use crossbeam_channel::Sender;
 use crate::state::Event;
+use crossbeam_channel::Sender;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info};
@@ -26,13 +26,46 @@ const KEYCODE_RCMD: i64 = 54;
 /// Named non-modifier keys ↔ macOS virtual keycodes. Shared by the parser and
 /// the capture logic so custom toggle hotkeys round-trip correctly.
 const KEYCODES: &[(&str, i64)] = &[
-    ("a", 0), ("b", 11), ("c", 8), ("d", 2), ("e", 14), ("f", 3), ("g", 5),
-    ("h", 4), ("i", 34), ("j", 38), ("k", 40), ("l", 37), ("m", 46), ("n", 45),
-    ("o", 31), ("p", 35), ("q", 12), ("r", 15), ("s", 1), ("t", 17), ("u", 32),
-    ("v", 9), ("w", 13), ("x", 7), ("y", 16), ("z", 6),
-    ("0", 29), ("1", 18), ("2", 19), ("3", 20), ("4", 21),
-    ("5", 23), ("6", 22), ("7", 26), ("8", 28), ("9", 25),
-    ("space", 49), ("return", 36), ("tab", 48), ("escape", 53),
+    ("a", 0),
+    ("b", 11),
+    ("c", 8),
+    ("d", 2),
+    ("e", 14),
+    ("f", 3),
+    ("g", 5),
+    ("h", 4),
+    ("i", 34),
+    ("j", 38),
+    ("k", 40),
+    ("l", 37),
+    ("m", 46),
+    ("n", 45),
+    ("o", 31),
+    ("p", 35),
+    ("q", 12),
+    ("r", 15),
+    ("s", 1),
+    ("t", 17),
+    ("u", 32),
+    ("v", 9),
+    ("w", 13),
+    ("x", 7),
+    ("y", 16),
+    ("z", 6),
+    ("0", 29),
+    ("1", 18),
+    ("2", 19),
+    ("3", 20),
+    ("4", 21),
+    ("5", 23),
+    ("6", 22),
+    ("7", 26),
+    ("8", 28),
+    ("9", 25),
+    ("space", 49),
+    ("return", 36),
+    ("tab", 48),
+    ("escape", 53),
 ];
 
 fn key_name_to_code(name: &str) -> Option<i64> {
@@ -56,16 +89,27 @@ const MODIFIERS: &[(i64, u64, &str)] = &[
 ];
 
 fn modifier_by_keycode(code: i64) -> Option<(u64, &'static str)> {
-    MODIFIERS.iter().find(|(kc, _, _)| *kc == code).map(|(_, f, n)| (*f, *n))
+    MODIFIERS
+        .iter()
+        .find(|(kc, _, _)| *kc == code)
+        .map(|(_, f, n)| (*f, *n))
 }
 
 /// Modifier names for the generic flags present (used to build a toggle string).
 fn flag_mod_names(flags: u64) -> Vec<&'static str> {
     let mut v = Vec::new();
-    if flags & CG_EVENT_FLAG_CONTROL != 0 { v.push("ctrl"); }
-    if flags & CG_EVENT_FLAG_ALTERNATE != 0 { v.push("alt"); }
-    if flags & CG_EVENT_FLAG_SHIFT != 0 { v.push("shift"); }
-    if flags & CG_EVENT_FLAG_COMMAND != 0 { v.push("cmd"); }
+    if flags & CG_EVENT_FLAG_CONTROL != 0 {
+        v.push("ctrl");
+    }
+    if flags & CG_EVENT_FLAG_ALTERNATE != 0 {
+        v.push("alt");
+    }
+    if flags & CG_EVENT_FLAG_SHIFT != 0 {
+        v.push("shift");
+    }
+    if flags & CG_EVENT_FLAG_COMMAND != 0 {
+        v.push("cmd");
+    }
     v
 }
 
@@ -89,18 +133,51 @@ pub(crate) fn parse_hotkey(hotkey: &str, mode: &str) -> MatchConfig {
             "shift" => flags |= CG_EVENT_FLAG_SHIFT,
             "alt" | "option" => flags |= CG_EVENT_FLAG_ALTERNATE,
             "ctrl" | "control" => flags |= CG_EVENT_FLAG_CONTROL,
-            "lctrl" => { modifier_keycode = Some(KEYCODE_LCTRL); flags |= CG_EVENT_FLAG_CONTROL; }
-            "rctrl" => { modifier_keycode = Some(KEYCODE_RCTRL); flags |= CG_EVENT_FLAG_CONTROL; }
-            "lshift" => { modifier_keycode = Some(KEYCODE_LSHIFT); flags |= CG_EVENT_FLAG_SHIFT; }
-            "rshift" => { modifier_keycode = Some(KEYCODE_RSHIFT); flags |= CG_EVENT_FLAG_SHIFT; }
-            "lalt" => { modifier_keycode = Some(KEYCODE_LALT); flags |= CG_EVENT_FLAG_ALTERNATE; }
-            "ralt" => { modifier_keycode = Some(KEYCODE_RALT); flags |= CG_EVENT_FLAG_ALTERNATE; }
-            "lcmd" => { modifier_keycode = Some(KEYCODE_LCMD); flags |= CG_EVENT_FLAG_COMMAND; }
-            "rcmd" => { modifier_keycode = Some(KEYCODE_RCMD); flags |= CG_EVENT_FLAG_COMMAND; }
-            other => { if let Some(c) = key_name_to_code(other) { key_code = Some(c); } }
+            "lctrl" => {
+                modifier_keycode = Some(KEYCODE_LCTRL);
+                flags |= CG_EVENT_FLAG_CONTROL;
+            }
+            "rctrl" => {
+                modifier_keycode = Some(KEYCODE_RCTRL);
+                flags |= CG_EVENT_FLAG_CONTROL;
+            }
+            "lshift" => {
+                modifier_keycode = Some(KEYCODE_LSHIFT);
+                flags |= CG_EVENT_FLAG_SHIFT;
+            }
+            "rshift" => {
+                modifier_keycode = Some(KEYCODE_RSHIFT);
+                flags |= CG_EVENT_FLAG_SHIFT;
+            }
+            "lalt" => {
+                modifier_keycode = Some(KEYCODE_LALT);
+                flags |= CG_EVENT_FLAG_ALTERNATE;
+            }
+            "ralt" => {
+                modifier_keycode = Some(KEYCODE_RALT);
+                flags |= CG_EVENT_FLAG_ALTERNATE;
+            }
+            "lcmd" => {
+                modifier_keycode = Some(KEYCODE_LCMD);
+                flags |= CG_EVENT_FLAG_COMMAND;
+            }
+            "rcmd" => {
+                modifier_keycode = Some(KEYCODE_RCMD);
+                flags |= CG_EVENT_FLAG_COMMAND;
+            }
+            other => {
+                if let Some(c) = key_name_to_code(other) {
+                    key_code = Some(c);
+                }
+            }
         }
     }
-    MatchConfig { modifier_flags: flags, key_code, modifier_keycode, is_hold: mode == "hold" }
+    MatchConfig {
+        modifier_flags: flags,
+        key_code,
+        modifier_keycode,
+        is_hold: mode == "hold",
+    }
 }
 
 // Live, mutable state shared with the running event tap.
@@ -184,7 +261,10 @@ mod tests {
     #[test]
     fn test_parse_hotkey_combo() {
         let hk = parse_hotkey("cmd+shift+space");
-        assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_COMMAND | CG_EVENT_FLAG_SHIFT);
+        assert_eq!(
+            hk.modifier_flags,
+            CG_EVENT_FLAG_COMMAND | CG_EVENT_FLAG_SHIFT
+        );
         assert_eq!(hk.key_code, Some(49)); // space
     }
 
@@ -211,7 +291,9 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
     info!("macOS hotkey (CGEventTap): '{hotkey}' mode={mode}");
 
     std::thread::spawn(move || {
-        use core_graphics::event::{CGEventTap, CGEventTapLocation, CGEventTapPlacement, CGEventTapOptions, CGEventType};
+        use core_graphics::event::{
+            CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+        };
 
         let hold_active = std::sync::atomic::AtomicBool::new(false);
 
@@ -226,7 +308,9 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                     CGEventType::KeyDown => K_CG_EVENT_KEY_DOWN,
                     _ => return None,
                 };
-                let kc = event.get_integer_value_field(core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE);
+                let kc = event.get_integer_value_field(
+                    core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
+                );
                 let flags = event.get_flags().bits();
 
                 // Capture mode intercepts everything.
@@ -251,14 +335,18 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                 match raw_type {
                     K_CG_EVENT_FLAGS_CHANGED if cfg.is_hold => {
                         if let Some(expected_kc) = cfg.modifier_keycode {
-                            if kc != expected_kc { return None; }
+                            if kc != expected_kc {
+                                return None;
+                            }
                         }
-                        let pressed = (flags & expected_flags) == expected_flags && expected_flags != 0;
+                        let pressed =
+                            (flags & expected_flags) == expected_flags && expected_flags != 0;
                         if pressed && !hold_active.load(std::sync::atomic::Ordering::Relaxed) {
                             hold_active.store(true, std::sync::atomic::Ordering::Relaxed);
                             info!("HotkeyDown");
                             let _ = tx.send(Event::HotkeyDown);
-                        } else if !pressed && hold_active.load(std::sync::atomic::Ordering::Relaxed) {
+                        } else if !pressed && hold_active.load(std::sync::atomic::Ordering::Relaxed)
+                        {
                             hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
                             info!("HotkeyUp");
                             let _ = tx.send(Event::HotkeyUp);
@@ -284,15 +372,21 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                 }
                 None // ListenOnly — don't modify events
             },
-        ).expect("Failed to create CGEventTap — check Accessibility permission");
+        )
+        .expect("Failed to create CGEventTap — check Accessibility permission");
 
         info!("CGEventTap created — listening for hotkey events");
 
-        let loop_source = tap.mach_port.create_runloop_source(0)
+        let loop_source = tap
+            .mach_port
+            .create_runloop_source(0)
             .expect("Failed to create run loop source");
         let run_loop = core_foundation::runloop::CFRunLoop::get_current();
         unsafe {
-            run_loop.add_source(&loop_source, core_foundation::runloop::kCFRunLoopCommonModes);
+            run_loop.add_source(
+                &loop_source,
+                core_foundation::runloop::kCFRunLoopCommonModes,
+            );
         }
         tap.enable();
 

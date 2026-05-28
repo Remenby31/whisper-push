@@ -34,7 +34,10 @@ pub fn guided_setup() {
         for _ in 0..60 {
             std::thread::sleep(Duration::from_secs(3));
             if check_all().all_granted() {
-                crate::notify::send("Whisper Push", "\u{2713} All set! Restarting to enable the hotkey\u{2026}");
+                crate::notify::send(
+                    "Whisper Push",
+                    "\u{2713} All set! Restarting to enable the hotkey\u{2026}",
+                );
                 std::thread::sleep(Duration::from_millis(1500));
                 restart_daemon();
                 return;
@@ -105,9 +108,15 @@ impl PermissionStatus {
 
     pub fn missing_count(&self) -> usize {
         let mut n = 0;
-        if self.microphone != PermState::Granted { n += 1; }
-        if self.accessibility != PermState::Granted { n += 1; }
-        if self.input_monitoring != PermState::Granted { n += 1; }
+        if self.microphone != PermState::Granted {
+            n += 1;
+        }
+        if self.accessibility != PermState::Granted {
+            n += 1;
+        }
+        if self.input_monitoring != PermState::Granted {
+            n += 1;
+        }
         n
     }
 }
@@ -119,7 +128,9 @@ pub fn check_all() -> PermissionStatus {
     let input_mon = check_input_monitoring();
     tracing::info!(
         "Permissions: microphone={:?}, accessibility={:?}, input_monitoring={:?}",
-        mic, acc, input_mon
+        mic,
+        acc,
+        input_mon
     );
     PermissionStatus {
         microphone: mic,
@@ -146,8 +157,8 @@ pub fn prompt_missing(status: &PermissionStatus) {
 
 #[cfg(target_os = "macos")]
 fn request_microphone() {
-    use objc2::runtime::AnyClass;
     use objc2::msg_send;
+    use objc2::runtime::AnyClass;
     use objc2_foundation::NSString;
 
     tracing::info!("Requesting microphone permission...");
@@ -189,8 +200,8 @@ pub fn open_settings(pane: &str) {
 fn check_microphone() -> PermState {
     #[cfg(target_os = "macos")]
     {
-        use objc2::runtime::AnyClass;
         use objc2::msg_send;
+        use objc2::runtime::AnyClass;
         use objc2_foundation::NSString;
 
         unsafe {
@@ -209,7 +220,9 @@ fn check_microphone() -> PermState {
     }
 
     #[cfg(not(target_os = "macos"))]
-    { PermState::Granted }
+    {
+        PermState::Granted
+    }
 }
 
 // ── Accessibility ───────────────────────────────────────────────
@@ -225,7 +238,9 @@ fn check_accessibility() -> PermState {
     }
 
     #[cfg(not(target_os = "macos"))]
-    { PermState::Granted }
+    {
+        PermState::Granted
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -1,8 +1,8 @@
-pub mod autostart;
 pub mod audio;
+pub mod autostart;
 pub mod config;
-pub mod hotkey;
 pub mod hardware;
+pub mod hotkey;
 pub mod model_manager;
 pub mod notify;
 pub mod onboarding;

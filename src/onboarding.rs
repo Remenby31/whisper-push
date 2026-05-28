@@ -58,7 +58,10 @@ pub fn run() -> String {
 
     crate::notify::send(
         "Whisper Push",
-        &format!("Ready! Using {}. Hold Control to dictate.", recommended_model),
+        &format!(
+            "Ready! Using {}. Hold Control to dictate.",
+            recommended_model
+        ),
     );
 
     recommended_model.to_string()

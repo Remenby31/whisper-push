@@ -38,10 +38,8 @@ fn macos_notify(title: &str, body: &str) -> bool {
             Some(c) => c,
             None => return false,
         };
-        let main_bundle: Retained<objc2::runtime::AnyObject> =
-            msg_send_id![bundle_cls, mainBundle];
-        let bundle_id: Option<Retained<NSString>> =
-            msg_send_id![&main_bundle, bundleIdentifier];
+        let main_bundle: Retained<objc2::runtime::AnyObject> = msg_send_id![bundle_cls, mainBundle];
+        let bundle_id: Option<Retained<NSString>> = msg_send_id![&main_bundle, bundleIdentifier];
         if bundle_id.is_none() {
             // Not in an app bundle — NSUserNotification won't show our icon
             return false;

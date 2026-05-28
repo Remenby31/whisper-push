@@ -57,7 +57,8 @@ pub fn create_resampler(device_sr: u32) -> Result<Option<Arc<Mutex<FftFixedIn<f3
         device_sr as usize,
         SAMPLE_RATE as usize,
         RESAMPLE_CHUNK_SIZE,
-        1, 1,
+        1,
+        1,
     )?;
     Ok(Some(Arc::new(Mutex::new(resampler))))
 }

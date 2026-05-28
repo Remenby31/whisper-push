@@ -1,5 +1,5 @@
-use crossbeam_channel::Sender;
 use crate::state::Event;
+use crossbeam_channel::Sender;
 use tracing::{debug, info, warn};
 
 /// Virtual key codes for Windows.
@@ -7,8 +7,8 @@ const VK_LCONTROL: u32 = 0xA2;
 const VK_RCONTROL: u32 = 0xA3;
 const VK_LSHIFT: u32 = 0xA0;
 const VK_RSHIFT: u32 = 0xA1;
-const VK_LMENU: u32 = 0xA4;  // Left Alt
-const VK_RMENU: u32 = 0xA5;  // Right Alt
+const VK_LMENU: u32 = 0xA4; // Left Alt
+const VK_RMENU: u32 = 0xA5; // Right Alt
 const VK_LWIN: u32 = 0x5B;
 const VK_RWIN: u32 = 0x5C;
 const VK_SPACE: u32 = 0x20;
@@ -31,8 +31,7 @@ fn parse_key(hotkey: &str) -> Option<u32> {
 
 /// Start global hotkey listener on Windows using a low-level keyboard hook.
 pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> {
-    let target_vk = parse_key(hotkey)
-        .ok_or_else(|| anyhow::anyhow!("Unknown hotkey: {hotkey}"))?;
+    let target_vk = parse_key(hotkey).ok_or_else(|| anyhow::anyhow!("Unknown hotkey: {hotkey}"))?;
     let is_hold = mode == "hold";
 
     info!("Windows hotkey listener: vk={target_vk:#x} mode={mode}");
@@ -48,13 +47,13 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
 
 #[cfg(target_os = "windows")]
 fn run_keyboard_hook(target_vk: u32, is_hold: bool, tx: Sender<Event>) -> anyhow::Result<()> {
-    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT,
-        MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    };
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
+        WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
 
     // Store state in thread-local statics (hook callback can't capture closures)
     static TARGET_VK: OnceLock<u32> = OnceLock::new();
@@ -118,5 +117,7 @@ fn run_keyboard_hook(target_vk: u32, is_hold: bool, tx: Sender<Event>) -> anyhow
 
 #[cfg(not(target_os = "windows"))]
 fn run_keyboard_hook(_target_vk: u32, _is_hold: bool, _tx: Sender<Event>) -> anyhow::Result<()> {
-    Err(anyhow::anyhow!("Windows keyboard hook not available on this platform"))
+    Err(anyhow::anyhow!(
+        "Windows keyboard hook not available on this platform"
+    ))
 }

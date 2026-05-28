@@ -17,7 +17,6 @@ pub enum Backend {
     VoxtralLocal,
 }
 
-
 static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
 
 /// Get the path where the model file lives.
@@ -28,7 +27,11 @@ static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
 pub fn model_path(filename: &str) -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         // .../Whisper Push.app/Contents/MacOS/whisper-push → ../Resources/models/
-        if let Some(resources) = exe.parent().and_then(|p| p.parent()).map(|c| c.join("Resources")) {
+        if let Some(resources) = exe
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|c| c.join("Resources"))
+        {
             let bundled = resources.join("models").join(filename);
             if bundled.exists() {
                 return bundled;
@@ -52,11 +55,8 @@ pub fn load_model(model_name: &str) -> Result<()> {
     let mut ctx_params = whisper_rs::WhisperContextParameters::default();
     ctx_params.use_gpu(true);
     ctx_params.flash_attn(true);
-    let ctx = whisper_rs::WhisperContext::new_with_params(
-        path.to_str().unwrap(),
-        ctx_params,
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to load model: {:?}", e))?;
+    let ctx = whisper_rs::WhisperContext::new_with_params(path.to_str().unwrap(), ctx_params)
+        .map_err(|e| anyhow::anyhow!("Failed to load model: {:?}", e))?;
 
     *MODEL.lock().unwrap_or_else(|e| e.into_inner()) = Some(ctx);
     info!("Model loaded and ready");
@@ -112,7 +112,8 @@ fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Model not loaded"))?;
 
-    let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
+    let mut params =
+        whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
 
     if language != "auto" {
         params.set_language(Some(language));
@@ -128,10 +129,12 @@ fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {
     params.set_single_segment(true);
 
     // Create state and run inference
-    let mut state = ctx.create_state()
+    let mut state = ctx
+        .create_state()
         .map_err(|e| anyhow::anyhow!("Failed to create state: {:?}", e))?;
 
-    state.full(params, audio)
+    state
+        .full(params, audio)
         .map_err(|e| anyhow::anyhow!("Transcription failed: {:?}", e))?;
 
     let num_segments = state.full_n_segments();
@@ -163,14 +166,8 @@ fn download_model(model_name: &str, dest: &PathBuf) -> Result<()> {
 
     // Map model name to HuggingFace repo and file
     let (repo, filename) = match model_name {
-        "ggml-large-v3-turbo-q5_0.bin" => (
-            "ggerganov/whisper.cpp",
-            "ggml-large-v3-turbo-q5_0.bin",
-        ),
-        "ggml-large-v3-turbo.bin" => (
-            "ggerganov/whisper.cpp",
-            "ggml-large-v3-turbo.bin",
-        ),
+        "ggml-large-v3-turbo-q5_0.bin" => ("ggerganov/whisper.cpp", "ggml-large-v3-turbo-q5_0.bin"),
+        "ggml-large-v3-turbo.bin" => ("ggerganov/whisper.cpp", "ggml-large-v3-turbo.bin"),
         other => {
             // Try as a direct repo/file reference
             ("ggerganov/whisper.cpp", other)

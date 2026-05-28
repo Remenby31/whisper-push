@@ -4,11 +4,9 @@ use crate::state::{AppState, Event, State};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use std::sync::{Arc, Mutex};
-use tray_icon::menu::{
-    CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
-};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tracing::{info, warn};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 
@@ -36,10 +34,17 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Hold \u{2014} Right Control", "rctrl", "hold"),
     ("Hold \u{2014} Right Command", "rcmd", "hold"),
     ("Hold \u{2014} Right Option", "ralt", "hold"),
-    ("Toggle \u{2014} \u{2318}\u{21e7}Space", "cmd+shift+space", "toggle"),
-    ("Toggle \u{2014} \u{2303}\u{21e7}Space", "ctrl+shift+space", "toggle"),
+    (
+        "Toggle \u{2014} \u{2318}\u{21e7}Space",
+        "cmd+shift+space",
+        "toggle",
+    ),
+    (
+        "Toggle \u{2014} \u{2303}\u{21e7}Space",
+        "ctrl+shift+space",
+        "toggle",
+    ),
 ];
-
 
 /// User events forwarded into winit's event loop.
 #[derive(Debug)]
@@ -104,7 +109,9 @@ impl App {
     fn new(state: AppState, rx: Receiver<Event>) -> Self {
         let config = Arc::new(Mutex::new(state.config.clone()));
         Self {
-            state, config, rx,
+            state,
+            config,
+            rx,
             tray: None,
             capture: Arc::new(Mutex::new(None)),
             pipeline_tx: None,
@@ -125,14 +132,21 @@ impl App {
         };
         let status_item = MenuItem::new(&status_text, false, None);
         let toggle_item = MenuItem::new(
-            if is_ready { "Start Recording" } else { "\u{231b} Loading model\u{2026} (unavailable)" },
+            if is_ready {
+                "Start Recording"
+            } else {
+                "\u{231b} Loading model\u{2026} (unavailable)"
+            },
             is_ready,
             None,
         );
 
         // Hotkey submenu (titled with the current binding)
         let hotkey_submenu = Submenu::new(
-            &format!("Hotkey: {}", format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
+            &format!(
+                "Hotkey: {}",
+                format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
+            ),
             true,
         );
         let mut hotkey_items = Vec::new();
@@ -173,7 +187,11 @@ impl App {
         // If the mic is explicitly denied, recording won't work — hint the user.
         if perms.microphone == crate::permissions::PermState::Denied {
             let _ = input_submenu.append(&PredefinedMenuItem::separator());
-            let _ = input_submenu.append(&MenuItem::new("\u{26a0} Microphone denied \u{2014} grant to record", false, None));
+            let _ = input_submenu.append(&MenuItem::new(
+                "\u{26a0} Microphone denied \u{2014} grant to record",
+                false,
+                None,
+            ));
         }
 
         // Output device picker (no permission needed).
@@ -191,31 +209,65 @@ impl App {
             }
         }
 
-
         // Model selector
         let models = crate::model_manager::list_models();
         let current_backend = crate::model_manager::backend_for_model(&cfg.model);
-        let parakeet_status = models.iter().find(|m| m.backend == "parakeet").map(|m| m.is_downloaded).unwrap_or(false);
-        let voxtral_status = models.iter().find(|m| m.backend == "voxtral-local").map(|m| m.is_downloaded).unwrap_or(false);
-        let whisper_status = models.iter().find(|m| m.backend == "whisper").map(|m| m.is_downloaded).unwrap_or(false);
+        let parakeet_status = models
+            .iter()
+            .find(|m| m.backend == "parakeet")
+            .map(|m| m.is_downloaded)
+            .unwrap_or(false);
+        let voxtral_status = models
+            .iter()
+            .find(|m| m.backend == "voxtral-local")
+            .map(|m| m.is_downloaded)
+            .unwrap_or(false);
+        let whisper_status = models
+            .iter()
+            .find(|m| m.backend == "whisper")
+            .map(|m| m.is_downloaded)
+            .unwrap_or(false);
 
-        let engine_label = |name: &str, backend_key: &str, downloaded: bool, current: &str| -> String {
-            let active = if backend_key == current { "\u{25CF} " } else { "    " }; // ● or spaces
-            let dl = if downloaded { "" } else { " \u{2913}" }; // ⤓ if not downloaded
-            format!("{active}{name}{dl}")
-        };
+        let engine_label =
+            |name: &str, backend_key: &str, downloaded: bool, current: &str| -> String {
+                let active = if backend_key == current {
+                    "\u{25CF} "
+                } else {
+                    "    "
+                }; // ● or spaces
+                let dl = if downloaded { "" } else { " \u{2913}" }; // ⤓ if not downloaded
+                format!("{active}{name}{dl}")
+            };
 
         let backend_parakeet = MenuItem::new(
-            &engine_label("Parakeet TDT v3 (600 MB)", "parakeet", parakeet_status, current_backend),
-            true, None,
+            &engine_label(
+                "Parakeet TDT v3 (600 MB)",
+                "parakeet",
+                parakeet_status,
+                current_backend,
+            ),
+            true,
+            None,
         );
         let backend_voxtral_local = MenuItem::new(
-            &engine_label("Voxtral Realtime 2602 (2.3 GB, streaming)", "voxtral-local", voxtral_status, current_backend),
-            true, None,
+            &engine_label(
+                "Voxtral Realtime 2602 (2.3 GB, streaming)",
+                "voxtral-local",
+                voxtral_status,
+                current_backend,
+            ),
+            true,
+            None,
         );
         let backend_whisper = MenuItem::new(
-            &engine_label("Whisper large-v3-turbo (550 MB)", "whisper", whisper_status, current_backend),
-            true, None,
+            &engine_label(
+                "Whisper large-v3-turbo (550 MB)",
+                "whisper",
+                whisper_status,
+                current_backend,
+            ),
+            true,
+            None,
         );
 
         // Engine submenu (compact dropdown).
@@ -233,14 +285,30 @@ impl App {
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
         // Permissions (perms already computed above for the input picker gate)
-        let mic_label = format!("{} Microphone \u{2014} {}", perms.microphone.symbol(), perms.microphone.label());
-        let acc_label = format!("{} Accessibility \u{2014} {}", perms.accessibility.symbol(), perms.accessibility.label());
-        let input_mon_label = format!("{} Input Monitoring \u{2014} {}", perms.input_monitoring.symbol(), perms.input_monitoring.label());
+        let mic_label = format!(
+            "{} Microphone \u{2014} {}",
+            perms.microphone.symbol(),
+            perms.microphone.label()
+        );
+        let acc_label = format!(
+            "{} Accessibility \u{2014} {}",
+            perms.accessibility.symbol(),
+            perms.accessibility.label()
+        );
+        let input_mon_label = format!(
+            "{} Input Monitoring \u{2014} {}",
+            perms.input_monitoring.symbol(),
+            perms.input_monitoring.label()
+        );
         let mic_perm_item = MenuItem::new(&mic_label, true, None);
         let acc_perm_item = MenuItem::new(&acc_label, true, None);
         let input_mon_perm_item = MenuItem::new(&input_mon_label, true, None);
         let perms_submenu = Submenu::new(
-            if perms.all_granted() { "Permissions \u{2713}" } else { "\u{26a0} Permissions" },
+            if perms.all_granted() {
+                "Permissions \u{2713}"
+            } else {
+                "\u{26a0} Permissions"
+            },
             true,
         );
         let _ = perms_submenu.append(&mic_perm_item);
@@ -257,7 +325,8 @@ impl App {
         let warn_item = if !perms.all_granted() {
             let w = MenuItem::new(
                 &format!("\u{26a0} {} permission(s) missing", perms.missing_count()),
-                false, None,
+                false,
+                None,
             );
             let _ = menu.append(&w);
             Some(w)
@@ -291,9 +360,18 @@ impl App {
         let _ = menu.append(&quit_item);
 
         // Collect IDs
-        let hotkey_ids: Vec<_> = hotkey_items.iter().map(|(i, h, m)| (i.id().0.clone(), h.clone(), m.clone())).collect();
-        let input_ids: Vec<_> = input_device_items.iter().map(|(i, n)| (i.id().0.clone(), n.clone())).collect();
-        let output_ids: Vec<_> = output_device_items.iter().map(|(i, n)| (i.id().0.clone(), n.clone())).collect();
+        let hotkey_ids: Vec<_> = hotkey_items
+            .iter()
+            .map(|(i, h, m)| (i.id().0.clone(), h.clone(), m.clone()))
+            .collect();
+        let input_ids: Vec<_> = input_device_items
+            .iter()
+            .map(|(i, n)| (i.id().0.clone(), n.clone()))
+            .collect();
+        let output_ids: Vec<_> = output_device_items
+            .iter()
+            .map(|(i, n)| (i.id().0.clone(), n.clone()))
+            .collect();
 
         self.menu_items = Some(MenuItems {
             toggle_id: toggle_item.id().0.clone(),
@@ -307,17 +385,31 @@ impl App {
             acc_perm_id: acc_perm_item.id().0.clone(),
             input_mon_perm_id: input_mon_perm_item.id().0.clone(),
             setup_id: setup_item.id().0.clone(),
-            mic_perm_item, acc_perm_item, input_mon_perm_item, perms_submenu, warn_item,
+            mic_perm_item,
+            acc_perm_item,
+            input_mon_perm_item,
+            perms_submenu,
+            warn_item,
             backend_items: vec![
                 (backend_parakeet, "parakeet".into()),
                 (backend_voxtral_local, "voxtral-local".into()),
                 (backend_whisper, "whisper".into()),
             ],
-            status_item, toggle_item,
-            notifications_item, sound_item, debug_item,
-            hotkey_ids, hotkey_items, hotkey_submenu, custom_hotkey_id,
-            input_ids, input_device_items, input_submenu,
-            output_ids, output_device_items, output_submenu,
+            status_item,
+            toggle_item,
+            notifications_item,
+            sound_item,
+            debug_item,
+            hotkey_ids,
+            hotkey_items,
+            hotkey_submenu,
+            custom_hotkey_id,
+            input_ids,
+            input_device_items,
+            input_submenu,
+            output_ids,
+            output_device_items,
+            output_submenu,
         });
 
         // Build tray
@@ -356,7 +448,10 @@ impl App {
                 self.state.set(State::Idle);
                 mi.toggle_item.set_text("Start Recording");
                 mi.toggle_item.set_enabled(true);
-                let disp = format_hotkey_display(&self.state.config.hotkey, &self.state.config.hotkey_mode);
+                let disp = format_hotkey_display(
+                    &self.state.config.hotkey,
+                    &self.state.config.hotkey_mode,
+                );
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 set_tray_icon(&self.tray, State::Idle);
                 if self.config.lock().unwrap().notifications {
@@ -366,7 +461,9 @@ impl App {
             }
 
             Event::MenuClicked(ref id) => {
-                if id == &mi.quit_id { std::process::exit(0); }
+                if id == &mi.quit_id {
+                    std::process::exit(0);
+                }
                 if id == &mi.uninstall_id {
                     // Uninstall: remove data dir, autostart, and notify
                     let data_dir = crate::config::data_dir();
@@ -375,10 +472,16 @@ impl App {
                         info!("Removed data dir: {}", data_dir.display());
                     }
                     crate::autostart::disable();
-                    crate::notify::send("Whisper Push", "Uninstalled. You can delete the app from Applications.");
+                    crate::notify::send(
+                        "Whisper Push",
+                        "Uninstalled. You can delete the app from Applications.",
+                    );
                     std::process::exit(0);
                 }
-                if id == &mi.toggle_id { self.process_event(Event::HotkeyToggle); return; }
+                if id == &mi.toggle_id {
+                    self.process_event(Event::HotkeyToggle);
+                    return;
+                }
                 if id == &mi.test_id {
                     // Test: record 3 seconds + transcribe + show result
                     let cfg = self.config.lock().unwrap().clone();
@@ -390,39 +493,74 @@ impl App {
                             Ok(cap) => {
                                 std::thread::sleep(std::time::Duration::from_secs(3));
                                 let audio = cap.stop();
-                                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len().max(1) as f32).sqrt();
-                                info!("=== TEST: Captured {:.1}s, RMS={:.4} ===", audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, rms);
+                                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>()
+                                    / audio.len().max(1) as f32)
+                                    .sqrt();
+                                info!(
+                                    "=== TEST: Captured {:.1}s, RMS={:.4} ===",
+                                    audio.len() as f32 / crate::audio::SAMPLE_RATE as f32,
+                                    rms
+                                );
 
                                 if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
-                                    crate::notify::send("Whisper Push", "Test failed: audio too short");
+                                    crate::notify::send(
+                                        "Whisper Push",
+                                        "Test failed: audio too short",
+                                    );
                                     return;
                                 }
                                 if rms < crate::audio::capture::SILENCE_RMS_THRESHOLD {
-                                    crate::notify::send("Whisper Push", "Test failed: silence (check mic permission)");
+                                    crate::notify::send(
+                                        "Whisper Push",
+                                        "Test failed: silence (check mic permission)",
+                                    );
                                     return;
                                 }
 
                                 let bk = crate::model_manager::backend_for_model(&cfg.model);
                                 info!("=== TEST: Transcribing with '{}' ===", bk);
-                                crate::notify::send("Whisper Push", &format!("Transcribing with {}...", bk));
+                                crate::notify::send(
+                                    "Whisper Push",
+                                    &format!("Transcribing with {}...", bk),
+                                );
 
                                 let backend = crate::model_manager::resolve_backend(&cfg.model);
 
                                 let start = std::time::Instant::now();
-                                match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
+                                match crate::transcribe::transcribe_with_backend(
+                                    &audio,
+                                    &cfg.language,
+                                    &backend,
+                                ) {
                                     Ok(text) if !text.is_empty() => {
                                         let elapsed = start.elapsed();
-                                        info!("=== TEST OK ({:.2}s): '{}' ===", elapsed.as_secs_f64(), text);
-                                        crate::notify::send("Whisper Push",
-                                            &format!("Test OK ({:.1}s): {}", elapsed.as_secs_f64(), text));
+                                        info!(
+                                            "=== TEST OK ({:.2}s): '{}' ===",
+                                            elapsed.as_secs_f64(),
+                                            text
+                                        );
+                                        crate::notify::send(
+                                            "Whisper Push",
+                                            &format!(
+                                                "Test OK ({:.1}s): {}",
+                                                elapsed.as_secs_f64(),
+                                                text
+                                            ),
+                                        );
                                     }
                                     Ok(_) => {
                                         info!("=== TEST: No speech detected ===");
-                                        crate::notify::send("Whisper Push", "Test: no speech detected");
+                                        crate::notify::send(
+                                            "Whisper Push",
+                                            "Test: no speech detected",
+                                        );
                                     }
                                     Err(e) => {
                                         info!("=== TEST ERROR: {e} ===");
-                                        crate::notify::send("Whisper Push", &format!("Test error: {e}"));
+                                        crate::notify::send(
+                                            "Whisper Push",
+                                            &format!("Test error: {e}"),
+                                        );
                                     }
                                 }
                             }
@@ -453,14 +591,33 @@ impl App {
                     crate::permissions::guided_setup();
                     return;
                 }
-                if id == &mi.notif_id { let mut c = self.config.lock().unwrap(); c.notifications = !c.notifications; let _ = c.save(); return; }
-                if id == &mi.sound_id { let mut c = self.config.lock().unwrap(); c.sound_feedback = !c.sound_feedback; let _ = c.save(); return; }
-                if id == &mi.debug_id { let mut c = self.config.lock().unwrap(); c.debug = !c.debug; let _ = c.save(); return; }
+                if id == &mi.notif_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.notifications = !c.notifications;
+                    let _ = c.save();
+                    return;
+                }
+                if id == &mi.sound_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.sound_feedback = !c.sound_feedback;
+                    let _ = c.save();
+                    return;
+                }
+                if id == &mi.debug_id {
+                    let mut c = self.config.lock().unwrap();
+                    c.debug = !c.debug;
+                    let _ = c.save();
+                    return;
+                }
                 for (item_id, hotkey, mode) in &mi.hotkey_ids {
                     if id == item_id {
                         let mut c = self.config.lock().unwrap();
-                        c.hotkey = hotkey.clone(); c.hotkey_mode = mode.clone(); let _ = c.save();
-                        for (item, hk, m) in &mi.hotkey_items { item.set_checked(hk == hotkey && m == mode); }
+                        c.hotkey = hotkey.clone();
+                        c.hotkey_mode = mode.clone();
+                        let _ = c.save();
+                        for (item, hk, m) in &mi.hotkey_items {
+                            item.set_checked(hk == hotkey && m == mode);
+                        }
                         let disp = format_hotkey_display(hotkey, mode);
                         mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                         mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
@@ -479,17 +636,25 @@ impl App {
                 }
                 for (item_id, name) in &mi.input_ids {
                     if id == item_id {
-                        let mut c = self.config.lock().unwrap(); c.input_device = name.clone(); let _ = c.save();
-                        for (item, n) in &mi.input_device_items { item.set_checked(n == name); }
+                        let mut c = self.config.lock().unwrap();
+                        c.input_device = name.clone();
+                        let _ = c.save();
+                        for (item, n) in &mi.input_device_items {
+                            item.set_checked(n == name);
+                        }
                         mi.input_submenu.set_text(device_title("Input", name));
                         return;
                     }
                 }
                 for (item_id, name) in &mi.output_ids {
                     if id == item_id {
-                        let mut c = self.config.lock().unwrap(); c.output_device = name.clone(); let _ = c.save();
+                        let mut c = self.config.lock().unwrap();
+                        c.output_device = name.clone();
+                        let _ = c.save();
                         crate::audio::playback::set_output_device(name);
-                        for (item, n) in &mi.output_device_items { item.set_checked(n == name); }
+                        for (item, n) in &mi.output_device_items {
+                            item.set_checked(n == name);
+                        }
                         mi.output_submenu.set_text(device_title("Output", name));
                         return;
                     }
@@ -520,33 +685,34 @@ impl App {
                         if let Some(ref tx) = self.pipeline_tx {
                             let _ = tx.send(Event::LoadModel(model_name.to_string()));
                         }
-                        crate::notify::send("Whisper Push", &format!("Loading {}...", backend_value));
+                        crate::notify::send(
+                            "Whisper Push",
+                            &format!("Loading {}...", backend_value),
+                        );
                         return;
                     }
                 }
             }
 
-            Event::HotkeyToggle => {
-                match self.state.current() {
-                    State::Idle => {
-                        let device = self.config.lock().unwrap().input_device.clone();
-                        match AudioCapture::start(&device) {
-                            Ok(cap) => {
-                                *self.capture.lock().unwrap() = Some(cap);
-                                self.state.set(State::Recording);
-                                mi.toggle_item.set_text("Stop & Transcribe");
-                                set_tray_icon(&self.tray, State::Recording);
-                                if self.config.lock().unwrap().sound_feedback {
-                                    crate::audio::playback::play_sound("start");
-                                }
+            Event::HotkeyToggle => match self.state.current() {
+                State::Idle => {
+                    let device = self.config.lock().unwrap().input_device.clone();
+                    match AudioCapture::start(&device) {
+                        Ok(cap) => {
+                            *self.capture.lock().unwrap() = Some(cap);
+                            self.state.set(State::Recording);
+                            mi.toggle_item.set_text("Stop & Transcribe");
+                            set_tray_icon(&self.tray, State::Recording);
+                            if self.config.lock().unwrap().sound_feedback {
+                                crate::audio::playback::play_sound("start");
                             }
-                            Err(e) => warn!("Capture failed: {e}"),
                         }
+                        Err(e) => warn!("Capture failed: {e}"),
                     }
-                    State::Recording => self.finish_recording(),
-                    _ => {}
                 }
-            }
+                State::Recording => self.finish_recording(),
+                _ => {}
+            },
 
             Event::StateChanged(State::Recording) => {
                 self.state.set(State::Recording);
@@ -562,7 +728,11 @@ impl App {
                     tracing::error!("Paste failed: {e}");
                 }
                 if self.config.lock().unwrap().notifications {
-                    let preview = if text.len() > 50 { format!("{}...", &text[..50]) } else { text };
+                    let preview = if text.len() > 50 {
+                        format!("{}...", &text[..50])
+                    } else {
+                        text
+                    };
                     crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
                 }
                 self.state.set(State::Idle);
@@ -580,7 +750,9 @@ impl App {
                     let _ = c.save();
                 }
                 // Tap already rebound the live listener; just sync the UI.
-                for (item, hk, m) in &mi.hotkey_items { item.set_checked(hk == &hotkey && m == &mode); }
+                for (item, hk, m) in &mi.hotkey_items {
+                    item.set_checked(hk == &hotkey && m == &mode);
+                }
                 let disp = format_hotkey_display(&hotkey, &mode);
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
@@ -605,27 +777,52 @@ impl App {
             Event::RefreshPermissions => {
                 let status = crate::permissions::check_all();
                 if let Some(mi) = &self.menu_items {
-                    let mic_label = format!("{} Microphone \u{2014} {}", status.microphone.symbol(), status.microphone.label());
-                    let acc_label = format!("{} Accessibility \u{2014} {}", status.accessibility.symbol(), status.accessibility.label());
-                    let input_mon_label = format!("{} Input Monitoring \u{2014} {}", status.input_monitoring.symbol(), status.input_monitoring.label());
-                    mi.mic_perm_item.set_text(&mic_label);
-                    mi.mic_perm_item.set_enabled(status.microphone != crate::permissions::PermState::Granted);
-                    mi.acc_perm_item.set_text(&acc_label);
-                    mi.acc_perm_item.set_enabled(status.accessibility != crate::permissions::PermState::Granted);
-                    mi.input_mon_perm_item.set_text(&input_mon_label);
-                    mi.input_mon_perm_item.set_enabled(status.input_monitoring != crate::permissions::PermState::Granted);
-                    mi.perms_submenu.set_text(
-                        if status.all_granted() { "Permissions \u{2713}" } else { "\u{26a0} Permissions" }
+                    let mic_label = format!(
+                        "{} Microphone \u{2014} {}",
+                        status.microphone.symbol(),
+                        status.microphone.label()
                     );
+                    let acc_label = format!(
+                        "{} Accessibility \u{2014} {}",
+                        status.accessibility.symbol(),
+                        status.accessibility.label()
+                    );
+                    let input_mon_label = format!(
+                        "{} Input Monitoring \u{2014} {}",
+                        status.input_monitoring.symbol(),
+                        status.input_monitoring.label()
+                    );
+                    mi.mic_perm_item.set_text(&mic_label);
+                    mi.mic_perm_item
+                        .set_enabled(status.microphone != crate::permissions::PermState::Granted);
+                    mi.acc_perm_item.set_text(&acc_label);
+                    mi.acc_perm_item.set_enabled(
+                        status.accessibility != crate::permissions::PermState::Granted,
+                    );
+                    mi.input_mon_perm_item.set_text(&input_mon_label);
+                    mi.input_mon_perm_item.set_enabled(
+                        status.input_monitoring != crate::permissions::PermState::Granted,
+                    );
+                    mi.perms_submenu.set_text(if status.all_granted() {
+                        "Permissions \u{2713}"
+                    } else {
+                        "\u{26a0} Permissions"
+                    });
                     if let Some(ref w) = mi.warn_item {
                         if status.all_granted() {
                             w.set_text("\u{2713} All permissions granted");
                         } else {
-                            w.set_text(&format!("\u{26a0} {} permission(s) missing", status.missing_count()));
+                            w.set_text(&format!(
+                                "\u{26a0} {} permission(s) missing",
+                                status.missing_count()
+                            ));
                         }
                     }
                 }
-                info!("Permissions refreshed: mic={:?} acc={:?}", status.microphone, status.accessibility);
+                info!(
+                    "Permissions refreshed: mic={:?} acc={:?}",
+                    status.microphone, status.accessibility
+                );
                 // Re-check again in 5s if still not all granted
                 if !status.all_granted() {
                     let tx = self.state.tx.clone();
@@ -662,7 +859,13 @@ impl App {
             crate::audio::playback::play_sound("stop");
         }
 
-        let audio = self.capture.lock().unwrap().take().map(|c| c.stop()).unwrap_or_default();
+        let audio = self
+            .capture
+            .lock()
+            .unwrap()
+            .take()
+            .map(|c| c.stop())
+            .unwrap_or_default();
         if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
             self.state.set(State::Idle);
             mi.toggle_item.set_text("Start Recording");
@@ -676,9 +879,16 @@ impl App {
         let backend = crate::model_manager::resolve_backend(&cfg.model);
         std::thread::spawn(move || {
             match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
-                Ok(text) if !text.is_empty() => { let _ = tx.send(Event::Transcribed(text)); }
-                Ok(_) => { let _ = tx.send(Event::StateChanged(State::Idle)); }
-                Err(e) => { tracing::error!("Transcription: {e}"); let _ = tx.send(Event::StateChanged(State::Idle)); }
+                Ok(text) if !text.is_empty() => {
+                    let _ = tx.send(Event::Transcribed(text));
+                }
+                Ok(_) => {
+                    let _ = tx.send(Event::StateChanged(State::Idle));
+                }
+                Err(e) => {
+                    tracing::error!("Transcription: {e}");
+                    let _ = tx.send(Event::StateChanged(State::Idle));
+                }
             }
         });
     }
@@ -688,9 +898,12 @@ impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
     fn window_event(
-        &mut self, _event_loop: &ActiveEventLoop,
-        _window_id: winit::window::WindowId, _event: winit::event::WindowEvent,
-    ) {}
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        _event: winit::event::WindowEvent,
+    ) {
+    }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         // WaitUntil(500ms) — needed for NSEvent monitors to fire (they require
@@ -712,7 +925,8 @@ impl ApplicationHandler<UserEvent> for App {
 
             // Wake the macOS run loop so the icon appears immediately
             #[cfg(target_os = "macos")]
-            { // CFRunLoop API
+            {
+                // CFRunLoop API
                 use objc2_core_foundation::CFRunLoop;
                 let rl = CFRunLoop::main().unwrap();
                 rl.wake_up();
@@ -806,14 +1020,17 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
     loop {
         match rx.recv() {
             Ok(Event::HotkeyDown) => {
-                if recording.load(Ordering::Relaxed) { continue; }
+                if recording.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let cfg = config.lock().unwrap();
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
                 let sound_feedback = cfg.sound_feedback;
                 // Real-time streaming is too slow (re-encodes all audio each chunk).
                 // Use batch mode for now + progressive typing for visual effect.
-                let is_voxtral_streaming = crate::model_manager::backend_for_model(&cfg.model) == "voxtral-local";
+                let is_voxtral_streaming =
+                    crate::model_manager::backend_for_model(&cfg.model) == "voxtral-local";
                 drop(cfg);
 
                 // Immediate audio acknowledgement — a 70 ms blip the moment the
@@ -837,7 +1054,9 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     // Ensure Voxtral model is loaded on this thread
                     if !crate::transcribe::voxtral_local::is_loaded() {
                         let dir = crate::config::data_dir().join("models").join("voxtral");
-                        if let Err(e) = crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or("")) {
+                        if let Err(e) =
+                            crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
+                        {
                             tracing::error!("Voxtral load failed: {e}");
                             crate::notify::send("Whisper Push", &format!("Error: {e}"));
                             rec.store(false, Ordering::Relaxed);
@@ -861,9 +1080,10 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                                         }
 
                                         // Get next audio chunk (with timeout)
-                                        match stream_capture.chunk_rx.recv_timeout(
-                                            std::time::Duration::from_millis(100)
-                                        ) {
+                                        match stream_capture
+                                            .chunk_rx
+                                            .recv_timeout(std::time::Duration::from_millis(100))
+                                        {
                                             Ok(chunk) => {
                                                 match crate::transcribe::voxtral_local::streaming::feed_chunk(
                                                     &mut session, &chunk.samples
@@ -882,7 +1102,9 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                                                     }
                                                 }
                                             }
-                                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                                                continue;
+                                            }
                                             Err(_) => break,
                                         }
                                     }
@@ -894,7 +1116,9 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                                     }
 
                                     // Finish and paste any remaining text
-                                    match crate::transcribe::voxtral_local::streaming::finish(session) {
+                                    match crate::transcribe::voxtral_local::streaming::finish(
+                                        session,
+                                    ) {
                                         Ok(final_text) if !final_text.is_empty() => {
                                             info!("Streaming final: '{final_text}'");
                                         }
@@ -942,7 +1166,9 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     capture.lock().unwrap().take();
                     continue;
                 }
-                if !recording.load(Ordering::Relaxed) { continue; }
+                if !recording.load(Ordering::Relaxed) {
+                    continue;
+                }
                 recording.store(false, Ordering::Relaxed);
                 stop_and_transcribe(&config, &capture);
             }
@@ -990,7 +1216,10 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     }
                     Err(e) => {
                         tracing::error!("{backend} load failed: {e}");
-                        crate::notify::send("Whisper Push", &format!("Failed to load {backend}: {e}"));
+                        crate::notify::send(
+                            "Whisper Push",
+                            &format!("Failed to load {backend}: {e}"),
+                        );
                     }
                 }
             }
@@ -1027,7 +1256,10 @@ fn stop_and_transcribe(
         crate::audio::playback::play_sound("stop");
     }
 
-    let audio = capture.lock().unwrap().take()
+    let audio = capture
+        .lock()
+        .unwrap()
+        .take()
         .map(|c| c.stop())
         .unwrap_or_default();
 
@@ -1038,8 +1270,12 @@ fn stop_and_transcribe(
 
     let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
     let backend = crate::model_manager::resolve_backend(&cfg.model);
-    info!("Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...",
-        audio.len() as f32 / crate::audio::SAMPLE_RATE as f32, backend, rms);
+    info!(
+        "Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...",
+        audio.len() as f32 / crate::audio::SAMPLE_RATE as f32,
+        backend,
+        rms
+    );
 
     let start = std::time::Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1048,23 +1284,32 @@ fn stop_and_transcribe(
     let result = match result {
         Ok(r) => r,
         Err(e) => {
-            let msg = if let Some(s) = e.downcast_ref::<String>() { s.clone() }
-                else if let Some(s) = e.downcast_ref::<&str>() { s.to_string() }
-                else { "unknown panic".into() };
+            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else {
+                "unknown panic".into()
+            };
             Err(anyhow::anyhow!("Transcription panicked: {msg}"))
         }
     };
     match result {
         Ok(text) if !text.is_empty() => {
-            info!("Pasting ({:.2}s): '{}'", start.elapsed().as_secs_f64(),
-                if text.len() > 80 { &text[..80] } else { &text });
+            info!(
+                "Pasting ({:.2}s): '{}'",
+                start.elapsed().as_secs_f64(),
+                if text.len() > 80 { &text[..80] } else { &text }
+            );
             if let Err(e) = crate::paste::paste_text(&text) {
                 tracing::error!("Paste failed: {e}");
             }
             if cfg.notifications {
                 let preview = if text.len() > 50 {
                     format!("{}...", &text[..50])
-                } else { text };
+                } else {
+                    text
+                };
                 crate::notify::send("Whisper Push", &format!("Typed: {preview}"));
             }
         }
@@ -1078,17 +1323,35 @@ fn stop_and_transcribe(
 
 pub fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
     let symbols: &[(&str, &str)] = &[
-        ("cmd", "\u{2318}"), ("shift", "\u{21e7}"), ("alt", "\u{2325}"), ("ctrl", "\u{2303}"),
-        ("rctrl", "\u{2303}R"), ("rcmd", "\u{2318}R"), ("ralt", "\u{2325}R"), ("rshift", "\u{21e7}R"),
-        ("lctrl", "\u{2303}L"), ("lcmd", "\u{2318}L"), ("lalt", "\u{2325}L"), ("lshift", "\u{21e7}L"),
+        ("cmd", "\u{2318}"),
+        ("shift", "\u{21e7}"),
+        ("alt", "\u{2325}"),
+        ("ctrl", "\u{2303}"),
+        ("rctrl", "\u{2303}R"),
+        ("rcmd", "\u{2318}R"),
+        ("ralt", "\u{2325}R"),
+        ("rshift", "\u{21e7}R"),
+        ("lctrl", "\u{2303}L"),
+        ("lcmd", "\u{2318}L"),
+        ("lalt", "\u{2325}L"),
+        ("lshift", "\u{21e7}L"),
         ("space", "Space"),
     ];
-    let mut r = if mode == "hold" { "Hold ".into() } else { String::new() };
+    let mut r = if mode == "hold" {
+        "Hold ".into()
+    } else {
+        String::new()
+    };
     for (i, p) in hotkey.to_lowercase().split('+').enumerate() {
         let p = p.trim();
-        if i > 0 { r.push('+'); }
-        if let Some((_, s)) = symbols.iter().find(|(k, _)| *k == p) { r.push_str(s); }
-        else { r.push_str(&p.to_uppercase()); }
+        if i > 0 {
+            r.push('+');
+        }
+        if let Some((_, s)) = symbols.iter().find(|(k, _)| *k == p) {
+            r.push_str(s);
+        } else {
+            r.push_str(&p.to_uppercase());
+        }
     }
     r
 }

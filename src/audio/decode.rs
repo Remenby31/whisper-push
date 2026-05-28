@@ -16,8 +16,8 @@ pub fn load_audio_file(path: &Path) -> Result<Vec<f32>> {
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
     let mut hint = Hint::new();
@@ -26,18 +26,24 @@ pub fn load_audio_file(path: &Path) -> Result<Vec<f32>> {
     }
 
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
         .context("Unsupported audio format")?;
 
     let mut format = probed.format;
-    let track = format.default_track()
+    let track = format
+        .default_track()
         .ok_or_else(|| anyhow::anyhow!("No audio track found"))?;
 
-    let sample_rate = track.codec_params.sample_rate
+    let sample_rate = track
+        .codec_params
+        .sample_rate
         .ok_or_else(|| anyhow::anyhow!("Unknown sample rate"))? as usize;
-    let channels = track.codec_params.channels
-        .map(|c| c.count())
-        .unwrap_or(1);
+    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
@@ -51,7 +57,10 @@ pub fn load_audio_file(path: &Path) -> Result<Vec<f32>> {
         let packet = match format.next_packet() {
             Ok(p) => p,
             Err(symphonia::core::errors::Error::IoError(ref e))
-                if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break;
+            }
             Err(e) => return Err(e.into()),
         };
 

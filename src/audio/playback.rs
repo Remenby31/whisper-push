@@ -41,7 +41,10 @@ fn play_wav_bytes(wav_data: &[u8]) -> Result<()> {
     let spec = reader.spec();
 
     let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.into_samples::<f32>().filter_map(|s| s.ok()).collect(),
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|s| s.ok())
+            .collect(),
         hound::SampleFormat::Int => reader
             .into_samples::<i16>()
             .filter_map(|s| s.ok())
