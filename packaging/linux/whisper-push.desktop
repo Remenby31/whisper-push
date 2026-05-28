@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Whisper Push
+GenericName=Voice Dictation
+Comment=Push-to-talk voice dictation, 100% local
+Exec=whisper-push
+Icon=whisper-push
+Terminal=false
+StartupNotify=true
+Categories=AudioVideo;Audio;Utility;
+Keywords=dictation;voice;speech;whisper;transcription;
