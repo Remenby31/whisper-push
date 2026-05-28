@@ -7,9 +7,9 @@ mod inner {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use tracing::info;
-    use parakeet_rs::{Parakeet, Transcriber};
+    use parakeet_rs::{ParakeetTDT, Transcriber};
 
-    static PARAKEET: Mutex<Option<Parakeet>> = Mutex::new(None);
+    static PARAKEET: Mutex<Option<ParakeetTDT>> = Mutex::new(None);
 
     pub fn model_dir() -> PathBuf {
         crate::config::data_dir().join("models").join("parakeet")
@@ -19,13 +19,13 @@ mod inner {
     pub fn load_model() -> Result<()> {
         let dir = model_dir();
 
-        if !dir.join("tokenizer.json").exists() {
+        if !dir.join("vocab.txt").exists() {
             info!("Parakeet model not found, downloading...");
             download_model(&dir)?;
         }
 
-        info!("Loading Parakeet from {}...", dir.display());
-        let parakeet = Parakeet::from_pretrained(&dir, None)
+        info!("Loading Parakeet TDT from {}...", dir.display());
+        let parakeet = ParakeetTDT::from_pretrained(&dir, None)
             .map_err(|e| anyhow::anyhow!("Failed to load Parakeet: {e}"))?;
 
         *PARAKEET.lock().unwrap() = Some(parakeet);
@@ -62,15 +62,20 @@ mod inner {
         Ok(text)
     }
 
-    /// Download Parakeet TDT v3 model from HuggingFace.
+    /// Download Parakeet TDT v3 ONNX model from HuggingFace.
     fn download_model(dest: &PathBuf) -> Result<()> {
         std::fs::create_dir_all(dest)?;
 
         let api = hf_hub::api::sync::Api::new()?;
-        let repo = api.model("nvidia/parakeet-tdt-0.6b-v3".to_string());
+        let repo = api.model("istupakov/parakeet-tdt-0.6b-v3-onnx".to_string());
 
-        // Download required files
-        let files = ["model.onnx", "tokenizer.json", "model_config.yaml", "preprocessor_config.json"];
+        // Required files for ParakeetTDT: encoder + decoder + vocab
+        let files = [
+            "encoder-model.onnx",
+            "encoder-model.onnx.data",
+            "decoder_joint-model.onnx",
+            "vocab.txt",
+        ];
         for filename in &files {
             info!("Downloading {filename}...");
             let src = repo.get(filename)
