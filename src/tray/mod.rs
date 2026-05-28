@@ -886,10 +886,18 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let cfg = config.lock().unwrap();
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
+                let sound_feedback = cfg.sound_feedback;
                 // Real-time streaming is too slow (re-encodes all audio each chunk).
                 // Use batch mode for now + progressive typing for visual effect.
                 let is_voxtral_streaming = cfg.backend == "voxtral-local";
                 drop(cfg);
+
+                // Immediate audio acknowledgement — a 70 ms blip the moment the
+                // key is pressed, before hold_delay. The user gets a clear cue
+                // that the key was heard; hold_delay still gates recording.
+                if sound_feedback {
+                    crate::audio::playback::play_sound("start");
+                }
 
                 if is_voxtral_streaming {
                     // Streaming mode: use StreamingCapture + StreamingSession
@@ -900,9 +908,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 
                     // Run streaming in this thread (needs same thread for WGPU)
                     info!("Starting streaming transcription...");
-                    if cfg2.lock().unwrap().sound_feedback {
-                        crate::audio::playback::play_sound("start");
-                    }
+                    // (start sound already played immediately on HotkeyDown above)
 
                     // Ensure Voxtral model is loaded on this thread
                     if !crate::transcribe::voxtral_local::is_loaded() {
@@ -993,15 +999,11 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 
                         let pending = hold_pending.clone();
                         let rec = recording.clone();
-                        let cfg2 = config.clone();
                         std::thread::spawn(move || {
                             std::thread::sleep(std::time::Duration::from_secs_f64(delay));
                             if pending.load(Ordering::Relaxed) {
                                 pending.store(false, Ordering::Relaxed);
                                 rec.store(true, Ordering::Relaxed);
-                                if cfg2.lock().unwrap().sound_feedback {
-                                    crate::audio::playback::play_sound("start");
-                                }
                                 info!("Recording...");
                             }
                         });
