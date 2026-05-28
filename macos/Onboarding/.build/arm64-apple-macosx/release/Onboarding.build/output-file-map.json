@@ -1,0 +1,49 @@
+{
+  "": {
+    "dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Onboarding.d",
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Onboarding.o",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/primary.swiftdeps"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/DownloadView.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.dia"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/ModelPickerView.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.dia"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/OnboardingApp.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.dia"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/OnboardingState.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.dia"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/ReadyView.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.dia"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/Theme.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.dia"
+  },
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/WelcomeView.swift": {
+    "object": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.swift.o",
+    "swiftmodule": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView~partial.swiftmodule",
+    "swift-dependencies": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.swiftdeps",
+    "diagnostics": "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.dia"
+  }
+}

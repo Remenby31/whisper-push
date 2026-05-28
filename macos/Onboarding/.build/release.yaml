@@ -1,0 +1,66 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "Onboarding-arm64-apple-macosx-release.exe": ["<Onboarding-arm64-apple-macosx-release.exe>"]
+  "Onboarding-arm64-apple-macosx-release.module": ["<Onboarding-arm64-apple-macosx-release.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<Onboarding-arm64-apple-macosx-release.exe>","<Onboarding-arm64-apple-macosx-release.module>"]
+  "test": ["<Onboarding-arm64-apple-macosx-release.exe>","<Onboarding-arm64-apple-macosx-release.module>"]
+default: "main"
+nodes:
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+commands:
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/DownloadView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/ModelPickerView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/OnboardingApp.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/OnboardingState.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/ReadyView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/Theme.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/WelcomeView.swift"]
+    outputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/sources"]
+    description: "Write auxiliary file /Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/sources"
+
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.swift.o"]
+    outputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.product/Objects.LinkFileList"
+
+  "/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<Onboarding-arm64-apple-macosx-release.exe>":
+    tool: phony
+    inputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding"]
+    outputs: ["<Onboarding-arm64-apple-macosx-release.exe>"]
+
+  "<Onboarding-arm64-apple-macosx-release.module>":
+    tool: phony
+    inputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Modules/Onboarding.swiftmodule"]
+    outputs: ["<Onboarding-arm64-apple-macosx-release.module>"]
+
+  "C.Onboarding-arm64-apple-macosx-release.exe":
+    tool: shell
+    inputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.product/Objects.LinkFileList"]
+    outputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding"]
+    description: "Linking ./.build/arm64-apple-macosx/release/Onboarding"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release","-o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding","-module-name","Onboarding","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-dead_strip","-Xlinker","-alias","-Xlinker","_Onboarding_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx13.0","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g"]
+
+  "C.Onboarding-arm64-apple-macosx-release.module":
+    tool: shell
+    inputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/DownloadView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/ModelPickerView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/OnboardingApp.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/OnboardingState.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/ReadyView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/Theme.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/WelcomeView.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/swift-version--1AB21518FC5DEDBE.txt","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/sources"]
+    outputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/DownloadView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ModelPickerView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingApp.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/OnboardingState.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/ReadyView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/Theme.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/WelcomeView.swift.o","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Modules/Onboarding.swiftmodule"]
+    description: "Compiling Swift Module 'Onboarding' (7 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","Onboarding","-emit-dependencies","-emit-module","-emit-module-path","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Modules/Onboarding.swiftmodule","-output-file-map","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/output-file-map.json","-whole-module-optimization","-num-threads","14","-c","@/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding.build/sources","-I","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/Modules","-target","arm64-apple-macosx13.0","-whole-module-optimization","-num-threads","14","-serialize-diagnostics","-O","-j14","-DSWIFT_PACKAGE","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/baptistec/projects/whisper-push/macos/Onboarding/.build/arm64-apple-macosx/release/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","Onboarding_main","-swift-version","5","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","onboarding"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/baptistec/projects/whisper-push/macos/Onboarding/Sources/","/Users/baptistec/projects/whisper-push/macos/Onboarding/Package.swift","/Users/baptistec/projects/whisper-push/macos/Onboarding/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+

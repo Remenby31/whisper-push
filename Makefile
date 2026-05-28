@@ -1,5 +1,5 @@
 # Whisper Push — Rust build helpers
-.PHONY: build release bundle sign dmg clean check deploy install uninstall
+.PHONY: build release onboarding bundle sign dmg clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
@@ -32,16 +32,23 @@ check:
 	cargo check
 	@echo "✓ Check passed"
 
+# Build the SwiftUI onboarding wizard
+onboarding:
+	@cd macos/Onboarding && swift build -c release 2>&1 | tail -1
+	@echo "✓ Onboarding wizard built"
+
 # Create macOS .app bundle
-bundle: release
+bundle: release onboarding
 	@rm -rf "$(APP_DIR)"
 	@mkdir -p "$(APP_DIR)/Contents/MacOS"
 	@mkdir -p "$(APP_DIR)/Contents/Resources"
 	@cp $(BINARY) "$(APP_DIR)/Contents/MacOS/whisper-push"
 	@cp resources/Info.plist "$(APP_DIR)/Contents/"
 	@echo "APPL????" > "$(APP_DIR)/Contents/PkgInfo"
-	@# Brand app icon (PADDOCK squircle, generated from the brand kit)
+	@# Brand app icon
 	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns" || echo "  (warning: resources/AppIcon.icns missing — bundle will have no icon)"
+	@# Onboarding wizard (SwiftUI)
+	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(APP_DIR)/Contents/MacOS/onboarding"
 	@echo "✓ App bundle created at $(APP_DIR)"
 
 # Sign the app with Developer ID
