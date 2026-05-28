@@ -218,6 +218,12 @@ impl App {
             true, None,
         );
 
+        // Engine submenu (compact dropdown).
+        let backend_submenu = Submenu::new("Engine", true);
+        let _ = backend_submenu.append(&backend_parakeet);
+        let _ = backend_submenu.append(&backend_voxtral_local);
+        let _ = backend_submenu.append(&backend_whisper);
+
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
