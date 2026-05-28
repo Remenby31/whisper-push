@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     strategy:
+      # One failing platform shouldn't cancel the others (whisper.cpp's CMake
+      # tries to build ggml-metal on Linux, which is a separate upstream
+      # issue tracked elsewhere — don't let it mask macOS/Windows results).
+      fail-fast: false
       matrix:
         include:
           - os: macos-14
