@@ -38,31 +38,6 @@ No cloud, no account, no latency. A **35MB native binary** that transcribes spee
 | **Voxtral Q4** | ~400ms | ~300ms | ~3s |
 | **Whisper turbo Q5** | ~1.2s | ~200ms | ~5-10s |
 
-### Streaming
-
-| Engine | Streaming? | How |
-|---|---|---|
-| **Voxtral Realtime** | **Yes** — words appear while speaking | Causal encoder, incremental decode |
-| **Parakeet** (Nemotron) | Planned | Chunked audio, EOU detection |
-| **Whisper** | No | Batch only |
-
-### Accuracy (WER)
-
-| Engine | English | Multilingual |
-|---|---|---|
-| **Parakeet** | **1.69%** | 25 EU languages |
-| **Voxtral** | 4.90% | 13 languages |
-| **Whisper** | 2.70% | **99+ languages** |
-
-### Binary vs Python
-
-| | Python (v1) | Rust (v2) |
-|---|---|---|
-| **Binary** | ~600MB (PyInstaller) | **35MB** |
-| **Dependencies** | Python, PyObjC, sounddevice, scipy | **None** |
-| **Startup** | ~3s | **<100ms** |
-| **Memory (idle)** | ~200MB | **~15MB** |
-
 ## Quick Start
 
 ### macOS (Apple Silicon)
@@ -118,8 +93,8 @@ Settings are in the menu bar. Config file location:
 ```bash
 # Prerequisites: Rust 1.83+, cmake
 
-# macOS (all engines)
-cargo build --release --features "metal,parakeet,voxtral"
+# macOS (all engines included by default)
+cargo build --release
 make deploy
 
 # Linux (CPU)
@@ -145,7 +120,6 @@ src/
 ├── onboarding.rs         # First-launch wizard
 ├── autostart.rs          # Auto-start on login (all platforms)
 ├── notify.rs             # OS notifications
-├── overlay.rs            # Floating overlay (live transcription)
 ├── audio/
 │   ├── capture.rs        # cpal input → 16kHz mono f32
 │   ├── decode.rs         # MP3/WAV/OGG/FLAC decoder (symphonia)
