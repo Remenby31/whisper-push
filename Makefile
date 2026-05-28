@@ -12,10 +12,10 @@ build:
 	cargo build
 	@echo "✓ Debug build complete"
 
-# Release build (all backends on macOS)
+# Release build (default features include metal + parakeet + voxtral)
 release:
-	cargo build --release --features "metal,parakeet,voxtral"
-	@echo "✓ Release build complete (Metal + Parakeet + Voxtral)"
+	cargo build --release
+	@echo "✓ Release build complete"
 
 # Check (no build, just type-check)
 check:
@@ -84,15 +84,10 @@ notarize: dmg
 release-macos: notarize
 	@echo "✓ Release ready at build/dist/Whisper-Push-macOS-arm64.dmg"
 
-# Build + sign + relaunch (dev workflow)
+# Build + sign + launch (dev workflow)
 deploy: sign
-	@if pgrep -f "whisper-push" > /dev/null 2>&1; then \
-		echo "Stopping whisper-push..."; \
-		pkill -f "whisper-push" || true; \
-		sleep 1; \
-	fi
 	@open "$(APP_DIR)"
-	@echo "✓ Whisper Push relaunched"
+	@echo "✓ Whisper Push launched"
 
 # Clean
 clean:

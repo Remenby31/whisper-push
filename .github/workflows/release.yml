@@ -8,37 +8,36 @@ permissions:
   contents: write
 
 jobs:
-  # ─── macOS (Metal, Apple Silicon) ───────────────────────────────
+  # ─── macOS (Apple Silicon, Metal + all models) ─────────────────
   macos:
     runs-on: macos-14  # Apple Silicon runner
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release (Metal GPU)
-        run: cargo build --release --features metal
-      - name: Create app bundle
-        run: make bundle
-      - name: Upload artifact
+      - name: Build release
+        run: cargo build --release
+      - name: Create DMG
+        run: make dmg
+      - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-macos-arm64
-          path: build/Whisper Push.app
+          path: build/*.dmg
 
-  # ─── Linux (CPU) ───────────────────────────────────────────────
+  # ─── Linux (CPU + all models) ──────────────────────────────────
   linux-cpu:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
-      - name: Build release
-        run: cargo build --release
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake pkg-config
+      - name: Build release (no GPU features)
+        run: cargo build --release --no-default-features --features voxtral,parakeet
       - name: Package
         run: |
           mkdir -p dist
           cp target/release/whisper-push dist/
-          cp -r sounds dist/
           tar czf whisper-push-linux-x86_64.tar.gz -C dist .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -46,7 +45,7 @@ jobs:
           name: whisper-push-linux-x86_64
           path: whisper-push-linux-x86_64.tar.gz
 
-  # ─── Linux (CUDA) ──────────────────────────────────────────────
+  # ─── Linux (CUDA + all models) ─────────────────────────────────
   linux-cuda:
     runs-on: ubuntu-latest
     steps:
@@ -56,14 +55,13 @@ jobs:
         with:
           cuda: '12.4.0'
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake pkg-config
       - name: Build release with CUDA
-        run: cargo build --release --features cuda
+        run: cargo build --release --no-default-features --features cuda,voxtral,parakeet
       - name: Package
         run: |
           mkdir -p dist
           cp target/release/whisper-push dist/
-          cp -r sounds dist/
           tar czf whisper-push-linux-x86_64-cuda.tar.gz -C dist .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -71,20 +69,19 @@ jobs:
           name: whisper-push-linux-x86_64-cuda
           path: whisper-push-linux-x86_64-cuda.tar.gz
 
-  # ─── Windows (CPU) ─────────────────────────────────────────────
+  # ─── Windows (CPU + all models) ────────────────────────────────
   windows-cpu:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --no-default-features --features voxtral,parakeet
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
           cp target/release/whisper-push.exe dist/
-          cp -r sounds dist/
           cd dist && 7z a ../whisper-push-windows-x64.zip .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -92,7 +89,7 @@ jobs:
           name: whisper-push-windows-x64
           path: whisper-push-windows-x64.zip
 
-  # ─── Windows (CUDA) ────────────────────────────────────────────
+  # ─── Windows (CUDA + all models) ───────────────────────────────
   windows-cuda:
     runs-on: windows-latest
     steps:
@@ -102,13 +99,12 @@ jobs:
         with:
           cuda: '12.4.0'
       - name: Build release with CUDA
-        run: cargo build --release --features cuda
+        run: cargo build --release --no-default-features --features cuda,voxtral,parakeet
       - name: Package
         shell: bash
         run: |
           mkdir -p dist
           cp target/release/whisper-push.exe dist/
-          cp -r sounds dist/
           cd dist && 7z a ../whisper-push-windows-x64-cuda.zip .
       - name: Upload artifact
         uses: actions/upload-artifact@v4
