@@ -4,7 +4,7 @@ use crate::state::{AppState, Event, State};
 use anyhow::Result;
 use crossbeam_channel::Receiver;
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use winit::application::ApplicationHandler;
@@ -1012,7 +1012,6 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
 fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let hold_pending = Arc::new(AtomicBool::new(false));
     let recording = Arc::new(AtomicBool::new(false));
     let capture: Arc<Mutex<Option<crate::audio::capture::AudioCapture>>> =
         Arc::new(Mutex::new(None));
@@ -1139,33 +1138,52 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     continue; // Don't fall through to batch mode
                 }
 
-                // Batch mode (Whisper, Parakeet)
+                // Batch mode (Whisper, Parakeet) — do NOT pre-roll the mic.
+                // Wait for hold_delay synchronously while peeking for an early
+                // HotkeyUp; the microphone only opens once a genuine hold is
+                // confirmed. Privacy: with the previous pre-roll, every Ctrl
+                // tap (e.g. Ctrl+C) briefly opened the mic, which made the
+                // macOS "mic in use" indicator flicker / stay lit.
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs_f64(delay);
+                let mut cancelled = false;
+                while let Some(remaining) =
+                    deadline.checked_duration_since(std::time::Instant::now())
+                {
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    match rx.recv_timeout(remaining) {
+                        Ok(Event::HotkeyUp) => {
+                            cancelled = true;
+                            break;
+                        }
+                        Ok(_) => {} // ignore other events during the gate
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
+                        Err(_) => {
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                }
+                if cancelled {
+                    debug!("Quick tap — mic never opened");
+                    continue;
+                }
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
                         *capture.lock().unwrap() = Some(cap);
-                        hold_pending.store(true, Ordering::Relaxed);
-
-                        let pending = hold_pending.clone();
-                        let rec = recording.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_secs_f64(delay));
-                            if pending.load(Ordering::Relaxed) {
-                                pending.store(false, Ordering::Relaxed);
-                                rec.store(true, Ordering::Relaxed);
-                                info!("Recording...");
-                            }
-                        });
+                        recording.store(true, Ordering::Relaxed);
+                        info!("Recording…");
                     }
                     Err(e) => warn!("Capture failed: {e}"),
                 }
             }
 
             Ok(Event::HotkeyUp) => {
-                if hold_pending.load(Ordering::Relaxed) {
-                    hold_pending.store(false, Ordering::Relaxed);
-                    capture.lock().unwrap().take();
-                    continue;
-                }
+                // A quick-tap HotkeyUp is consumed by the hold_delay gate in
+                // the HotkeyDown arm; if we receive one here it means hold was
+                // confirmed and the mic is open.
                 if !recording.load(Ordering::Relaxed) {
                     continue;
                 }
