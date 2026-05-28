@@ -35,8 +35,21 @@ impl Backend {
 
 static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
 
-/// Get the path where models are stored.
+/// Get the path where the model file lives.
+///
+/// Priority: a model bundled inside the .app `Contents/Resources/models/`
+/// (zero-download install) → otherwise the user data dir (downloaded on first
+/// run and cached there).
 pub fn model_path(filename: &str) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        // .../Whisper Push.app/Contents/MacOS/whisper-push → ../Resources/models/
+        if let Some(resources) = exe.parent().and_then(|p| p.parent()).map(|c| c.join("Resources")) {
+            let bundled = resources.join("models").join(filename);
+            if bundled.exists() {
+                return bundled;
+            }
+        }
+    }
     crate::config::data_dir().join("models").join(filename)
 }
 
