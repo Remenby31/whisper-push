@@ -49,7 +49,10 @@ pub fn run() -> String {
     // Try the SwiftUI wizard (macOS .app bundle only)
     #[cfg(target_os = "macos")]
     if let Some(result) = run_swift_wizard(&hw.gpu.label(), recommended_backend) {
-        info!("Wizard chose model: {} (auto_start: {})", result.model, result.auto_start);
+        info!(
+            "Wizard chose model: {} (auto_start: {})",
+            result.model, result.auto_start
+        );
 
         if result.auto_start {
             crate::autostart::enable();
@@ -77,19 +80,25 @@ pub fn run() -> String {
 #[cfg(target_os = "macos")]
 fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> Option<WizardResult> {
     // Find the wizard binary next to our executable
-    let wizard_path = std::env::current_exe().ok()?
-        .parent()?
-        .join("onboarding");
+    let wizard_path = std::env::current_exe().ok()?.parent()?.join("onboarding");
 
     if !wizard_path.exists() {
-        info!("Onboarding wizard not found at {}, using fallback", wizard_path.display());
+        info!(
+            "Onboarding wizard not found at {}, using fallback",
+            wizard_path.display()
+        );
         return None;
     }
 
     info!("Launching onboarding wizard: {}", wizard_path.display());
 
     let output = std::process::Command::new(&wizard_path)
-        .args(["--hardware", hardware_name, "--recommended", recommended_backend])
+        .args([
+            "--hardware",
+            hardware_name,
+            "--recommended",
+            recommended_backend,
+        ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
@@ -133,7 +142,10 @@ fn run_fallback(recommended_backend: &str, recommended_model: &str) -> String {
 
     crate::notify::send(
         "Whisper Push",
-        &format!("Ready! Using {}. Hold Control to dictate.", recommended_model),
+        &format!(
+            "Ready! Using {}. Hold Control to dictate.",
+            recommended_model
+        ),
     );
 
     recommended_model.to_string()

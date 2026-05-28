@@ -672,8 +672,10 @@ impl App {
                         for (bi, bv) in &mi.backend_items {
                             let current_text = bi.text();
                             let stripped = current_text
-                                .trim_start_matches('\u{25CF}').trim_start()
-                                .trim_end_matches('\u{2913}').trim_end();
+                                .trim_start_matches('\u{25CF}')
+                                .trim_start()
+                                .trim_end_matches('\u{2913}')
+                                .trim_end();
                             if bv == backend_value {
                                 bi.set_text(&format!("\u{25CF} {stripped}"));
                             } else {
@@ -1226,8 +1228,13 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let needs_download = !crate::model_manager::is_model_downloaded(backend);
                 if needs_download {
                     let size = crate::model_manager::model_size_mb(backend);
-                    crate::notify::send("Whisper Push",
-                        &format!("Downloading {} (~{}MB)... This may take a few minutes.", backend, size));
+                    crate::notify::send(
+                        "Whisper Push",
+                        &format!(
+                            "Downloading {} (~{}MB)... This may take a few minutes.",
+                            backend, size
+                        ),
+                    );
                 }
 
                 let load_result = match backend {
