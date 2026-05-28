@@ -12,7 +12,11 @@ fn test_mic_capture_produces_samples() {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let audio = cap.stop();
             assert!(!audio.is_empty(), "No samples captured");
-            println!("Captured {} samples ({:.1}s)", audio.len(), audio.len() as f32 / 16000.0);
+            println!(
+                "Captured {} samples ({:.1}s)",
+                audio.len(),
+                audio.len() as f32 / 16000.0
+            );
 
             let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
             if rms < whisper_push::audio::capture::SILENCE_RMS_THRESHOLD {
@@ -60,7 +64,10 @@ fn test_streaming_capture_produces_chunks() {
             let mut chunk_count = 0;
 
             while start.elapsed() < std::time::Duration::from_secs(2) {
-                if let Ok(chunk) = capture.chunk_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                if let Ok(chunk) = capture
+                    .chunk_rx
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                {
                     chunk_count += 1;
                     println!("Chunk {}: {} samples", chunk_count, chunk.samples.len());
                 }
@@ -68,7 +75,10 @@ fn test_streaming_capture_produces_chunks() {
             drop(capture);
 
             println!("Received {} chunks in 2 seconds", chunk_count);
-            assert!(chunk_count >= 2, "Expected at least 2 chunks in 2s, got {chunk_count}");
+            assert!(
+                chunk_count >= 2,
+                "Expected at least 2 chunks in 2s, got {chunk_count}"
+            );
         }
         Err(e) => {
             println!("Streaming capture unavailable: {e} — skipping");

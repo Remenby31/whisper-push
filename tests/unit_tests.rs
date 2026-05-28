@@ -16,10 +16,22 @@ fn test_config_defaults_via_lib() {
 
 #[test]
 fn test_backend_for_model_all() {
-    assert_eq!(whisper_push::model_manager::backend_for_model("ggml-large-v3-turbo-q5_0.bin"), "whisper");
-    assert_eq!(whisper_push::model_manager::backend_for_model("parakeet-tdt-0.6b-v3"), "parakeet");
-    assert_eq!(whisper_push::model_manager::backend_for_model("voxtral-q4.gguf"), "voxtral-local");
-    assert_eq!(whisper_push::model_manager::backend_for_model("unknown"), "whisper");
+    assert_eq!(
+        whisper_push::model_manager::backend_for_model("ggml-large-v3-turbo-q5_0.bin"),
+        "whisper"
+    );
+    assert_eq!(
+        whisper_push::model_manager::backend_for_model("parakeet-tdt-0.6b-v3"),
+        "parakeet"
+    );
+    assert_eq!(
+        whisper_push::model_manager::backend_for_model("voxtral-q4.gguf"),
+        "voxtral-local"
+    );
+    assert_eq!(
+        whisper_push::model_manager::backend_for_model("unknown"),
+        "whisper"
+    );
 }
 
 #[test]
@@ -47,6 +59,7 @@ fn test_perm_status() {
     let status = whisper_push::permissions::PermissionStatus {
         microphone: whisper_push::permissions::PermState::Granted,
         accessibility: whisper_push::permissions::PermState::Denied,
+        input_monitoring: whisper_push::permissions::PermState::Granted,
     };
     assert!(!status.all_granted());
     assert_eq!(status.missing_count(), 1);

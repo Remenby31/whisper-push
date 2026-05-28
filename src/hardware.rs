@@ -116,21 +116,38 @@ mod tests {
 
     #[test]
     fn test_gpu_labels() {
-        assert_eq!(GpuInfo::AppleSilicon { chip: "M4".into() }.label(), "Apple Silicon (Metal)");
-        assert_eq!(GpuInfo::NvidiaCuda { name: "RTX 4090".into() }.label(), "NVIDIA (CUDA)");
+        assert_eq!(
+            GpuInfo::AppleSilicon { chip: "M4".into() }.label(),
+            "Apple Silicon (Metal)"
+        );
+        assert_eq!(
+            GpuInfo::NvidiaCuda {
+                name: "RTX 4090".into()
+            }
+            .label(),
+            "NVIDIA (CUDA)"
+        );
         assert_eq!(GpuInfo::CpuOnly.label(), "CPU only");
         assert_eq!(GpuInfo::Unknown.label(), "Unknown");
     }
 
     #[test]
     fn test_recommend_cpu_only() {
-        let hw = HardwareInfo { os: "linux", arch: "x86_64", gpu: GpuInfo::CpuOnly };
+        let hw = HardwareInfo {
+            os: "linux",
+            arch: "x86_64",
+            gpu: GpuInfo::CpuOnly,
+        };
         assert_eq!(recommend_backend(&hw), "whisper");
     }
 
     #[test]
     fn test_recommend_apple_silicon() {
-        let hw = HardwareInfo { os: "macos", arch: "aarch64", gpu: GpuInfo::AppleSilicon { chip: "M4".into() } };
+        let hw = HardwareInfo {
+            os: "macos",
+            arch: "aarch64",
+            gpu: GpuInfo::AppleSilicon { chip: "M4".into() },
+        };
         let backend = recommend_backend(&hw);
         // Either parakeet (if feature enabled) or whisper
         assert!(backend == "whisper" || backend == "parakeet");

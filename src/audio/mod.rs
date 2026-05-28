@@ -25,6 +25,16 @@ pub fn list_devices() -> Result<Vec<String>> {
     Ok(devices)
 }
 
+/// List available output audio devices (used for sound-feedback playback).
+pub fn list_output_devices() -> Result<Vec<String>> {
+    let host = cpal::default_host();
+    let devices: Vec<String> = host
+        .output_devices()?
+        .filter_map(|d| d.name().ok())
+        .collect();
+    Ok(devices)
+}
+
 /// Find an input device by name ("auto" = default).
 pub fn find_input_device(name: &str) -> Result<cpal::Device> {
     let host = cpal::default_host();
@@ -47,7 +57,8 @@ pub fn create_resampler(device_sr: u32) -> Result<Option<Arc<Mutex<FftFixedIn<f3
         device_sr as usize,
         SAMPLE_RATE as usize,
         RESAMPLE_CHUNK_SIZE,
-        1, 1,
+        1,
+        1,
     )?;
     Ok(Some(Arc::new(Mutex::new(resampler))))
 }

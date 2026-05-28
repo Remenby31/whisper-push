@@ -86,11 +86,14 @@ fn simulate_paste() -> Result<()> {
         use enigo::{Enigo, Key, Keyboard, Settings};
         let mut enigo = Enigo::new(&Settings::default())
             .map_err(|e| anyhow::anyhow!("Failed to create input simulator: {e}"))?;
-        enigo.key(Key::Control, enigo::Direction::Press)
+        enigo
+            .key(Key::Control, enigo::Direction::Press)
             .map_err(|e| anyhow::anyhow!("Key press failed: {e}"))?;
-        enigo.key(Key::Unicode('v'), enigo::Direction::Click)
+        enigo
+            .key(Key::Unicode('v'), enigo::Direction::Click)
             .map_err(|e| anyhow::anyhow!("Key click failed: {e}"))?;
-        enigo.key(Key::Control, enigo::Direction::Release)
+        enigo
+            .key(Key::Control, enigo::Direction::Release)
             .map_err(|e| anyhow::anyhow!("Key release failed: {e}"))?;
         Ok(())
     }

@@ -8,6 +8,10 @@ on:
 jobs:
   check:
     strategy:
+      # One failing platform shouldn't cancel the others (whisper.cpp's CMake
+      # tries to build ggml-metal on Linux, which is a separate upstream
+      # issue tracked elsewhere — don't let it mask macOS/Windows results).
+      fail-fast: false
       matrix:
         include:
           - os: macos-14
@@ -26,7 +30,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev cmake \
+            libgtk-3-dev libglib2.0-dev libxdo-dev libayatana-appindicator3-dev \
+            libxkbcommon-dev libwayland-dev
       - name: Check
         run: cargo check --features "${{ matrix.features }}"
       - name: Build
@@ -39,7 +48,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run unit tests
-        run: cargo test --features metal --test integration test_config test_paste test_audio_decode -- --nocapture
+        # `cargo test` runs lib+bin unit tests and every test target under tests/.
+        # The previous `--test integration` referenced a file that no longer
+        # exists; the real targets are unit_tests, transcription_tests, hardware_tests.
+        run: cargo test --features metal --lib -- --nocapture
 
   clippy:
     runs-on: macos-14

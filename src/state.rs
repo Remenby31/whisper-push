@@ -33,6 +33,8 @@ pub enum Event {
     HotkeyUp,
     /// Hotkey toggled (toggle mode)
     HotkeyToggle,
+    /// A custom hotkey was captured (hotkey string, mode)
+    HotkeyCaptured(String, String),
     /// Recording captured, ready to transcribe
     AudioCaptured(Vec<f32>),
     /// Transcription result
@@ -103,9 +105,7 @@ pub fn current_status() -> String {
     // Simple check: is the lock file held?
     let lock_path = crate::config::data_dir().join("whisper-push.lock");
     if lock_path.exists() {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&lock_path);
+        let file = std::fs::OpenOptions::new().write(true).open(&lock_path);
         match file {
             Ok(f) => {
                 use fs4::fs_std::FileExt;
@@ -174,4 +174,3 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 }
-

@@ -1,7 +1,6 @@
 //! Auto-start on login — platform-specific implementation.
 #![allow(dead_code)]
 
-
 /// Enable auto-start on login.
 pub fn enable() {
     #[cfg(target_os = "macos")]
@@ -34,7 +33,8 @@ mod macos {
 
         let app_path = std::env::current_exe().unwrap_or_default();
 
-        let content = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+        let content = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -49,7 +49,9 @@ mod macos {
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>
-</plist>"#, app_path.display());
+</plist>"#,
+            app_path.display()
+        );
 
         let _ = std::fs::create_dir_all(&plist_dir);
         if let Err(e) = std::fs::write(&plist_path, content) {
@@ -60,7 +62,8 @@ mod macos {
     }
 
     pub fn disable() {
-        let plist_path = dirs::home_dir().unwrap()
+        let plist_path = dirs::home_dir()
+            .unwrap()
             .join("Library/LaunchAgents")
             .join(format!("{PLIST_LABEL}.plist"));
         let _ = std::fs::remove_file(&plist_path);
@@ -77,13 +80,16 @@ mod linux {
         let desktop_path = autostart_dir.join("whisper-push.desktop");
         let exe = std::env::current_exe().unwrap_or_default();
 
-        let content = format!("[Desktop Entry]\n\
+        let content = format!(
+            "[Desktop Entry]\n\
             Type=Application\n\
             Name=Whisper Push\n\
             Exec={}\n\
             Hidden=false\n\
             NoDisplay=false\n\
-            X-GNOME-Autostart-enabled=true\n", exe.display());
+            X-GNOME-Autostart-enabled=true\n",
+            exe.display()
+        );
 
         let _ = std::fs::create_dir_all(&autostart_dir);
         let _ = std::fs::write(&desktop_path, content);
@@ -91,7 +97,8 @@ mod linux {
     }
 
     pub fn disable() {
-        let desktop_path = dirs::config_dir().unwrap()
+        let desktop_path = dirs::config_dir()
+            .unwrap()
             .join("autostart/whisper-push.desktop");
         let _ = std::fs::remove_file(&desktop_path);
         info!("Auto-start disabled");
@@ -105,17 +112,30 @@ mod windows {
     pub fn enable() {
         let exe = std::env::current_exe().unwrap_or_default();
         let _ = std::process::Command::new("reg")
-            .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                   "/v", "WhisperPush", "/t", "REG_SZ",
-                   "/d", &exe.display().to_string(), "/f"])
+            .args([
+                "add",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "WhisperPush",
+                "/t",
+                "REG_SZ",
+                "/d",
+                &exe.display().to_string(),
+                "/f",
+            ])
             .output();
         info!("Auto-start enabled (Registry)");
     }
 
     pub fn disable() {
         let _ = std::process::Command::new("reg")
-            .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                   "/v", "WhisperPush", "/f"])
+            .args([
+                "delete",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "WhisperPush",
+                "/f",
+            ])
             .output();
         info!("Auto-start disabled");
     }
