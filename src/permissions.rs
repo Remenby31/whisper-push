@@ -280,6 +280,7 @@ mod tests {
         let status = PermissionStatus {
             microphone: PermState::Granted,
             accessibility: PermState::Granted,
+            input_monitoring: PermState::Granted,
         };
         assert!(status.all_granted());
         assert_eq!(status.missing_count(), 0);
@@ -290,6 +291,7 @@ mod tests {
         let status = PermissionStatus {
             microphone: PermState::Granted,
             accessibility: PermState::Denied,
+            input_monitoring: PermState::Granted,
         };
         assert!(!status.all_granted());
         assert_eq!(status.missing_count(), 1);
@@ -300,9 +302,10 @@ mod tests {
         let status = PermissionStatus {
             microphone: PermState::NotRequested,
             accessibility: PermState::Denied,
+            input_monitoring: PermState::Denied,
         };
         assert!(!status.all_granted());
-        assert_eq!(status.missing_count(), 2);
+        assert_eq!(status.missing_count(), 3);
     }
 }
 

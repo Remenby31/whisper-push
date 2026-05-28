@@ -59,6 +59,7 @@ fn test_perm_status() {
     let status = whisper_push::permissions::PermissionStatus {
         microphone: whisper_push::permissions::PermState::Granted,
         accessibility: whisper_push::permissions::PermState::Denied,
+        input_monitoring: whisper_push::permissions::PermState::Granted,
     };
     assert!(!status.all_granted());
     assert_eq!(status.missing_count(), 1);

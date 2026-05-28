@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn test_parse_hotkey_ctrl() {
-        let hk = parse_hotkey("ctrl");
+        let hk = parse_hotkey("ctrl", "hold");
         assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_CONTROL);
         assert!(hk.key_code.is_none());
         assert!(hk.modifier_keycode.is_none());
@@ -253,14 +253,14 @@ mod tests {
 
     #[test]
     fn test_parse_hotkey_rctrl() {
-        let hk = parse_hotkey("rctrl");
+        let hk = parse_hotkey("rctrl", "hold");
         assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_CONTROL);
         assert_eq!(hk.modifier_keycode, Some(KEYCODE_RCTRL));
     }
 
     #[test]
     fn test_parse_hotkey_combo() {
-        let hk = parse_hotkey("cmd+shift+space");
+        let hk = parse_hotkey("cmd+shift+space", "toggle");
         assert_eq!(
             hk.modifier_flags,
             CG_EVENT_FLAG_COMMAND | CG_EVENT_FLAG_SHIFT
@@ -270,14 +270,14 @@ mod tests {
 
     #[test]
     fn test_parse_hotkey_rcmd() {
-        let hk = parse_hotkey("rcmd");
+        let hk = parse_hotkey("rcmd", "hold");
         assert_eq!(hk.modifier_flags, CG_EVENT_FLAG_COMMAND);
         assert_eq!(hk.modifier_keycode, Some(KEYCODE_RCMD));
     }
 
     #[test]
     fn test_parse_hotkey_unknown_gives_zero_flags() {
-        let hk = parse_hotkey("unknown");
+        let hk = parse_hotkey("unknown", "hold");
         assert_eq!(hk.modifier_flags, 0);
         assert!(hk.key_code.is_none());
         assert!(hk.modifier_keycode.is_none());
