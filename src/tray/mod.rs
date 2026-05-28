@@ -427,10 +427,12 @@ impl App {
                         c.model = model_name.to_string();
                         let _ = c.save();
                         drop(c);
-                        // Update ● indicator on all items
+                        // Update ● indicator and remove ⤓ download icon
                         for (bi, bv) in &mi.backend_items {
                             let current_text = bi.text();
-                            let stripped = current_text.trim_start_matches('\u{25CF}').trim_start();
+                            let stripped = current_text
+                                .trim_start_matches('\u{25CF}').trim_start()
+                                .trim_end_matches('\u{2913}').trim_end();
                             if bv == backend_value {
                                 bi.set_text(&format!("\u{25CF} {stripped}"));
                             } else {
