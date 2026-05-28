@@ -71,6 +71,12 @@ impl AudioCapture {
 
     /// Stop capture and return the recorded audio as 16kHz mono f32.
     pub fn stop(mut self) -> Vec<f32> {
+        // Explicitly pause before drop — on macOS, dropping a cpal Stream
+        // alone doesn't always tear down the AudioUnit immediately, leaving
+        // the system "mic in use" indicator lit. pause() forces it down.
+        if let Some(stream) = self.stream.as_ref() {
+            let _ = stream.pause();
+        }
         self.stream.take();
         let audio = std::mem::take(&mut *self.buffer.lock().unwrap());
         let duration = audio.len() as f32 / SAMPLE_RATE as f32;
@@ -98,6 +104,9 @@ impl AudioCapture {
 
 impl Drop for AudioCapture {
     fn drop(&mut self) {
+        if let Some(stream) = self.stream.as_ref() {
+            let _ = stream.pause();
+        }
         self.stream.take();
     }
 }

@@ -97,6 +97,12 @@ impl StreamingCapture {
 
 impl Drop for StreamingCapture {
     fn drop(&mut self) {
+        // Pause before drop so macOS releases the AudioUnit and the system
+        // "mic in use" indicator turns off (cpal Stream::drop alone is not
+        // enough on macOS).
+        if let Some(stream) = self.stream.as_ref() {
+            let _ = stream.pause();
+        }
         self.stream.take();
     }
 }
