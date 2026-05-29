@@ -1,8 +1,8 @@
 /// macOS permission checking and prompting.
 
-/// Guided setup: fire the system prompts, open the panes that need a manual
-/// toggle, then poll until everything is granted and restart the daemon so the
-/// keyboard event tap is re-created with permissions. Runs in the background.
+/// Guided setup: walk the user through each permission one at a time, poll
+/// until granted, then move to the next. Restarts the daemon at the end so
+/// the keyboard event tap is re-created with permissions. Runs in the background.
 pub fn guided_setup() {
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| {
@@ -14,40 +14,84 @@ pub fn guided_setup() {
             return;
         }
 
-        // Fire the OS prompts (adds the app to each Privacy list).
-        prompt_missing(&initial);
+        // ── Step 1: Microphone (one-tap system dialog) ──
+        if initial.microphone != PermState::Granted {
+            crate::notify::send(
+                "Whisper Push \u{2014} Setup (1/3)",
+                "Grant microphone access in the dialog.",
+            );
+            request_microphone();
+            // Mic prompt is a one-tap dialog; poll briefly.
+            if !poll_until(|| check_microphone() == PermState::Granted, 30) {
+                open_settings("Privacy_Microphone");
+                if !poll_until(|| check_microphone() == PermState::Granted, 30) {
+                    crate::notify::send(
+                        "Whisper Push",
+                        "Microphone not granted. Open menu \u{2192} Permissions to retry.",
+                    );
+                    return;
+                }
+            }
+        }
 
-        // Open the panes that require a manual toggle (mic is a one-tap prompt).
-        if initial.accessibility != PermState::Granted {
+        // ── Step 2: Accessibility (manual toggle in Settings) ──
+        if check_accessibility() != PermState::Granted {
+            request_accessibility();
+            crate::notify::send(
+                "Whisper Push \u{2014} Setup (2/3)",
+                "Enable Whisper Push in Accessibility.",
+            );
             open_settings("Privacy_Accessibility");
-            std::thread::sleep(Duration::from_millis(900));
-        }
-        if initial.input_monitoring != PermState::Granted {
-            open_settings("Privacy_ListenEvent");
-        }
-        crate::notify::send(
-            "Whisper Push \u{2014} Setup",
-            "Enable Whisper Push in Accessibility and Input Monitoring to turn on dictation.",
-        );
-
-        // Poll up to ~3 min for everything to be granted.
-        for _ in 0..60 {
-            std::thread::sleep(Duration::from_secs(3));
-            if check_all().all_granted() {
+            if !poll_until(|| check_accessibility() == PermState::Granted, 60) {
                 crate::notify::send(
                     "Whisper Push",
-                    "\u{2713} All set! Restarting to enable the hotkey\u{2026}",
+                    "Accessibility not granted. Open menu \u{2192} Permissions to retry.",
                 );
-                std::thread::sleep(Duration::from_millis(1500));
-                restart_daemon();
                 return;
             }
         }
+
+        // ── Step 3: Input Monitoring (manual toggle in Settings) ──
+        // Called AFTER Accessibility — uses CGRequestListenEventAccess which
+        // is not suppressed by the earlier AXIsProcessTrustedWithOptions call
+        // (unlike IOHIDRequestAccess — Apple bug FB7381305).
+        if check_input_monitoring() != PermState::Granted {
+            request_input_monitoring();
+            crate::notify::send(
+                "Whisper Push \u{2014} Setup (3/3)",
+                "Enable Whisper Push in Input Monitoring.",
+            );
+            open_settings("Privacy_ListenEvent");
+            if !poll_until(|| check_input_monitoring() == PermState::Granted, 60) {
+                crate::notify::send(
+                    "Whisper Push",
+                    "Input Monitoring not granted. Open menu \u{2192} Permissions to retry.",
+                );
+                return;
+            }
+        }
+
+        // ── All granted — restart to pick up permissions ──
         crate::notify::send(
             "Whisper Push",
-            "Still missing a permission. Open the menu \u{2192} Permissions to finish setup.",
+            "\u{2713} All set! Restarting to enable the hotkey\u{2026}",
         );
+        std::thread::sleep(Duration::from_millis(1500));
+        restart_daemon();
     });
+}
+
+/// Poll a condition every 3 seconds, up to `max_polls` times.
+/// Returns true if the condition was met.
+#[cfg(target_os = "macos")]
+fn poll_until(check: impl Fn() -> bool, max_polls: usize) -> bool {
+    for _ in 0..max_polls {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        if check() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Restart the launchd-managed daemon so a fresh process picks up newly granted
@@ -331,23 +375,25 @@ fn request_accessibility() {
 
 // ── Input Monitoring (kTCCServiceListenEvent) ───────────────────
 // A keyboard CGEventTap needs this on macOS 10.15+, separate from Accessibility.
-
-// IOHIDRequestType: 0 = postEvent, 1 = listenEvent
-#[cfg(target_os = "macos")]
-const K_IOHID_REQUEST_TYPE_LISTEN_EVENT: u32 = 1;
+//
+// NOTE: We use the CoreGraphics APIs (CGPreflightListenEventAccess /
+// CGRequestListenEventAccess) instead of the IOKit equivalents
+// (IOHIDCheckAccess / IOHIDRequestAccess). The IOKit request is
+// silently suppressed when called after AXIsProcessTrustedWithOptions
+// in the same process (Apple bug FB7381305). The CG APIs don't have
+// this conflict.
 
 #[cfg(target_os = "macos")]
 fn check_input_monitoring() -> PermState {
-    #[link(name = "IOKit", kind = "framework")]
+    #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
-        fn IOHIDCheckAccess(request: u32) -> u32;
+        fn CGPreflightListenEventAccess() -> bool;
     }
-    // IOHIDAccessType: 0 = granted, 1 = denied, 2 = unknown
     unsafe {
-        match IOHIDCheckAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT) {
-            0 => PermState::Granted,
-            1 => PermState::Denied,
-            _ => PermState::NotRequested,
+        if CGPreflightListenEventAccess() {
+            PermState::Granted
+        } else {
+            PermState::Denied
         }
     }
 }
@@ -359,12 +405,12 @@ fn check_input_monitoring() -> PermState {
 
 #[cfg(target_os = "macos")]
 fn request_input_monitoring() {
-    #[link(name = "IOKit", kind = "framework")]
+    #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
-        fn IOHIDRequestAccess(request: u32) -> bool;
+        fn CGRequestListenEventAccess() -> bool;
     }
     tracing::info!("Requesting Input Monitoring permission...");
     unsafe {
-        IOHIDRequestAccess(K_IOHID_REQUEST_TYPE_LISTEN_EVENT);
+        CGRequestListenEventAccess();
     }
 }
