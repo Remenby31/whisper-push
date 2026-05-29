@@ -2,9 +2,11 @@
 name = "whisper-push"
 version = "0.1.0-beta"
 edition = "2024"
+authors = ["Whisper Push contributors <hello@whisperpush.com>"]
 description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
 license = "MIT"
 repository = "https://github.com/Remenby31/whisper-push"
+homepage = "https://whisperpush.com"
 categories = ["multimedia::audio", "accessibility"]
 keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
 
