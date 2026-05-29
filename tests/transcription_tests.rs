@@ -341,7 +341,6 @@ fn test_whisper_via_backend_dispatch() {
 // ═══════════════════════════════════════════════════════════════
 
 fn test_parakeet_load_unload() {
-
     match transcribe::parakeet::load_model() {
         Ok(()) => {
             assert!(transcribe::parakeet::is_loaded());
@@ -356,7 +355,6 @@ fn test_parakeet_load_unload() {
 }
 
 fn test_parakeet_transcribe_english() {
-
     let samples = match generate_audio("Hello world this is a parakeet test") {
         Some(s) => s,
         None => {
@@ -384,7 +382,6 @@ fn test_parakeet_transcribe_english() {
 }
 
 fn test_parakeet_silence() {
-
     let silence = vec![0.0f32; 48_000];
 
     if transcribe::parakeet::load_model().is_err() {
@@ -401,7 +398,6 @@ fn test_parakeet_silence() {
 }
 
 fn test_parakeet_via_backend_dispatch() {
-
     let samples = match generate_audio("Backend dispatch parakeet") {
         Some(s) => s,
         None => {
@@ -425,7 +421,6 @@ fn test_parakeet_via_backend_dispatch() {
 }
 
 fn test_parakeet_performance() {
-
     let samples = match generate_audio("The quick brown fox jumps over the lazy dog") {
         Some(s) => s,
         None => {
@@ -476,7 +471,6 @@ fn voxtral_available() -> bool {
 }
 
 fn ensure_voxtral_loaded() -> bool {
-
     if !voxtral_available() {
         println!("Voxtral model not downloaded, skipping");
         return false;
