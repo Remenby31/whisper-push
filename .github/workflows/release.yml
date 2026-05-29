@@ -3,49 +3,64 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Allow dry-running the full pipeline from the Actions tab without tagging.
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+env:
+  # Runtime system libraries needed by tray-icon, enigo, glib, wgpu, alsa.
+  LINUX_DEPS: >-
+    libasound2-dev cmake pkg-config
+    libgtk-3-dev libglib2.0-dev libxdo-dev libayatana-appindicator3-dev
+    libxkbcommon-dev libwayland-dev
+
 jobs:
-  # ─── macOS (Apple Silicon, Metal + all models) ─────────────────
+  # ─── macOS (Apple Silicon, Metal + all models, DMG with bundled model) ─────
   macos:
-    runs-on: macos-14  # Apple Silicon runner
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
-        run: cargo build --release
-      - name: Create DMG
-        run: make dmg
+      - name: Build + DMG
+        run: make dmg SIGN_ID="-"
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-macos-arm64
-          path: build/*.dmg
+          path: build/dist/*.dmg
 
-  # ─── Linux (CPU + all models) ──────────────────────────────────
+  # ─── Linux CPU — installer .deb + portable .tar.gz ─────────────────────────
   linux-cpu:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake pkg-config
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $LINUX_DEPS
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
       - name: Build release (no GPU features)
         run: cargo build --release --no-default-features --features voxtral,parakeet
-      - name: Package
+      - name: Package .deb
+        run: cargo deb --no-build --output dist/whisper-push_amd64.deb
+      - name: Package portable .tar.gz
         run: |
-          mkdir -p dist
-          cp target/release/whisper-push dist/
-          tar czf whisper-push-linux-x86_64.tar.gz -C dist .
-      - name: Upload artifact
+          mkdir -p dist/portable
+          cp target/release/whisper-push dist/portable/
+          tar czf dist/whisper-push-linux-x86_64.tar.gz -C dist/portable .
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-linux-x86_64
-          path: whisper-push-linux-x86_64.tar.gz
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
 
-  # ─── Linux (CUDA + all models) ─────────────────────────────────
+  # ─── Linux CUDA — installer .deb + portable .tar.gz ───────────────────────
   linux-cuda:
     runs-on: ubuntu-latest
     steps:
@@ -54,42 +69,60 @@ jobs:
       - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: '12.4.0'
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake pkg-config
-      - name: Build release with CUDA
-        run: cargo build --release --no-default-features --features cuda,voxtral,parakeet
-      - name: Package
+      - name: Install system deps
         run: |
-          mkdir -p dist
-          cp target/release/whisper-push dist/
-          tar czf whisper-push-linux-x86_64-cuda.tar.gz -C dist .
-      - name: Upload artifact
+          sudo apt-get update
+          sudo apt-get install -y $LINUX_DEPS
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build release (CUDA)
+        run: cargo build --release --no-default-features --features cuda,voxtral,parakeet
+      - name: Package .deb
+        run: cargo deb --no-build --output dist/whisper-push-cuda_amd64.deb
+      - name: Package portable .tar.gz
+        run: |
+          mkdir -p dist/portable
+          cp target/release/whisper-push dist/portable/
+          tar czf dist/whisper-push-linux-x86_64-cuda.tar.gz -C dist/portable .
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-linux-x86_64-cuda
-          path: whisper-push-linux-x86_64-cuda.tar.gz
+          path: |
+            dist/*.deb
+            dist/*.tar.gz
 
-  # ─── Windows (CPU + all models) ────────────────────────────────
+  # ─── Windows CPU — installer .msi + portable .zip ─────────────────────────
   windows-cpu:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+      - name: Build release (no GPU features)
         run: cargo build --release --no-default-features --features voxtral,parakeet
-      - name: Package
+      - name: Initialize wix template (if missing)
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/whisper-push.exe dist/
-          cd dist && 7z a ../whisper-push-windows-x64.zip .
-      - name: Upload artifact
+          [ -f wix/main.wxs ] || cargo wix init --no-build -p whisper-push -y
+      - name: Package .msi
+        run: cargo wix --no-build --nocapture --output dist/whisper-push-x64.msi
+      - name: Package portable .zip
+        shell: bash
+        run: |
+          mkdir -p dist/portable
+          cp target/release/whisper-push.exe dist/portable/
+          cd dist/portable && 7z a ../whisper-push-windows-x64.zip .
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-windows-x64
-          path: whisper-push-windows-x64.zip
+          path: |
+            dist/*.msi
+            dist/*.zip
 
-  # ─── Windows (CUDA + all models) ───────────────────────────────
+  # ─── Windows CUDA — installer .msi + portable .zip ────────────────────────
   windows-cuda:
     runs-on: windows-latest
     steps:
@@ -98,21 +131,31 @@ jobs:
       - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: '12.4.0'
-      - name: Build release with CUDA
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+      - name: Build release (CUDA)
         run: cargo build --release --no-default-features --features cuda,voxtral,parakeet
-      - name: Package
+      - name: Initialize wix template (if missing)
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/whisper-push.exe dist/
-          cd dist && 7z a ../whisper-push-windows-x64-cuda.zip .
-      - name: Upload artifact
+          [ -f wix/main.wxs ] || cargo wix init --no-build -p whisper-push -y
+      - name: Package .msi
+        run: cargo wix --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
+      - name: Package portable .zip
+        shell: bash
+        run: |
+          mkdir -p dist/portable
+          cp target/release/whisper-push.exe dist/portable/
+          cd dist/portable && 7z a ../whisper-push-windows-x64-cuda.zip .
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-windows-x64-cuda
-          path: whisper-push-windows-x64-cuda.zip
+          path: |
+            dist/*.msi
+            dist/*.zip
 
-  # ─── Create GitHub Release ─────────────────────────────────────
+  # ─── Aggregate everything into the GitHub Release ─────────────────────────
   release:
     needs: [macos, linux-cpu, linux-cuda, windows-cpu, windows-cuda]
     runs-on: ubuntu-latest
@@ -123,6 +166,5 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/**/*
+          files: artifacts/**/*
           generate_release_notes: true

@@ -108,3 +108,34 @@ strip = true
 lto = true
 codegen-units = 1
 opt-level = 3
+
+# ─── Packaging ────────────────────────────────────────────────────────────────
+
+# Linux: cargo-deb (https://github.com/kornelski/cargo-deb) — produces a .deb
+# from these metadata. Generated with `cargo deb --no-build` (binary is built
+# separately in CI). Depends-list reflects the runtime system libraries.
+[package.metadata.deb]
+maintainer = "Whisper Push <hello@whisperpush.com>"
+copyright = "2026, Whisper Push contributors"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+Push-to-talk voice dictation, 100% local. Hold a key, speak, release —
+your words are typed wherever your cursor is. Three transcription engines
+(Whisper, Parakeet, Voxtral), every platform optimized, no cloud."""
+section = "sound"
+priority = "optional"
+depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0"
+assets = [
+    ["target/release/whisper-push", "usr/bin/", "755"],
+    ["packaging/linux/whisper-push.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/whisper-push.png", "usr/share/icons/hicolor/256x256/apps/whisper-push.png", "644"],
+    ["README.md", "usr/share/doc/whisper-push/README", "644"],
+]
+
+# Windows: cargo-wix (https://github.com/volks73/cargo-wix) — produces an MSI.
+# The wix/main.wxs template is generated with `cargo wix init` then committed.
+[package.metadata.wix]
+upgrade-guid = "8B7E1C2D-3F4A-4B5C-9D6E-7F8A9B0C1D2E"
+path-guid    = "9C8F2D3E-4A5B-4C6D-AE7F-8B9C0D1E2F30"
+license = "LICENSE"
+eula = false
