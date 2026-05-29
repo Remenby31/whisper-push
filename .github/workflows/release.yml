@@ -156,7 +156,12 @@ jobs:
             dist/*.zip
 
   # ─── Aggregate everything into the GitHub Release ─────────────────────────
+  # Only runs on a tag push — on workflow_dispatch the action-gh-release step
+  # has no tag context, so it errors with "GitHub Releases requires a tag".
+  # The build jobs above run on both triggers (manual dispatch is used to dry-
+  # run the installer pipeline without publishing).
   release:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [macos, linux-cpu, linux-cuda, windows-cpu, windows-cuda]
     runs-on: ubuntu-latest
     steps:
