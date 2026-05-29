@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Allow dry-running the full pipeline from the Actions tab without tagging.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -41,8 +43,8 @@ jobs:
           sudo apt-get install -y $LINUX_DEPS
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
-      - name: Build release
-        run: cargo build --release
+      - name: Build release (no GPU features)
+        run: cargo build --release --no-default-features --features voxtral,parakeet
       - name: Package .deb
         run: cargo deb --no-build --output dist/whisper-push_amd64.deb
       - name: Package portable .tar.gz
@@ -98,8 +100,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
-      - name: Build release
-        run: cargo build --release
+      - name: Build release (no GPU features)
+        run: cargo build --release --no-default-features --features voxtral,parakeet
       - name: Initialize wix template (if missing)
         shell: bash
         run: |
