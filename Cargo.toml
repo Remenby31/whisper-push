@@ -87,16 +87,16 @@ objc2-app-kit = { version = "0.3", features = [
     "block2",
 ] }
 block2 = "0.6"
-objc2-core-graphics = { version = "0.3", features = ["CGEvent", "CGRemoteOperation"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGRemoteOperation"] }
 core-foundation = { version = "0.10", features = ["mac_os_10_7_support"] }
 core-graphics = "0.24"
 core-foundation-sys = "0.8"
-objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
-# Pin dispatch2 below 0.3.1 — that release's generated/mod.rs blows past the
-# default rustc macro-recursion limit (128) on stable, and the limit is per-
-# crate so bumping it in our own crate doesn't help. 0.3.0 compiles cleanly
-# and satisfies objc2-core-foundation's ">=0.3.0, <0.5.0" constraint.
-dispatch2 = "=0.3.0"
+# `default-features = false`: objc2-core-foundation's default set pulls
+# `dispatch2`, whose generated bitflags macro blows past the default rustc
+# macro recursion limit (128) and breaks every macOS CI job. We only need
+# `CFRunLoop` here, so opt out of defaults and re-enable just `std` + that.
+# (arboard and muda also depend on OCF but already use default-features = false.)
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFRunLoop"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
