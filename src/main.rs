@@ -1,3 +1,7 @@
+// Some objc2-driven macOS deps (dispatch2/objc2_foundation) hit the default
+// rustc macro recursion limit on stable. Bump it generously here.
+#![recursion_limit = "1024"]
+
 mod audio;
 mod autostart;
 mod config;

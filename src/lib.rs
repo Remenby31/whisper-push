@@ -1,3 +1,5 @@
+#![recursion_limit = "1024"]
+
 pub mod audio;
 pub mod autostart;
 pub mod config;
