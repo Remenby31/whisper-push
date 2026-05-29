@@ -105,7 +105,7 @@ jobs:
       - name: Initialize wix template (if missing)
         shell: bash
         run: |
-          [ -f wix/main.wxs ] || cargo wix init -p whisper-push -y
+          [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         run: cargo wix --no-build --nocapture --output dist/whisper-push-x64.msi
       - name: Package portable .zip
@@ -138,7 +138,7 @@ jobs:
       - name: Initialize wix template (if missing)
         shell: bash
         run: |
-          [ -f wix/main.wxs ] || cargo wix init -p whisper-push -y
+          [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         run: cargo wix --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
       - name: Package portable .zip
