@@ -17,7 +17,7 @@ env:
     libxkbcommon-dev libwayland-dev
 
 jobs:
-  # ─── macOS (Apple Silicon, Metal + all models, DMG with bundled model) ─────
+  # ─── macOS (Apple Silicon, Metal + all models) ─────
   macos:
     runs-on: macos-14
     steps:
