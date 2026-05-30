@@ -120,6 +120,8 @@ struct ModelPickerView: View {
                 .frame(maxWidth: .infinity)
             }
             .frame(maxHeight: .infinity)
+            // When the list fits, no bouncy rubber-band on scroll.
+            .scrollBounceBehavior(.basedOnSize)
 
             let toDownload = models.filter { state.selectedModels.contains($0.modelFile) && !$0.alreadyDownloaded }
             if toDownload.isEmpty {
@@ -140,7 +142,7 @@ struct ModelPickerView: View {
             .buttonStyle(BrandPrimaryButtonStyle(enabled: !state.selectedModels.isEmpty))
             .disabled(state.selectedModels.isEmpty)
             .padding(.horizontal, 60)
-            .padding(.bottom, 14)
+            .padding(.bottom, 28)
         }
     }
 }

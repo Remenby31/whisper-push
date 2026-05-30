@@ -38,7 +38,7 @@ struct ReadyView: View {
             }
             .buttonStyle(BrandPrimaryButtonStyle())
             .padding(.horizontal, 60)
-            .padding(.bottom, 14)
+            .padding(.bottom, 28)
         }
         .padding(.top, 22)
     }

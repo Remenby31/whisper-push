@@ -52,7 +52,7 @@ struct DownloadView: View {
             .buttonStyle(BrandPrimaryButtonStyle(enabled: downloader.isDone))
             .disabled(!downloader.isDone)
             .padding(.horizontal, 60)
-            .padding(.bottom, 14)
+            .padding(.bottom, 28)
         }
         .padding(.top, 22)
         .onAppear {

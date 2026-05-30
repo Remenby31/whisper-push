@@ -13,12 +13,15 @@ struct PermissionsView: View {
                 .foregroundStyle(Color.brandGreen)
                 .padding(.top, 24)
 
+            // Same column width as ModelPickerView's row list, so the two
+            // adjacent steps line up visually instead of jumping width.
             VStack(spacing: 4) {
                 PermissionRow(icon: "mic.fill",      title: "Microphone",       kind: .microphone,      state: poller.microphone,      daemonPath: state.daemonPath)
                 PermissionRow(icon: "accessibility", title: "Accessibility",    kind: .accessibility,   state: poller.accessibility,   daemonPath: state.daemonPath)
                 PermissionRow(icon: "keyboard",      title: "Input Monitoring", kind: .inputMonitoring, state: poller.inputMonitoring, daemonPath: state.daemonPath)
             }
-            .padding(.horizontal, 32)
+            .frame(maxWidth: 340)
+            .frame(maxWidth: .infinity)
 
             Spacer()
 
@@ -27,7 +30,7 @@ struct PermissionsView: View {
             }
             .buttonStyle(BrandPrimaryButtonStyle(enabled: poller.allGranted))
             .padding(.horizontal, 60)
-            .padding(.bottom, 14)
+            .padding(.bottom, 28)
         }
         .onAppear { poller.start(daemonPath: state.daemonPath, designPreview: state.isDesignPreview) }
         .onDisappear { poller.stop() }

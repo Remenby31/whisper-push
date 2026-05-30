@@ -1,7 +1,25 @@
 import SwiftUI
+import AppKit
+
+/// Promotes the process to a regular foreground app and activates its window.
+/// Inside the shipped Onboarding.app bundle this is redundant (the .app's
+/// Info.plist already sets the activation policy), but it's idempotent there.
+/// In `make onboarding-preview` we launch the SPM binary directly without a
+/// bundle wrapper, so without this the SwiftUI WindowGroup creates the window
+/// but macOS never activates the process and the window is never shown.
+final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        // Bring the first window to the front (WindowGroup creates it before
+        // this delegate fires, so it's already in NSApp.windows).
+        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+    }
+}
 
 @main
 struct OnboardingApp: App {
+    @NSApplicationDelegateAdaptor(OnboardingAppDelegate.self) private var appDelegate
     @StateObject private var state = OnboardingState()
 
     var body: some Scene {

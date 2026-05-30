@@ -68,10 +68,11 @@ bundle: release onboarding
 	@mkdir -p "$(WIZARD_BUNDLE)/Contents/Resources"
 	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
 	@# Swift Package Manager emits resources (logo PNG) into a sibling
-	@# .bundle next to the executable. Bundle.module resolves it from
-	@# there, so it must sit next to the binary.
+	@# .bundle. Inside an .app, it must live in Contents/Resources/ so
+	@# Bundle.module finds it via Bundle.main.resourceURL, and so codesign
+	@# doesn't choke on a directory inside Contents/MacOS/.
 	@if [ -d macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding_Onboarding.bundle ]; then \
-		cp -R macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding_Onboarding.bundle "$(WIZARD_BUNDLE)/Contents/MacOS/"; \
+		cp -R macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding_Onboarding.bundle "$(WIZARD_BUNDLE)/Contents/Resources/"; \
 	fi
 	@cp resources/Onboarding-Info.plist "$(WIZARD_BUNDLE)/Contents/Info.plist"
 	@echo "APPL????" > "$(WIZARD_BUNDLE)/Contents/PkgInfo"

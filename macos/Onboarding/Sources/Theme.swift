@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit  // NSImage for LogoSquircle's PDF loader
 
 // PADDOCK brand palette from brandkit/README.md — these four are the
 // entire allowed set ("jamais d'autre couleur que celles listées").
@@ -102,27 +103,47 @@ struct BrandCheckbox: View {
 
 // MARK: - Logo
 
-/// Brand kit AppIcon rendered as a soft-shadowed image. Replaces the
-/// previous hand-coded squircle + wave reconstruction with the official
-/// PNG asset bundled in the Swift Package resources.
+/// Brand kit AppIcon. Loads the bundled vector PDF via `NSImage(contentsOf:)`
+/// for crisp rendering at any size — `Image(name:bundle:)` silently fails on
+/// SPM loose resources when there's no Asset Catalog, which is why this
+/// shows a blank box if you forget to use the explicit URL lookup.
 struct LogoSquircle: View {
     var animate: Bool = false
     var size: CGFloat = 96
 
     @State private var breathing = false
 
+    private static let nsImage: NSImage? = {
+        // Prefer PDF (vector); fall back to PNG so we always render something.
+        for ext in ["pdf", "png"] {
+            if let url = Bundle.module.url(forResource: "AppIcon", withExtension: ext),
+               let img = NSImage(contentsOf: url) {
+                return img
+            }
+        }
+        return nil
+    }()
+
     var body: some View {
-        Image("AppIcon", bundle: .module)
-            .resizable()
-            .interpolation(.high)
-            .scaledToFit()
-            .frame(width: size, height: size)
-            .shadow(color: Color.brandGreen.opacity(0.25), radius: 12, y: 6)
-            .scaleEffect(animate && breathing ? 1.04 : 1.0)
-            .animation(
-                animate ? .easeInOut(duration: 1.6).repeatForever(autoreverses: true) : .default,
-                value: breathing
-            )
-            .onAppear { if animate { breathing = true } }
+        Group {
+            if let img = Self.nsImage {
+                Image(nsImage: img)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                // Last-resort placeholder so layout doesn't collapse.
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color.brandGreen)
+            }
+        }
+        .frame(width: size, height: size)
+        .shadow(color: Color.brandGreen.opacity(0.25), radius: 12, y: 6)
+        .scaleEffect(animate && breathing ? 1.04 : 1.0)
+        .animation(
+            animate ? .easeInOut(duration: 1.6).repeatForever(autoreverses: true) : .default,
+            value: breathing
+        )
+        .onAppear { if animate { breathing = true } }
     }
 }
