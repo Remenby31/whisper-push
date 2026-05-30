@@ -47,10 +47,58 @@ struct Cli {
     /// Transcribe an audio file (MP3/WAV/OGG/FLAC) and print the result
     #[arg(long)]
     transcribe: Option<PathBuf>,
+
+    /// Print current macOS permission status as JSON and exit.
+    #[arg(long, hide = true)]
+    permissions_json: bool,
+
+    /// Fire all missing OS permission prompts and exit.
+    #[arg(long, hide = true)]
+    permissions_prime: bool,
+
+    /// Fire a single permission prompt ("mic" / "accessibility" /
+    /// "input_monitoring") and exit. For mic the subprocess parks until
+    /// the popup is resolved so macOS doesn't dismiss it.
+    #[arg(long, hide = true, value_name = "KIND")]
+    permissions_request: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Permission CLI hooks handled BEFORE init_logging so stdout stays
+    // clean (the wizard parses our stdout as JSON).
+    if cli.permissions_json {
+        let s = permissions::check_all();
+        println!(
+            "{{\"microphone\":\"{}\",\"accessibility\":\"{}\",\"input_monitoring\":\"{}\",\"all_granted\":{}}}",
+            perm_state_str(s.microphone),
+            perm_state_str(s.accessibility),
+            perm_state_str(s.input_monitoring),
+            s.all_granted()
+        );
+        return Ok(());
+    }
+    if cli.permissions_prime {
+        let status = permissions::check_all();
+        permissions::prompt_missing(&status);
+        return Ok(());
+    }
+    if let Some(ref kind) = cli.permissions_request {
+        permissions::request_one(kind);
+        if kind == "mic" || kind == "microphone" {
+            for _ in 0..60 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let s = permissions::check_all();
+                if s.microphone == permissions::PermState::Granted
+                    || s.microphone == permissions::PermState::Denied
+                {
+                    break;
+                }
+            }
+        }
+        return Ok(());
+    }
 
     // Init logging
     init_logging();
@@ -88,6 +136,15 @@ fn main() -> Result<()> {
 
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
     app::run(cfg)
+}
+
+fn perm_state_str(s: permissions::PermState) -> &'static str {
+    match s {
+        permissions::PermState::Granted => "granted",
+        permissions::PermState::Denied => "denied",
+        permissions::PermState::NotRequested => "not_requested",
+        permissions::PermState::Unknown => "unknown",
+    }
 }
 
 fn init_logging() {
@@ -245,10 +302,16 @@ mod app {
         // Ensure single instance
         let _lock = crate::state::acquire_lock()?;
 
-        // First-launch onboarding
+        // First-launch onboarding. None = wizard exited without finishing
+        // (e.g. user closed the window); exit cleanly without marking done.
         if crate::onboarding::check_first_launch() {
-            let model = crate::onboarding::run();
-            cfg.model = model;
+            match crate::onboarding::run() {
+                Some(model) => cfg.model = model,
+                None => {
+                    tracing::info!("Onboarding interrupted, exiting");
+                    return Ok(());
+                }
+            }
         }
 
         tracing::info!("Starting whisper-push daemon");

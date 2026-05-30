@@ -7,7 +7,12 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Onboarding",
-            path: "Sources"
+            path: "Sources",
+            resources: [
+                // Brand kit AppIcon, embedded so SwiftUI can load it via
+                // `Image("AppIcon", bundle: .module)` for the wizard logo.
+                .process("Resources/AppIcon.png")
+            ]
         )
     ]
 )

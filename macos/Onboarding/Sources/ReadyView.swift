@@ -4,81 +4,64 @@ struct ReadyView: View {
     @EnvironmentObject var state: OnboardingState
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 22) {
             Spacer()
+            LogoSquircle()
 
-            LogoSquircle(progress: 1.0)
+            Text("You're all set")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(Color.brandGreen)
 
-            VStack(spacing: 8) {
-                Text("You're all set!")
-                    .font(.system(size: 28, weight: .bold))
-
-                let names = state.selectedModels.map { backendDisplayName($0) }.sorted()
-                Text(names.joined(separator: ", "))
-                    .font(.body)
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                KeyCap("Control")
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(Color.brandGreen.opacity(0.45))
+                Text("speak")
+                    .foregroundStyle(Color.brandGreen.opacity(0.85))
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(Color.brandGreen.opacity(0.45))
+                Text("release")
+                    .foregroundStyle(Color.brandGreen.opacity(0.85))
             }
-
-            VStack(spacing: 6) {
-                HStack(spacing: 8) {
-                    KeyCap("Control")
-                    Image(systemName: "arrow.right")
-                        .foregroundStyle(.tertiary)
-                    Text("speak")
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "arrow.right")
-                        .foregroundStyle(.tertiary)
-                    Text("release")
-                        .foregroundStyle(.secondary)
-                }
-                .font(.body)
-
-                Text("Your words appear wherever your cursor is.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
+            .font(.system(size: 14))
 
             Toggle("Launch at Login", isOn: $state.autoStart)
                 .toggleStyle(.switch)
+                .tint(Color.brandCitron)
+                .foregroundStyle(Color.brandGreen)
                 .padding(.horizontal, 80)
 
             Spacer()
 
             Button(action: { state.finish() }) {
                 Text("Start Whisper Push")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.brandGreen)
-            .controlSize(.large)
+            .buttonStyle(BrandPrimaryButtonStyle())
             .padding(.horizontal, 60)
-            .padding(.bottom, 24)
+            .padding(.bottom, 14)
         }
-        .padding(.top, 24)
+        .padding(.top, 22)
     }
 }
 
+/// Brand-aligned key cap. Chamois cream fill, racing green text.
 struct KeyCap: View {
     let text: String
-
-    init(_ text: String) {
-        self.text = text
-    }
+    init(_ text: String) { self.text = text }
 
     var body: some View {
         Text(text)
-            .font(.system(size: 13, weight: .medium, design: .rounded))
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .foregroundStyle(Color.brandGreen)
             .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.gray.opacity(0.12))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.brandCream)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.gray.opacity(0.25), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.brandGreen.opacity(0.2), lineWidth: 1)
             )
     }
 }
