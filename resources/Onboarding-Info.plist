@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Info.plist for the SwiftUI onboarding wizard sub-bundle.
+
+    Lives at Contents/Library/Helpers/Onboarding.app/Contents/Info.plist
+    inside the parent .app. Gives the wizard binary its OWN TCC identity
+    (com.whisper-push.onboarding) distinct from the daemon's
+    (com.whisper-push.app).
+
+    Why: macOS shows the "Quit and reopen" popup when the user toggles a
+    permission AND a process with the affected bundle ID is currently
+    running. Same bundle ID → wizard gets killed mid-onboarding every time
+    the user grants Accessibility. Different bundle IDs → toggle is silent,
+    wizard stays alive, user finishes the flow uninterrupted.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Onboarding</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.whisper-push.onboarding</string>
+    <key>CFBundleName</key>
+    <string>Whisper Push Onboarding</string>
+    <key>CFBundleDisplayName</key>
+    <string>Whisper Push Onboarding</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0-beta</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Whisper Push records your voice to transcribe it into text.</string>
+</dict>
+</plist>

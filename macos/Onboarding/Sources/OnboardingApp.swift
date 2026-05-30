@@ -28,6 +28,8 @@ struct ContentView: View {
                 ModelPickerView()
             case .download:
                 DownloadView()
+            case .permissions:
+                PermissionsView()
             case .ready:
                 ReadyView()
             }

@@ -1,11 +1,18 @@
 # Whisper Push — Rust build helpers
-.PHONY: build release onboarding bundle sign dmg clean check deploy install uninstall
+.PHONY: build release onboarding bundle sign dmg pkg clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
 BINARY = target/release/whisper-push
 SIGN_ID = Developer ID Application: Baptiste Cruvellier (3SNT64YKAS)
 BUNDLE_ID = com.whisper-push.app
+
+# Onboarding wizard sub-bundle. Lives inside the parent .app but has its
+# OWN bundle ID via resources/Onboarding-Info.plist. This is what stops
+# macOS from killing the wizard with the "Quit and reopen" popup when the
+# user toggles a TCC permission for the daemon.
+WIZARD_BUNDLE = $(APP_DIR)/Contents/Library/Helpers/Onboarding.app
+WIZARD_BUNDLE_ID = com.whisper-push.onboarding
 
 # Install target: a stable /Applications location + login autostart agent
 INSTALL_DIR = /Applications
@@ -43,9 +50,15 @@ bundle: release onboarding
 	@echo "APPL????" > "$(APP_DIR)/Contents/PkgInfo"
 	@# Brand app icon
 	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns" || echo "  (warning: resources/AppIcon.icns missing — bundle will have no icon)"
-	@# Onboarding wizard (SwiftUI)
-	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(APP_DIR)/Contents/MacOS/onboarding"
+	@# Onboarding wizard — full sub-bundle (own Info.plist + Bundle ID) so
+	@# TCC and the "Quit and reopen" popup treat it as a separate app from
+	@# the daemon. See resources/Onboarding-Info.plist.
+	@mkdir -p "$(WIZARD_BUNDLE)/Contents/MacOS"
+	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
+	@cp resources/Onboarding-Info.plist "$(WIZARD_BUNDLE)/Contents/Info.plist"
+	@echo "APPL????" > "$(WIZARD_BUNDLE)/Contents/PkgInfo"
 	@echo "✓ App bundle created at $(APP_DIR)"
+	@echo "  └── wizard sub-bundle at Contents/Library/Helpers/Onboarding.app"
 
 # Sign the app with Developer ID
 sign: bundle
@@ -62,21 +75,29 @@ sign: bundle
 		"$(APP_DIR)"
 	@echo "✓ App signed with Developer ID"
 
-# Create a distributable DMG (model downloads on first launch).
+# Create a distributable DMG (model downloads on first launch). Ad-hoc
+# signed — no Developer ID in keychain. Bottom-up so the wizard sub-bundle
+# keeps its own identity (com.whisper-push.onboarding) distinct from the
+# daemon's (com.whisper-push.app); that's what keeps the wizard alive
+# during onboarding when the user grants Accessibility / Input Monitoring
+# (macOS would otherwise pop "Quit and reopen" for whatever process holds
+# the matching bundle ID).
 dmg: bundle
-	@# Sign the bundle.
-	@codesign --force --options runtime \
-		-s "$(SIGN_ID)" \
+	@# Sign the wizard sub-bundle first (standalone, no entitlements).
+	@codesign --force --options runtime -s - \
+		"$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
+	@codesign --force --options runtime -s - \
+		"$(WIZARD_BUNDLE)"
+	@# Then the daemon binary with its entitlements.
+	@codesign --force --options runtime -s - \
 		-i "$(BUNDLE_ID)" \
 		--entitlements resources/entitlements.plist \
-		--timestamp \
 		"$(APP_DIR)/Contents/MacOS/whisper-push"
-	@codesign --force --options runtime --deep \
-		-s "$(SIGN_ID)" \
+	@# Then the outer .app wrap (no --deep — children are already signed).
+	@codesign --force --options runtime -s - \
 		--entitlements resources/entitlements.plist \
-		--timestamp \
 		"$(APP_DIR)"
-	@echo "✓ App signed (DMG path)"
+	@echo "✓ App ad-hoc signed (DMG path) — right-click → Open the .app to bypass Gatekeeper"
 	@# Package the DMG (drag-to-Applications layout via create-dmg).
 	@mkdir -p build/dist
 	@rm -f "build/dist/Whisper-Push-macOS-arm64.dmg"
@@ -98,6 +119,51 @@ dmg: bundle
 	fi
 	@du -h "build/dist/Whisper-Push-macOS-arm64.dmg" | sed 's|^|  |'
 	@echo "✓ DMG created at build/dist/Whisper-Push-macOS-arm64.dmg"
+
+# Self-contained ad-hoc PKG installer with auto-launch postinstall.
+# Independent of the `dmg`/`sign` targets so it works without a Developer ID
+# in the keychain. The postinstall script (resources/pkg-scripts/postinstall)
+# launches Whisper Push as the logged-in user right after install so the
+# onboarding wizard appears with zero extra clicks.
+PKG_VERSION = $(shell awk -F'"' '/^version = / { print $$2; exit }' Cargo.toml)
+pkg: bundle
+	@echo "Ad-hoc signing the bundle for PKG ..."
+	@# Bottom-up: wizard sub-bundle first (own Info.plist with
+	@# com.whisper-push.onboarding — sign as standalone, no entitlements,
+	@# so TCC treats it as a separate identity), then the daemon with its
+	@# entitlements, then the outer .app wrap.
+	@codesign --force --options runtime -s - \
+		"$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
+	@codesign --force --options runtime -s - \
+		"$(WIZARD_BUNDLE)"
+	@codesign --force --options runtime -s - \
+		-i "$(BUNDLE_ID)" \
+		--entitlements resources/entitlements.plist \
+		"$(APP_DIR)/Contents/MacOS/whisper-push"
+	@codesign --force --options runtime -s - \
+		--entitlements resources/entitlements.plist \
+		"$(APP_DIR)"
+	@echo "Packaging PKG (auto-launch on install) ..."
+	@mkdir -p build/dist
+	@# Stage in mktemp dirs so stale (potentially root-owned) state from
+	@# previous pkgbuild runs never blocks the next build.
+	@STAGE_ROOT=$$(mktemp -d "/tmp/wp-pkg-root.XXXXXX"); \
+	 STAGE_SCRIPTS=$$(mktemp -d "/tmp/wp-pkg-scripts.XXXXXX"); \
+	 cp -R "$(APP_DIR)" "$$STAGE_ROOT/$(APP_NAME).app"; \
+	 cp resources/pkg-scripts/postinstall "$$STAGE_SCRIPTS/postinstall"; \
+	 chmod +x "$$STAGE_SCRIPTS/postinstall"; \
+	 rm -f "build/dist/Whisper-Push-macOS-arm64.pkg"; \
+	 pkgbuild \
+		--root "$$STAGE_ROOT" \
+		--identifier "$(BUNDLE_ID)" \
+		--version "$(PKG_VERSION)" \
+		--install-location /Applications \
+		--scripts "$$STAGE_SCRIPTS" \
+		"build/dist/Whisper-Push-macOS-arm64.pkg" >/dev/null; \
+	 rm -rf "$$STAGE_ROOT" "$$STAGE_SCRIPTS" 2>/dev/null || true
+	@du -h "build/dist/Whisper-Push-macOS-arm64.pkg" | sed 's|^|  |'
+	@echo "✓ PKG created at build/dist/Whisper-Push-macOS-arm64.pkg"
+	@echo "  (ad-hoc: right-click → Open the .pkg the first time to bypass Gatekeeper)"
 
 # Notarize the DMG (requires Apple Developer account + App Store Connect API key)
 notarize: dmg

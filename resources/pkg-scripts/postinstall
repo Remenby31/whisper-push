@@ -1,0 +1,32 @@
+#!/bin/sh
+# Post-install: launch Whisper Push as the logged-in user so the onboarding
+# wizard appears right after Install Succeeded. Runs as root via
+# Installer.app; launchctl asuser drops back to the user's GUI session.
+# Failure is non-fatal — auto-launch is convenience, not a requirement.
+#
+# Logs to /tmp/whisper-push-install.log so install issues can be diagnosed
+# (e.g. "the wizard never appeared" → check the log to see if postinstall
+# actually fired and whether the app was found at /Applications).
+
+LOG=/tmp/whisper-push-install.log
+{
+    echo "==== postinstall $(date) ===="
+    echo "EUID=$(id -u) USER=$USER"
+    USER_UID=$(stat -f%u /dev/console 2>/dev/null)
+    echo "Console user UID: $USER_UID"
+    APP="/Applications/Whisper Push.app"
+    if [ -d "$APP" ]; then
+        echo "App found at $APP"
+        if [ -n "$USER_UID" ]; then
+            /bin/launchctl asuser "$USER_UID" /usr/bin/open "$APP"
+            echo "launchctl asuser open: exit $?"
+        else
+            echo "No console user UID — cannot launch"
+        fi
+    else
+        echo "ERROR: App NOT at $APP — install location wrong?"
+    fi
+    echo ""
+} >> "$LOG" 2>&1
+
+exit 0

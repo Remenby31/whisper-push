@@ -3,8 +3,14 @@ import SwiftUI
 /// Shared state across all onboarding screens.
 @MainActor
 class OnboardingState: ObservableObject {
+    // Order: welcome → permissions → model → download → ready.
+    // Permissions come BEFORE model so the user grants up-front (mic +
+    // accessibility + input monitoring) while the daemon is fresh-installed
+    // and not yet running — guarantees no "Quit and reopen" popup ever
+    // fires, and the model picker / download appear only once setup is
+    // committed.
     enum Step: Int, CaseIterable {
-        case welcome, model, download, ready
+        case welcome, permissions, model, download, ready
     }
 
     @Published var currentStep: Step = .welcome
@@ -12,6 +18,9 @@ class OnboardingState: ObservableObject {
     // CLI args (from Rust)
     let hardwareName: String
     let recommendedBackend: String
+    /// Path to the daemon binary, used by PermissionsView to probe
+    /// TCC state via `--permissions-json`. nil in dev/fallback.
+    let daemonPath: String?
 
     // User choices
     @Published var selectedModels: Set<String> = []
@@ -30,6 +39,7 @@ class OnboardingState: ObservableObject {
         let args = ProcessInfo.processInfo.arguments
         self.hardwareName = Self.argValue(args, flag: "--hardware") ?? "Unknown"
         self.recommendedBackend = Self.argValue(args, flag: "--recommended") ?? "parakeet"
+        self.daemonPath = Self.argValue(args, flag: "--daemon-path")
 
         // Pre-select models based on available disk space and RAM
         let freeDiskGB = Self.freeDiskSpaceGB()

@@ -8,7 +8,9 @@ struct DownloadView: View {
         VStack(spacing: 20) {
             Spacer()
 
-            LogoSquircle(progress: downloader.totalProgress)
+            // Plain logo — no wave-fill animation tied to progress; the
+            // linear ProgressView below carries the progress signal.
+            LogoSquircle()
 
             if downloader.isDone {
                 Text("Downloads complete!")
