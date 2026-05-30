@@ -143,7 +143,13 @@ final class PermissionsPoller: ObservableObject {
         guard let path = daemonPath, FileManager.default.isExecutableFile(atPath: path) else { return }
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
+            // Unwrap to an immutable `self` before the Task. Capturing the weak
+            // optional `self?` directly inside the concurrent Task closure trips
+            // "reference to captured var 'self' in concurrently-executing code"
+            // on stricter/older Swift toolchains (e.g. the macOS CI runner),
+            // which silently broke the macOS DMG build since #8.
+            guard let self else { return }
+            Task { @MainActor in self.poll() }
         }
     }
 
