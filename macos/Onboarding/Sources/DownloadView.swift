@@ -5,58 +5,67 @@ struct DownloadView: View {
     @StateObject private var downloader = ModelDownloader()
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 18) {
             Spacer()
-
-            LogoSquircle(progress: downloader.totalProgress)
+            LogoSquircle()
 
             if downloader.isDone {
-                Text("Downloads complete!")
-                    .font(.system(size: 24, weight: .bold))
+                Text("Downloads complete")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Color.brandGreen)
             } else {
                 Text(downloader.statusText)
-                    .font(.headline)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.brandGreen)
 
                 ProgressView(value: downloader.totalProgress)
                     .progressViewStyle(.linear)
-                    .tint(Color.brandGreen)
+                    .tint(Color.brandCitron)
                     .padding(.horizontal, 60)
 
-                HStack(spacing: 16) {
-                    Text(downloader.currentFile)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if downloader.totalBytes > 0 {
-                        Text("\(formatBytes(downloader.downloadedBytes)) / \(formatBytes(downloader.totalBytes))")
+                VStack(spacing: 2) {
+                    if downloader.totalFileCount > 0 {
+                        Text("File \(downloader.completedFileCount + 1) of \(downloader.totalFileCount) · \(downloader.currentFile)")
                             .font(.caption)
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Color.brandGreen.opacity(0.7))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    if downloader.totalBytes > 0 {
+                        Text("\(formatBytes(downloader.downloadedBytes)) of \(formatBytes(downloader.totalBytes)) for this file")
+                            .font(.caption2)
+                            .foregroundStyle(Color.brandGreen.opacity(0.5))
                             .monospacedDigit()
                     }
                 }
 
                 Text("\(Int(downloader.totalProgress * 100))%")
-                    .font(.system(size: 14, weight: .medium, design: .monospaced))
-                    .foregroundColor(.brandCitron)
+                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.brandGreen)
             }
 
             Spacer()
 
             Button(action: { state.advance() }) {
-                Text(downloader.isDone ? "Continue" : "Downloading...")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                Text(downloader.isDone ? "Continue" : "Downloading…")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.brandGreen)
-            .controlSize(.large)
+            .buttonStyle(BrandPrimaryButtonStyle(enabled: downloader.isDone))
             .disabled(!downloader.isDone)
             .padding(.horizontal, 60)
-            .padding(.bottom, 24)
+            .padding(.bottom, 28)
         }
-        .padding(.top, 32)
+        .padding(.top, 22)
         .onAppear {
+            if state.isDesignPreview {
+                downloader.statusText = "Downloading Parakeet TDT (int8)…"
+                downloader.totalProgress = 0.42
+                downloader.completedFileCount = 1
+                downloader.totalFileCount = 4
+                downloader.currentFile = "encoder-model.onnx.data"
+                downloader.downloadedBytes = 420_000_000
+                downloader.totalBytes = 837_700_000
+                return
+            }
             downloader.downloadAll(models: Array(state.selectedModels))
         }
     }
@@ -71,61 +80,62 @@ private func formatBytes(_ bytes: Int64) -> String {
     return "\(bytes) B"
 }
 
-// MARK: - Downloader
-
 @MainActor
 class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     @Published var totalProgress: Double = 0
-    @Published var statusText = "Preparing..."
+    @Published var statusText = "Preparing…"
     @Published var currentFile = ""
     @Published var isDone = false
     @Published var downloadedBytes: Int64 = 0
     @Published var totalBytes: Int64 = 0
+    @Published var totalFileCount: Int = 0
+    @Published var completedFileCount: Int = 0
 
     private var pendingDownloads: [(model: String, files: [(url: URL, dest: URL)])] = []
     private var currentModelIndex = 0
     private var currentFileIndex = 0
-    private var totalFileCount = 0
-    private var completedFileCount = 0
     private var session: URLSession!
 
     override init() {
         super.init()
-        session = URLSession(
-            configuration: .default,
-            delegate: self,
-            delegateQueue: .main
-        )
+        session = URLSession(configuration: .default, delegate: self, delegateQueue: .main)
     }
 
     func downloadAll(models: [String]) {
         let dataDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("whisper-push/models")
-
         for model in models {
             let files = downloadFiles(for: model, dataDir: dataDir)
             let missing = files.filter { !FileManager.default.fileExists(atPath: $0.dest.path) }
-            if !missing.isEmpty {
-                pendingDownloads.append((model: model, files: missing))
-            }
+            if !missing.isEmpty { pendingDownloads.append((model: model, files: missing)) }
         }
-
         totalFileCount = pendingDownloads.reduce(0) { $0 + $1.files.count }
-
         if totalFileCount == 0 {
             statusText = "All models already downloaded"
             isDone = true
             return
         }
-
         downloadNext()
+    }
+
+    private func writeParakeetVariantMarker(for model: String) {
+        let variant: String
+        switch model {
+        case "parakeet-tdt-0.6b-v3-int8": variant = "int8"
+        case "parakeet-tdt-0.6b-v3":      variant = "fp32"
+        default: return
+        }
+        let dataDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("whisper-push/models/parakeet")
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        try? variant.write(to: dataDir.appendingPathComponent(".variant"), atomically: true, encoding: .utf8)
     }
 
     private func downloadFiles(for model: String, dataDir: URL) -> [(url: URL, dest: URL)] {
         switch model {
-        case "ggml-large-v3-turbo-q5_0.bin":
-            let dest = dataDir.appendingPathComponent("ggml-large-v3-turbo-q5_0.bin")
-            let url = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin")!
+        case "ggml-large-v3-turbo-q5_0.bin", "ggml-small-q5_1.bin":
+            let dest = dataDir.appendingPathComponent(model)
+            let url = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/\(model)")!
             return [(url, dest)]
 
         case "parakeet-tdt-0.6b-v3":
@@ -135,6 +145,16 @@ class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 (URL(string: "\(base)/encoder-model.onnx")!, dir.appendingPathComponent("encoder-model.onnx")),
                 (URL(string: "\(base)/encoder-model.onnx.data")!, dir.appendingPathComponent("encoder-model.onnx.data")),
                 (URL(string: "\(base)/decoder_joint-model.onnx")!, dir.appendingPathComponent("decoder_joint-model.onnx")),
+                (URL(string: "\(base)/vocab.txt")!, dir.appendingPathComponent("vocab.txt")),
+            ]
+
+        case "parakeet-tdt-0.6b-v3-int8":
+            let dir = dataDir.appendingPathComponent("parakeet")
+            let base = "https://huggingface.co/nasedkinpv/parakeet-tdt-0.6b-v3-onnx-int8/resolve/main"
+            return [
+                (URL(string: "\(base)/encoder-int8.onnx")!, dir.appendingPathComponent("encoder-model.onnx")),
+                (URL(string: "\(base)/encoder-int8.onnx.data")!, dir.appendingPathComponent("encoder-model.onnx.data")),
+                (URL(string: "\(base)/decoder_joint-int8.onnx")!, dir.appendingPathComponent("decoder_joint-model.onnx")),
                 (URL(string: "\(base)/vocab.txt")!, dir.appendingPathComponent("vocab.txt")),
             ]
 
@@ -154,61 +174,39 @@ class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     private func downloadNext() {
         guard currentModelIndex < pendingDownloads.count else {
             isDone = true
-            statusText = "Downloads complete!"
+            statusText = "Downloads complete"
             return
         }
-
         let entry = pendingDownloads[currentModelIndex]
+        if currentFileIndex == 0 { writeParakeetVariantMarker(for: entry.model) }
         guard currentFileIndex < entry.files.count else {
             currentModelIndex += 1
             currentFileIndex = 0
             downloadNext()
             return
         }
-
         let file = entry.files[currentFileIndex]
-        statusText = "Downloading \(backendDisplayName(entry.model))..."
+        statusText = "Downloading \(backendDisplayName(entry.model))…"
         currentFile = file.dest.lastPathComponent
-
-        try? FileManager.default.createDirectory(
-            at: file.dest.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
+        try? FileManager.default.createDirectory(at: file.dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         let task = session.downloadTask(with: file.url)
         task.resume()
     }
 
-    // MARK: - URLSessionDownloadDelegate
-
-    nonisolated func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didWriteData bytesWritten: Int64,
-        totalBytesWritten: Int64,
-        totalBytesExpectedToWrite: Int64
-    ) {
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         DispatchQueue.main.async {
             self.downloadedBytes = totalBytesWritten
             self.totalBytes = totalBytesExpectedToWrite
-
-            let fileProgress = totalBytesExpectedToWrite > 0
-                ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-                : 0
+            let fileProgress = totalBytesExpectedToWrite > 0 ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : 0
             self.totalProgress = (Double(self.completedFileCount) + fileProgress) / Double(self.totalFileCount)
         }
     }
 
-    nonisolated func urlSession(
-        _ session: URLSession,
-        downloadTask: URLSessionDownloadTask,
-        didFinishDownloadingTo location: URL
-    ) {
+    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         DispatchQueue.main.async {
             let entry = self.pendingDownloads[self.currentModelIndex]
             let dest = entry.files[self.currentFileIndex].dest
             try? FileManager.default.moveItem(at: location, to: dest)
-
             self.completedFileCount += 1
             self.currentFileIndex += 1
             self.downloadedBytes = 0
@@ -217,15 +215,9 @@ class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    nonisolated func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didCompleteWithError error: Error?
-    ) {
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
-            DispatchQueue.main.async {
-                self.statusText = "Error: \(error.localizedDescription)"
-            }
+            DispatchQueue.main.async { self.statusText = "Error: \(error.localizedDescription)" }
         }
     }
 }

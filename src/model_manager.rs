@@ -80,7 +80,7 @@ pub fn backend_for_model(model: &str) -> &'static str {
 /// Get the default model name for a backend (used by onboarding).
 pub fn model_for_backend(backend: &str) -> &'static str {
     match backend {
-        "parakeet" => "parakeet-tdt-0.6b-v3",
+        "parakeet" => "parakeet-tdt-0.6b-v3-int8",
         "voxtral-local" => "voxtral-q4.gguf",
         _ => "ggml-large-v3-turbo-q5_0.bin",
     }
