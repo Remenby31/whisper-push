@@ -34,7 +34,10 @@ struct ModelPickerView: View {
                 id: "parakeet",
                 name: "Parakeet TDT v3",
                 modelFile: "parakeet-tdt-0.6b-v3",
-                size: "600 MB",
+                // ONNX format ships fp32 weights in an external .data file
+                // (~2.43 GB) on top of the graph and decoder — real on-disk
+                // size is ~2.5 GB, not the ~600 MB parameter count.
+                size: "2.5 GB",
                 warning: nil,
                 alreadyDownloaded: Self.isModelDownloaded("parakeet-tdt-0.6b-v3")
             ),

@@ -24,14 +24,17 @@ struct DownloadView: View {
                     .tint(Color.brandGreen)
                     .padding(.horizontal, 60)
 
-                HStack(spacing: 16) {
-                    Text(downloader.currentFile)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    if downloader.totalBytes > 0 {
-                        Text("\(formatBytes(downloader.downloadedBytes)) / \(formatBytes(downloader.totalBytes))")
+                VStack(spacing: 2) {
+                    if downloader.totalFileCount > 0 {
+                        Text("File \(downloader.completedFileCount + 1) of \(downloader.totalFileCount) — \(downloader.currentFile)")
                             .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    if downloader.totalBytes > 0 {
+                        Text("\(formatBytes(downloader.downloadedBytes)) of \(formatBytes(downloader.totalBytes)) for this file")
+                            .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
                     }
@@ -83,12 +86,12 @@ class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     @Published var isDone = false
     @Published var downloadedBytes: Int64 = 0
     @Published var totalBytes: Int64 = 0
+    @Published var totalFileCount: Int = 0
+    @Published var completedFileCount: Int = 0
 
     private var pendingDownloads: [(model: String, files: [(url: URL, dest: URL)])] = []
     private var currentModelIndex = 0
     private var currentFileIndex = 0
-    private var totalFileCount = 0
-    private var completedFileCount = 0
     private var session: URLSession!
 
     override init() {
