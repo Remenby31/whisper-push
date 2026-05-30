@@ -34,9 +34,13 @@ check:
 	cargo check
 	@echo "✓ Check passed"
 
-# Build the SwiftUI onboarding wizard
+# Build the SwiftUI onboarding wizard.
+# No `| tail -1`: piping into tail swallowed swift build's exit code (the
+# pipeline's status is tail's, always 0), so a failed build still printed
+# "✓ built" and then died on the cp in `bundle` with a useless one-line
+# "error: fatalError". Let swift build fail loudly and stop make.
 onboarding:
-	@cd macos/Onboarding && swift build -c release 2>&1 | tail -1
+	@cd macos/Onboarding && swift build -c release
 	@echo "✓ Onboarding wizard built"
 
 # Launch the wizard in DESIGN PREVIEW mode — no real downloader, no daemon

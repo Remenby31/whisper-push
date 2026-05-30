@@ -59,8 +59,13 @@ pub fn run() -> Option<String> {
     #[cfg(target_os = "macos")]
     match run_swift_wizard(&hw.gpu.label(), recommended_backend) {
         WizardOutcome::Completed(result) => {
-            info!("Wizard chose model: {} (auto_start: {})", result.model, result.auto_start);
-            if result.auto_start { crate::autostart::enable(); }
+            info!(
+                "Wizard chose model: {} (auto_start: {})",
+                result.model, result.auto_start
+            );
+            if result.auto_start {
+                crate::autostart::enable();
+            }
             if let Ok(mut cfg) = crate::config::Config::load() {
                 cfg.model = result.model.clone();
                 let _ = cfg.save();
@@ -90,8 +95,12 @@ fn wizard_binary_path() -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> WizardOutcome {
-    let Some(daemon_path) = std::env::current_exe().ok() else { return WizardOutcome::NotInstalled; };
-    let Some(wizard_path) = wizard_binary_path() else { return WizardOutcome::NotInstalled; };
+    let Some(daemon_path) = std::env::current_exe().ok() else {
+        return WizardOutcome::NotInstalled;
+    };
+    let Some(wizard_path) = wizard_binary_path() else {
+        return WizardOutcome::NotInstalled;
+    };
 
     if !wizard_path.exists() {
         info!("Onboarding wizard not found at {}", wizard_path.display());
@@ -102,21 +111,35 @@ fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> WizardOut
 
     let output = match std::process::Command::new(&wizard_path)
         .args([
-            "--hardware", hardware_name,
-            "--recommended", recommended_backend,
-            "--daemon-path", &daemon_path.to_string_lossy(),
+            "--hardware",
+            hardware_name,
+            "--recommended",
+            recommended_backend,
+            "--daemon-path",
+            &daemon_path.to_string_lossy(),
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
     {
         Ok(o) => o,
-        Err(e) => { info!("Failed to spawn wizard: {e}"); return WizardOutcome::Killed; }
+        Err(e) => {
+            info!("Failed to spawn wizard: {e}");
+            return WizardOutcome::Killed;
+        }
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json_line = stdout.lines().last().unwrap_or("");
-    info!("Wizard exit: {} | last line: {}", output.status, if json_line.is_empty() { "<empty>" } else { json_line });
+    info!(
+        "Wizard exit: {} | last line: {}",
+        output.status,
+        if json_line.is_empty() {
+            "<empty>"
+        } else {
+            json_line
+        }
+    );
 
     match parse_wizard_result(json_line) {
         Ok(r) => WizardOutcome::Completed(r),
