@@ -156,7 +156,11 @@ fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> WizardOut
     info!(
         "Wizard exit: {} | last stdout line: {}",
         output.status,
-        if json_line.is_empty() { "<empty>" } else { json_line }
+        if json_line.is_empty() {
+            "<empty>"
+        } else {
+            json_line
+        }
     );
 
     match parse_wizard_result(json_line) {
