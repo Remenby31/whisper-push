@@ -80,7 +80,10 @@ pub fn backend_for_model(model: &str) -> &'static str {
 /// Get the default model name for a backend (used by onboarding).
 pub fn model_for_backend(backend: &str) -> &'static str {
     match backend {
-        "parakeet" => "parakeet-tdt-0.6b-v3",
+        // int8 quantized Parakeet — 890 MB vs 2.5 GB fp32, half the RAM.
+        // The wizard downloads it with fp32-style filenames into the same
+        // models/parakeet/ dir so the parakeet_rs loader doesn't change.
+        "parakeet" => "parakeet-tdt-0.6b-v3-int8",
         "voxtral-local" => "voxtral-q4.gguf",
         _ => "ggml-large-v3-turbo-q5_0.bin",
     }

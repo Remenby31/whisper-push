@@ -49,15 +49,18 @@ class OnboardingState: ObservableObject {
         // Voxtral needs ~2.5GB RAM — skip on 8GB machines
         let canRunVoxtral = ramGB > 12
 
+        // Default Parakeet to the int8 variant — 3× smaller, 2× less RAM,
+        // negligible WER hit. The fp32 picker entry stays available for
+        // users who explicitly want max precision.
         if freeDiskGB > 10 {
-            selected.insert("parakeet-tdt-0.6b-v3")
+            selected.insert("parakeet-tdt-0.6b-v3-int8")
             selected.insert("ggml-large-v3-turbo-q5_0.bin")
             if canRunVoxtral {
                 selected.insert("voxtral-q4.gguf")
             }
         } else if freeDiskGB > 5 {
             selected.insert("ggml-large-v3-turbo-q5_0.bin")
-            selected.insert("parakeet-tdt-0.6b-v3")
+            selected.insert("parakeet-tdt-0.6b-v3-int8")
         }
 
         self.selectedModels = selected
@@ -142,14 +145,16 @@ class OnboardingState: ObservableObject {
 
 func modelNameForBackend(_ backend: String) -> String {
     switch backend {
-    case "parakeet": return "parakeet-tdt-0.6b-v3"
+    case "parakeet": return "parakeet-tdt-0.6b-v3-int8"  // int8 is the default
     case "voxtral-local": return "voxtral-q4.gguf"
     default: return "ggml-large-v3-turbo-q5_0.bin"
     }
 }
 
 func backendDisplayName(_ model: String) -> String {
-    if model.contains("parakeet") { return "Parakeet TDT" }
+    if model == "parakeet-tdt-0.6b-v3-int8" { return "Parakeet TDT (int8)" }
+    if model.contains("parakeet") { return "Parakeet TDT (fp32)" }
     if model.contains("voxtral") { return "Voxtral Realtime" }
+    if model.contains("small") { return "Whisper Small" }
     return "Whisper large-v3-turbo"
 }

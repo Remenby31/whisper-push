@@ -54,9 +54,14 @@ bundle: release onboarding
 	@# TCC and the "Quit and reopen" popup treat it as a separate app from
 	@# the daemon. See resources/Onboarding-Info.plist.
 	@mkdir -p "$(WIZARD_BUNDLE)/Contents/MacOS"
+	@mkdir -p "$(WIZARD_BUNDLE)/Contents/Resources"
 	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
 	@cp resources/Onboarding-Info.plist "$(WIZARD_BUNDLE)/Contents/Info.plist"
 	@echo "APPL????" > "$(WIZARD_BUNDLE)/Contents/PkgInfo"
+	@# Brand app icon for the wizard's Dock entry + window-title icon.
+	@# Same icns as the main bundle (referenced by CFBundleIconFile=AppIcon
+	@# in Onboarding-Info.plist).
+	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(WIZARD_BUNDLE)/Contents/Resources/AppIcon.icns" || echo "  (warning: resources/AppIcon.icns missing — wizard will have no icon)"
 	@echo "✓ App bundle created at $(APP_DIR)"
 	@echo "  └── wizard sub-bundle at Contents/Library/Helpers/Onboarding.app"
 

@@ -16,10 +16,20 @@ struct ModelPickerView: View {
         let dataDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("whisper-push/models")
         switch modelFile {
-        case "ggml-large-v3-turbo-q5_0.bin":
+        case "ggml-large-v3-turbo-q5_0.bin", "ggml-small-q5_1.bin":
             return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent(modelFile).path)
-        case "parakeet-tdt-0.6b-v3":
-            return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("parakeet/vocab.txt").path)
+        case "parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-int8":
+            // Both variants share models/parakeet/ on disk. To distinguish
+            // which one is installed we read models/parakeet/.variant
+            // (written at download time): "int8" or "fp32" (default).
+            let parakeetDir = dataDir.appendingPathComponent("parakeet")
+            guard FileManager.default.fileExists(atPath: parakeetDir.appendingPathComponent("vocab.txt").path) else {
+                return false
+            }
+            let installedVariant = (try? String(contentsOf: parakeetDir.appendingPathComponent(".variant"), encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "fp32"
+            let wantsInt8 = modelFile.hasSuffix("-int8")
+            return wantsInt8 ? (installedVariant == "int8") : (installedVariant == "fp32")
         case "voxtral-q4.gguf":
             return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("voxtral/voxtral-q4.gguf").path)
         default:
@@ -31,19 +41,39 @@ struct ModelPickerView: View {
         let lowRAM = OnboardingState.totalRAMGB() <= 12
         let models = [
             ModelInfo(
+                id: "parakeet-int8",
+                name: "Parakeet TDT v3 (int8)",
+                modelFile: "parakeet-tdt-0.6b-v3-int8",
+                // Quantized to int8 — 8-bit integer weights instead of fp32.
+                // ~3× smaller, ~2× less RAM, WER ≤ +1% in practice.
+                size: "890 MB",
+                warning: nil,
+                alreadyDownloaded: Self.isModelDownloaded("parakeet-tdt-0.6b-v3-int8")
+            ),
+            ModelInfo(
                 id: "parakeet",
-                name: "Parakeet TDT v3",
+                name: "Parakeet TDT v3 (fp32)",
                 modelFile: "parakeet-tdt-0.6b-v3",
-                // ONNX format ships fp32 weights in an external .data file
-                // (~2.43 GB) on top of the graph and decoder — real on-disk
-                // size is ~2.5 GB, not the ~600 MB parameter count.
+                // Full-precision fp32 ONNX. Heavier but the "reference" model
+                // — keep around for quality-sensitive comparisons.
                 size: "2.5 GB",
                 warning: nil,
                 alreadyDownloaded: Self.isModelDownloaded("parakeet-tdt-0.6b-v3")
             ),
             ModelInfo(
+                id: "whisper-small",
+                name: "Whisper Small (q5)",
+                modelFile: "ggml-small-q5_1.bin",
+                // 244M params quantized to q5 — minimum viable Whisper for
+                // light dictation, multilingual, runs comfortably on any
+                // Apple Silicon.
+                size: "181 MB",
+                warning: nil,
+                alreadyDownloaded: Self.isModelDownloaded("ggml-small-q5_1.bin")
+            ),
+            ModelInfo(
                 id: "whisper",
-                name: "Whisper large-v3-turbo",
+                name: "Whisper large-v3-turbo (q5)",
                 modelFile: "ggml-large-v3-turbo-q5_0.bin",
                 size: "550 MB",
                 warning: nil,
@@ -59,72 +89,78 @@ struct ModelPickerView: View {
             ),
         ]
 
-        VStack(spacing: 16) {
-            Spacer()
-
-            VStack(spacing: 4) {
+        VStack(spacing: 12) {
+            VStack(spacing: 2) {
                 Text("Choose your engines")
-                    .font(.system(size: 24, weight: .bold))
+                    .font(.system(size: 22, weight: .bold))
                 Text("Detected: \(state.hardwareName)")
-                    .font(.body)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .padding(.top, 18)
 
-            VStack(spacing: 10) {
-                ForEach(models) { model in
-                    let isSelected = state.selectedModels.contains(model.modelFile)
-                    HStack(spacing: 14) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(model.name)
-                                .font(.headline)
-                            HStack(spacing: 8) {
-                                if model.alreadyDownloaded {
-                                    Label("Installed", systemImage: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
-                                } else {
-                                    Label(model.size, systemImage: "arrow.down.circle")
-                                }
-                                if let warn = model.warning {
-                                    Label(warn, systemImage: "exclamationmark.triangle")
-                                        .foregroundColor(.orange)
-                                }
+            // Scrollable model list — keeps the title + summary + Continue
+            // button visible even when more rows are present than fit.
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 6) {
+                    ForEach(models) { model in
+                        let isSelected = state.selectedModels.contains(model.modelFile)
+                        HStack(spacing: 10) {
+                            // Selection box (left)
+                            if model.alreadyDownloaded {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.green)
+                            } else {
+                                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(isSelected ? .brandGreen : .gray.opacity(0.5))
                             }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
 
-                        Spacer()
+                            // Name (single line)
+                            Text(model.name)
+                                .font(.system(size: 13, weight: .medium))
+                                .lineLimit(1)
 
-                        if model.alreadyDownloaded {
-                            Image(systemName: "checkmark.square.fill")
-                                .font(.title2)
-                                .foregroundColor(.green)
-                        } else {
-                            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
-                                .font(.title2)
-                                .foregroundColor(isSelected ? .brandGreen : .gray)
+                            Spacer(minLength: 8)
+
+                            // Warning (if any)
+                            if let warn = model.warning {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.orange)
+                                    .help(warn)
+                            }
+
+                            // Size or "Installed"
+                            Text(model.alreadyDownloaded ? "Installed" : model.size)
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(minWidth: 60, alignment: .trailing)
                         }
-                    }
-                    .padding(.vertical, 12)
-                    .padding(.horizontal, 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10)
-                            .fill(isSelected ? Color.brandGreen.opacity(0.08) : Color(nsColor: .windowBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(isSelected ? Color.brandGreen.opacity(0.4) : Color.gray.opacity(0.2), lineWidth: 1)
-                    )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if !model.alreadyDownloaded {
-                            state.toggleModel(model.modelFile)
+                        .padding(.vertical, 7)
+                        .padding(.horizontal, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(isSelected ? Color.brandGreen.opacity(0.07) : Color.brandCream.opacity(0.35))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(isSelected ? Color.brandGreen.opacity(0.35) : Color.brandGreen.opacity(0.08), lineWidth: 1)
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            if !model.alreadyDownloaded {
+                                state.toggleModel(model.modelFile)
+                            }
                         }
+                        .opacity(model.alreadyDownloaded ? 0.7 : 1.0)
                     }
-                    .opacity(model.alreadyDownloaded ? 0.85 : 1.0)
                 }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 2)
             }
-            .padding(.horizontal, 32)
+            .frame(maxHeight: .infinity)
 
             let toDownload = models.filter { state.selectedModels.contains($0.modelFile) && !$0.alreadyDownloaded }
             if toDownload.isEmpty {
@@ -138,23 +174,15 @@ struct ModelPickerView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Spacer()
-
             let needsDownload = models.contains { state.selectedModels.contains($0.modelFile) && !$0.alreadyDownloaded }
             Button(action: { state.advance() }) {
                 Text(needsDownload ? "Download & Continue" : "Continue")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(Color.brandGreen)
-            .controlSize(.large)
+            .buttonStyle(BrandPrimaryButtonStyle(enabled: !state.selectedModels.isEmpty))
             .disabled(state.selectedModels.isEmpty)
             .padding(.horizontal, 60)
-            .padding(.bottom, 24)
+            .padding(.bottom, 18)
         }
-        .padding(.top, 24)
     }
 }
 
