@@ -1267,16 +1267,32 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 }
 
 fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
-    // idle/processing are monochrome → template mode lets macOS auto-adapt them
-    // to the menu-bar appearance (white on dark, black on light). Recording is
-    // the citron brand accent, so it is NOT a template (keeps its color).
-    let (data, is_template) = match state {
-        State::Loading | State::Processing => (ICON_PROCESSING, false),
-        State::Idle => (ICON_IDLE, true),
-        State::Recording => (ICON_RECORDING, false),
+    // Idle uses template mode (monochrome glyph that macOS auto-adapts to the
+    // menu bar: white on dark, black on light). The two active states keep
+    // their PADDOCK brand colors and are NOT templates:
+    //   - Loading / Processing → racing green #0D2E25 (model loading / install)
+    //   - Recording              → signal citron #CEDC00 (user speaking)
+    // The tooltip echoes the state in plain text so a user hovering the icon
+    // immediately learns what the colour means.
+    let (data, is_template, tooltip) = match state {
+        State::Loading => (
+            ICON_PROCESSING,
+            false,
+            "Whisper Push \u{2014} Loading model\u{2026}",
+        ),
+        State::Processing => (
+            ICON_PROCESSING,
+            false,
+            "Whisper Push \u{2014} Transcribing\u{2026}",
+        ),
+        State::Recording => (ICON_RECORDING, false, "Whisper Push \u{2014} Recording"),
+        State::Idle => (ICON_IDLE, true, "Whisper Push \u{2014} Ready"),
     };
-    if let (Some(tray), Some(icon)) = (tray, load_icon(data)) {
-        let _ = tray.set_icon(Some(icon));
+    if let Some(tray) = tray {
+        if let Some(icon) = load_icon(data) {
+            let _ = tray.set_icon(Some(icon));
+        }
+        let _ = tray.set_tooltip(Some(tooltip));
         #[cfg(target_os = "macos")]
         tray.set_icon_as_template(is_template);
     }
