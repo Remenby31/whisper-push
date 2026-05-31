@@ -64,22 +64,11 @@ mod inner {
             t_embed,
         });
 
-        // Warmup GPU shaders with 1s of silence
-        info!("Warming up GPU shaders...");
-        {
-            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
-            let state = guard.as_ref().unwrap();
-            let silence = AudioBuffer::new(vec![0.0f32; 16000], 16000);
-            let padded = pad_audio(&silence, &state.pad_config);
-            let mel = state.mel_extractor.compute_log(&padded.samples);
-            if let Some((mel_tensor, _, _)) = mel_to_tensor(&mel) {
-                let _ = state
-                    .model
-                    .transcribe_streaming(mel_tensor, state.t_embed.clone());
-            }
-        }
-
-        info!("Voxtral Q4 model ready (GPU shaders compiled)");
+        // GPU shader compilation happens lazily on first transcription.
+        // Warmup with transcribe_streaming hangs on M4 Pro Metal, so we
+        // skip it. The first dictation will be slower (~30-60s) as shaders
+        // compile, but subsequent ones are instant.
+        info!("Voxtral Q4 model loaded (first dictation will compile GPU shaders)");
         Ok(())
     }
 

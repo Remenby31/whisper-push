@@ -2,7 +2,7 @@ use crate::audio::capture::AudioCapture;
 use crate::config::Config;
 use crate::state::{AppState, Event, State};
 use anyhow::Result;
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
@@ -840,6 +840,16 @@ impl App {
             Event::StateChanged(s) => {
                 self.state.set(s);
                 set_tray_icon(&self.tray, s);
+                // Update tooltip with current state
+                if let Some(tray) = &self.tray {
+                    let tooltip = match s {
+                        State::Loading => "Whisper Push — Loading model...",
+                        State::Recording => "Whisper Push — Recording",
+                        State::Processing => "Whisper Push — Processing",
+                        State::Idle => "Whisper Push — Ready",
+                    };
+                    let _ = tray.set_tooltip(Some(tooltip));
+                }
                 if s == State::Idle {
                     if let Some(mi) = &self.menu_items {
                         mi.toggle_item.set_text("Start Recording");
@@ -947,8 +957,9 @@ impl ApplicationHandler<UserEvent> for App {
             let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx);
 
             // Pipeline thread: hotkey events + model load → capture → transcribe → paste
+            let ui_tx = self.state.tx.clone();
             std::thread::spawn(move || {
-                pipeline_loop(prx, pipeline_cfg);
+                pipeline_loop(prx, pipeline_cfg, ui_tx);
             });
 
             // Load model on the pipeline thread (all backends, including Voxtral/WGPU)
@@ -1013,7 +1024,7 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
 /// Autonomous pipeline: listens for hotkey events, captures audio,
 /// transcribes, and pastes — all in background threads.
 /// Never touches the winit event loop or tray menu.
-fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
+fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<Event>) {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let recording = Arc::new(AtomicBool::new(false));
@@ -1030,10 +1041,10 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
                 let sound_feedback = cfg.sound_feedback;
-                // Real-time streaming is too slow (re-encodes all audio each chunk).
-                // Use batch mode for now + progressive typing for visual effect.
-                let is_voxtral_streaming =
-                    crate::model_manager::backend_for_model(&cfg.model) == "voxtral-local";
+                // Voxtral streaming hangs on first use (GPU shader compilation blocks
+                // the feed_chunk loop). Use batch mode for all backends — record first,
+                // then transcribe after release.
+                let is_voxtral_streaming = false;
                 drop(cfg);
 
                 // Immediate audio acknowledgement — a 70 ms blip the moment the
@@ -1056,15 +1067,21 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
 
                     // Ensure Voxtral model is loaded on this thread
                     if !crate::transcribe::voxtral_local::is_loaded() {
+                        let _ = ui_tx.send(Event::StateChanged(State::Loading));
+                        info!("Loading Voxtral Q4 on first use...");
+                        let load_start = std::time::Instant::now();
                         let dir = crate::config::data_dir().join("models").join("voxtral");
                         if let Err(e) =
                             crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
                         {
                             tracing::error!("Voxtral load failed: {e}");
                             crate::notify::send("Whisper Push", &format!("Error: {e}"));
+                            let _ = ui_tx.send(Event::StateChanged(State::Idle));
                             rec.store(false, Ordering::Relaxed);
                             continue;
                         }
+                        info!("Voxtral ready ({:.1}s)", load_start.elapsed().as_secs_f64());
+                        let _ = ui_tx.send(Event::StateChanged(State::Idle));
                     }
 
                     // Start streaming session
@@ -1216,7 +1233,12 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
             }
 
             Ok(Event::LoadModel(model_name)) => {
+                let start = std::time::Instant::now();
                 info!("Loading model '{model_name}' on pipeline thread...");
+
+                // Tell the UI we're loading (icon changes, hotkeys ignored)
+                let _ = ui_tx.send(Event::StateChanged(State::Loading));
+
                 // Unload all backends
                 crate::transcribe::unload_model();
                 crate::transcribe::parakeet::unload_model();
@@ -1245,10 +1267,15 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                     "parakeet" => crate::transcribe::parakeet::load_model(),
                     _ => crate::transcribe::load_model(&model_name),
                 };
+
+                let elapsed = start.elapsed();
                 match load_result {
                     Ok(()) => {
-                        info!("{backend} model loaded");
-                        crate::notify::send("Whisper Push", &format!("{backend} ready!"));
+                        info!("{backend} model loaded ({:.1}s)", elapsed.as_secs_f64());
+                        crate::notify::send(
+                            "Whisper Push",
+                            &format!("{backend} ready! ({:.0}s)", elapsed.as_secs_f64()),
+                        );
                     }
                     Err(e) => {
                         tracing::error!("{backend} load failed: {e}");
@@ -1258,6 +1285,9 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>) {
                         );
                     }
                 }
+
+                // Back to idle — hotkeys work again
+                let _ = ui_tx.send(Event::StateChanged(State::Idle));
             }
 
             Ok(_) => {}

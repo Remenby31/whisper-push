@@ -115,6 +115,7 @@ make dmg     # create distributable DMG
 - **Ad-hoc TCC reset**: every rebuild changes the binary's cdhash, so macOS invalidates the TCC grants. `guided_setup` is what makes the re-grant tolerable — it opens the right panes, polls, and auto-restarts. A real Developer ID would stop the resets entirely.
 - **evdev on Linux**: requires user in 'input' group (`sudo usermod -aG input $USER`)
 - **Windows keyboard hook**: WH_KEYBOARD_LL needs a message loop on the hook thread
+- **Voxtral GPU warmup**: `transcribe_streaming` on silence hangs indefinitely on M4 Pro Metal. Warmup is skipped; shaders compile lazily on first real transcription. The crate also panics on first batch-mode use with "No such file or directory" (autotune cache missing). Streaming mode is disabled until the upstream `voxtral-mini-realtime` crate fixes these issues.
 
 ## Logging
 

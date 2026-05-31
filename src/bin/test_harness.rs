@@ -155,19 +155,45 @@ fn post_hotkey(key: &str, down: bool) -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        use core_graphics::event::{CGEvent, CGEventTapLocation};
+        use core_graphics::event::{CGEvent, CGEventTapLocation, CGEventType};
         use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
         let parsed = parse_key(key)?;
         let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .map_err(|_| "failed to create CGEventSource")?;
-        let event = CGEvent::new_keyboard_event(source, parsed.keycode, down)
-            .map_err(|_| "failed to create CGEvent")?;
-        event.set_flags(parsed.flags);
-        event.post(CGEventTapLocation::HID);
+
+        // Modifier keys (ctrl, shift, alt, cmd) generate FlagsChanged events,
+        // NOT KeyDown/KeyUp. The CGEventTap in the app listens for FlagsChanged,
+        // so we must post the right event type.
+        let is_modifier = [
+            KEYCODE_LCTRL, KEYCODE_RCTRL, KEYCODE_LSHIFT, KEYCODE_RSHIFT,
+            KEYCODE_LALT, KEYCODE_RALT, KEYCODE_LCMD, KEYCODE_RCMD,
+        ].contains(&parsed.keycode);
+
+        if is_modifier {
+            // For modifiers: create a FlagsChanged event.
+            // When "down", set the modifier flag; when "up", clear it.
+            let event = CGEvent::new_keyboard_event(source, parsed.keycode, down)
+                .map_err(|_| "failed to create CGEvent")?;
+            // Override the event type to FlagsChanged
+            event.set_type(CGEventType::FlagsChanged);
+            // Set flags: present when down, absent when up
+            if down {
+                event.set_flags(parsed.flags);
+            } else {
+                event.set_flags(core_graphics::event::CGEventFlags::CGEventFlagNull);
+            }
+            event.post(CGEventTapLocation::HID);
+        } else {
+            // For regular keys: standard KeyDown/KeyUp
+            let event = CGEvent::new_keyboard_event(source, parsed.keycode, down)
+                .map_err(|_| "failed to create CGEvent")?;
+            event.set_flags(parsed.flags);
+            event.post(CGEventTapLocation::HID);
+        }
 
         let dir = if down { "down" } else { "up" };
-        eprintln!("posted: {key} {dir} (keycode={})", parsed.keycode);
+        eprintln!("posted: {key} {dir} (keycode={}, modifier={is_modifier})", parsed.keycode);
         Ok(())
     }
 }
@@ -196,56 +222,52 @@ fn play_to(device: &str, wav: &str) -> Result<(), String> {
 
 // ─── Log inspection ─────────────────────────────────────────────────────────
 
-fn log_path_today() -> std::path::PathBuf {
-    let data_dir = dirs::data_dir()
+/// Find the most recently modified whisper-push log file.
+/// Handles UTC date rollover by picking the newest file instead of computing today's date.
+fn latest_log_path() -> Option<std::path::PathBuf> {
+    let log_dir = dirs::data_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("whisper-push");
-    let today = chrono_today();
-    data_dir.join("logs").join(format!("whisper-push.log.{today}"))
-}
+        .join("whisper-push")
+        .join("logs");
 
-fn chrono_today() -> String {
-    // Use UTC date formatted as YYYY-MM-DD (matches tracing-appender daily roller)
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    // Simple date calculation (no chrono dependency needed)
-    let days = now / 86400;
-    let (year, month, day) = days_to_ymd(days);
-    format!("{year}-{month:02}-{day:02}")
-}
+    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
 
-fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
-    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days_since_epoch + 719468;
-    let era = z / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with("whisper-push.log.") {
+                if let Ok(meta) = path.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if best.as_ref().is_none_or(|(_, t)| modified > *t) {
+                            best = Some((path, modified));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    best.map(|(p, _)| p)
 }
 
 fn wait_log(pattern: &str, timeout: u64) -> Result<(), String> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-    let path = log_path_today();
-    eprintln!("watching {} for '{pattern}' (timeout {timeout}s)", path.display());
-
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
 
-    // Wait for the file to exist
-    while !path.exists() {
+    // Wait for a log file to exist
+    let path = loop {
+        if let Some(p) = latest_log_path() {
+            break p;
+        }
         if std::time::Instant::now() > deadline {
-            return Err(format!("timeout: log file never appeared: {}", path.display()));
+            return Err("timeout: no log file found".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    };
+
+    eprintln!("watching {} for '{pattern}' (timeout {timeout}s)", path.display());
 
     let mut file = std::fs::File::open(&path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
@@ -265,7 +287,13 @@ fn wait_log(pattern: &str, timeout: u64) -> Result<(), String> {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                // No new data yet
+                // No new data — also check if a newer log file appeared (date rollover)
+                if let Some(newer) = latest_log_path() {
+                    if newer != path {
+                        eprintln!("log rolled to {}", newer.display());
+                        return wait_log(pattern, deadline.duration_since(std::time::Instant::now()).as_secs());
+                    }
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Ok(_) => {
@@ -280,7 +308,7 @@ fn wait_log(pattern: &str, timeout: u64) -> Result<(), String> {
 }
 
 fn check_log(pattern: &str) -> Result<(), String> {
-    let path = log_path_today();
+    let path = latest_log_path().ok_or("no log file found")?;
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
