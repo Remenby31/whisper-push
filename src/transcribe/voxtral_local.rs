@@ -150,8 +150,7 @@ mod inner {
     /// Accumulates audio, re-encodes encoder each chunk (~50ms),
     /// persists decoder KV cache to only decode NEW positions (~5ms/token).
     pub mod streaming {
-        use anyhow::{Context, Result};
-        use burn::prelude::ElementConversion;
+        use anyhow::Result;
         use tracing::info;
         use voxtral_mini_realtime::audio::AudioBuffer;
         use voxtral_mini_realtime::audio::mel::{MelConfig, MelSpectrogram};
@@ -165,8 +164,6 @@ mod inner {
             mel_extractor: MelSpectrogram,
             pad_config: PadConfig,
             all_audio: Vec<f32>,
-            decoder_cache:
-                Option<voxtral_mini_realtime::models::layers::LayerCaches<burn::backend::Wgpu>>,
             generated_tokens: Vec<i32>,
             decoded_positions: usize,
             prefill_done: bool,
@@ -179,7 +176,6 @@ mod inner {
                 mel_extractor: MelSpectrogram::new(MelConfig::voxtral()),
                 pad_config: PadConfig::voxtral(),
                 all_audio: Vec::new(),
-                decoder_cache: None,
                 generated_tokens: prefix,
                 decoded_positions: 0,
                 prefill_done: false,
@@ -206,13 +202,11 @@ mod inner {
             let (mel_tensor, _, _) =
                 super::mel_to_tensor(&mel).ok_or_else(|| anyhow::anyhow!("Empty mel"))?;
             let audio_embeds = state.model.encode_audio(mel_tensor);
-            let [_, seq_len, d_model] = audio_embeds.dims();
+            let [_, seq_len, _] = audio_embeds.dims();
 
             if seq_len <= session.decoded_positions {
                 return Ok(Vec::new());
             }
-
-            let mut new_tokens = Vec::new();
 
             if seq_len < PREFIX_LEN {
                 return Ok(Vec::new());
@@ -228,7 +222,7 @@ mod inner {
 
             // Extract only NEW tokens (diff with previous run)
             let prev_count = session.decoded_positions;
-            new_tokens = all_tokens.iter().skip(prev_count).cloned().collect();
+            let new_tokens: Vec<i32> = all_tokens.iter().skip(prev_count).cloned().collect();
             session.generated_tokens = {
                 let mut prefix = vec![1i32];
                 prefix.extend(std::iter::repeat_n(32i32, PREFIX_LEN - 1));

@@ -125,7 +125,8 @@ install: sign
 	@sleep 1
 	@rm -rf "$(INSTALLED_APP)"
 	@cp -R "$(APP_DIR)" "$(INSTALL_DIR)/"
-	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>Label</key>\n\t<string>$(BUNDLE_ID)</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>$(INSTALLED_APP)/Contents/MacOS/whisper-push</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>StandardOutPath</key>\n\t<string>/tmp/whisper-push.out.log</string>\n\t<key>StandardErrorPath</key>\n\t<string>/tmp/whisper-push.err.log</string>\n</dict>\n</plist>\n' > "$(LAUNCH_AGENT)"
+	@mkdir -p "$(HOME)/Library/Application Support/whisper-push/logs"
+	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>Label</key>\n\t<string>$(BUNDLE_ID)</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>$(INSTALLED_APP)/Contents/MacOS/whisper-push</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>StandardOutPath</key>\n\t<string>$(HOME)/Library/Application Support/whisper-push/logs/launchd-stdout.log</string>\n\t<key>StandardErrorPath</key>\n\t<string>$(HOME)/Library/Application Support/whisper-push/logs/launchd-stderr.log</string>\n</dict>\n</plist>\n' > "$(LAUNCH_AGENT)"
 	@launchctl bootout gui/$$(id -u)/$(BUNDLE_ID) 2>/dev/null || true
 	@launchctl bootstrap gui/$$(id -u) "$(LAUNCH_AGENT)" 2>/dev/null || true
 	@echo "✓ Installed to /Applications + registered login autostart"

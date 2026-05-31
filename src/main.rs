@@ -52,22 +52,28 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Init logging
-    init_logging();
-
-    info!("whisper-push v{}", env!("CARGO_PKG_VERSION"));
-
+    // Subcommands that don't need config: log to stderr only
     if cli.doctor {
+        init_logging(false);
+        info!("whisper-push v{}", env!("CARGO_PKG_VERSION"));
         return doctor::run();
     }
 
     if cli.models {
+        init_logging(false);
         model_manager::print_status();
         return Ok(());
     }
 
     if let Some(ref audio_path) = cli.transcribe {
+        init_logging(false);
+        info!("whisper-push v{}", env!("CARGO_PKG_VERSION"));
         return cli_transcribe::run(audio_path, cli.language.as_deref());
+    }
+
+    if cli.status {
+        println!("{}", state::current_status());
+        return Ok(());
     }
 
     // Load config
@@ -81,21 +87,66 @@ fn main() -> Result<()> {
         cfg.language = lang.clone();
     }
 
-    if cli.status {
-        println!("{}", state::current_status());
-        return Ok(());
-    }
+    // Init logging with file output (after config is loaded so we know debug flag)
+    init_logging(cfg.debug);
+    cleanup_old_logs();
+
+    info!("whisper-push v{}", env!("CARGO_PKG_VERSION"));
 
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
     app::run(cfg)
 }
 
-fn init_logging() {
-    use tracing_subscriber::{EnvFilter, fmt};
+/// Set up tracing: stderr + daily rolling log file.
+///
+/// When `debug` is true the level is `debug`, otherwise `info`.
+/// A daily rolling file is written to `<data_dir>/logs/whisper-push.YYYY-MM-DD.log`.
+fn init_logging(debug: bool) {
+    use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let default_level = if debug { "debug" } else { "info" };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
-    fmt().with_env_filter(filter).with_target(false).init();
+    let log_dir = config::log_dir();
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "whisper-push.log");
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_target(false).with_writer(std::io::stderr))
+        .with(
+            fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(file_appender),
+        )
+        .init();
+}
+
+/// Remove log files older than 7 days.
+fn cleanup_old_logs() {
+    let log_dir = config::log_dir();
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+
+    let entries = match std::fs::read_dir(&log_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("log") {
+            if let Ok(meta) = path.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified < cutoff {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
 }
 
 mod doctor {

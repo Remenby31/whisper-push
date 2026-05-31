@@ -94,6 +94,11 @@ pub fn data_dir() -> PathBuf {
         .join("whisper-push")
 }
 
+/// Log directory inside the data dir.
+pub fn log_dir() -> PathBuf {
+    data_dir().join("logs")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

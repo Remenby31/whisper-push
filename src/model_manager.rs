@@ -1,8 +1,6 @@
 //! Model manager — download, verify, and manage transcription models.
 
-use anyhow::Result;
 use std::path::PathBuf;
-use tracing::info;
 
 /// Available models with their sizes and download sources.
 pub struct ModelInfo {
@@ -113,40 +111,6 @@ pub fn model_size_mb(backend: &str) -> u32 {
         "voxtral-local" => 2300,
         _ => 0,
     }
-}
-
-/// Ensure the model for a given backend is downloaded.
-pub fn ensure_model(backend: &str) -> Result<()> {
-    match backend {
-        "whisper" => {
-            if !whisper_model_path().exists() {
-                info!("Downloading Whisper model...");
-                crate::notify::send("Whisper Push", "Downloading Whisper model (~547MB)...");
-                crate::transcribe::load_model("ggml-large-v3-turbo-q5_0.bin")?;
-                crate::notify::send("Whisper Push", "Whisper model ready!");
-            }
-        }
-        "parakeet" => {
-            if !parakeet_model_dir().join("vocab.txt").exists() {
-                info!("Downloading Parakeet model...");
-                crate::notify::send("Whisper Push", "Downloading Parakeet model (~600MB)...");
-                crate::transcribe::parakeet::load_model()?;
-                crate::notify::send("Whisper Push", "Parakeet model ready!");
-            }
-        }
-        "voxtral-local" => {
-            if !voxtral_model_dir().join("voxtral-q4.gguf").exists() {
-                info!("Voxtral Q4 model not found");
-                crate::notify::send(
-                    "Whisper Push",
-                    "Download Voxtral Q4: hf download TrevorJS/voxtral-mini-realtime-gguf --local-dir models/",
-                );
-                anyhow::bail!("Voxtral Q4 model not downloaded");
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 #[cfg(test)]
