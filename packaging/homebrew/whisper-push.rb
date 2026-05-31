@@ -7,7 +7,7 @@
 #   Casks/whisper-push.rb
 
 cask "whisper-push" do
-  version "1.1.2"
+  version "1.1.3"
   sha256 :no_check # Update with actual SHA after first release
 
   url "https://github.com/Remenby31/whisper-push/releases/download/v#{version}/Whisper-Push-macOS-arm64.dmg"
