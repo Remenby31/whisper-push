@@ -116,6 +116,32 @@ make dmg     # create distributable DMG
 - **evdev on Linux**: requires user in 'input' group (`sudo usermod -aG input $USER`)
 - **Windows keyboard hook**: WH_KEYBOARD_LL needs a message loop on the hook thread
 
+## Logging
+
+Dual output: stderr + daily rolling file in `<data_dir>/logs/whisper-push.log.YYYY-MM-DD`.
+`config.debug = true` sets level to `debug` (default `info`). Files > 7 days auto-deleted on startup.
+LaunchAgent captures pre-tracing panics to `<data_dir>/logs/launchd-stderr.log`.
+
+## E2E Testing (macOS)
+
+**Prerequisites:** `brew install sox blackhole-2ch`
+
+**Test harness binary** (`src/bin/test_harness.rs`):
+```bash
+cargo run --bin whisper-push-test -- hotkey-hold ctrl 3    # CGEvent: press, wait 3s, release
+cargo run --bin whisper-push-test -- play-to "BlackHole 2ch" test.wav  # sox → virtual device
+cargo run --bin whisper-push-test -- wait-log "Pasting" 30  # tail log, exit 0 on match
+cargo run --bin whisper-push-test -- check-log "Ready!"     # grep log, exit 0 if found
+```
+
+**Full E2E script** (`tests/e2e.sh`): configures BlackHole as input, launches app, generates audio via `say`, plays to BlackHole while holding hotkey via CGEvent, verifies transcription in logs.
+```bash
+./tests/e2e.sh              # full run (builds + launches app)
+./tests/e2e.sh --no-launch  # skip launch (app already running)
+```
+
+**How it works:** CGEvent posted at HID layer → real CGEventTap captures it → cpal records from BlackHole → rubato resamples → engine transcribes → clipboard + Cmd+V paste. Zero mocks — 100% production code path.
+
 ## Recent additions (branch `settings-and-brandkit`)
 
 Enhancements layered on top of the existing modules — no new architectural pieces.

@@ -111,6 +111,10 @@ windows = { version = "0.61", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
 
+[[bin]]
+name = "whisper-push-test"
+path = "src/bin/test_harness.rs"
+
 [[test]]
 name = "transcription_tests"
 harness = false
