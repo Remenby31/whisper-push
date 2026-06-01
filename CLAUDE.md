@@ -115,13 +115,38 @@ make dmg     # create distributable DMG
 - **Ad-hoc TCC reset**: every rebuild changes the binary's cdhash, so macOS invalidates the TCC grants. `guided_setup` is what makes the re-grant tolerable — it opens the right panes, polls, and auto-restarts. A real Developer ID would stop the resets entirely.
 - **evdev on Linux**: requires user in 'input' group (`sudo usermod -aG input $USER`)
 - **Windows keyboard hook**: WH_KEYBOARD_LL needs a message loop on the hook thread
-- **Voxtral GPU warmup**: `transcribe_streaming` on silence hangs indefinitely on M4 Pro Metal. Warmup is skipped; shaders compile lazily on first real transcription. The crate also panics on first batch-mode use with "No such file or directory" (autotune cache missing). Streaming mode is disabled until the upstream `voxtral-mini-realtime` crate fixes these issues.
+- **Voxtral GPU shaders**: `transcribe_streaming` on silence hangs on M4 Pro Metal → warmup skipped, shaders compile lazily on first real transcription (~15s). Streaming mode disabled (blocks feed_chunk loop during compilation); batch mode works. cubecl stores autotune cache in `CWD/target/` → `load_model()` does `set_current_dir(data_dir)` so cache lands in `<data_dir>/target/autotune/`.
 
 ## Logging
 
 Dual output: stderr + daily rolling file in `<data_dir>/logs/whisper-push.log.YYYY-MM-DD`.
 `config.debug = true` sets level to `debug` (default `info`). Files > 7 days auto-deleted on startup.
 LaunchAgent captures pre-tracing panics to `<data_dir>/logs/launchd-stderr.log`.
+
+## Debugging
+
+```bash
+# Live tail the log
+tail -f ~/Library/Application\ Support/whisper-push/logs/whisper-push.log.*
+
+# Key log patterns to grep for:
+#   "HotkeyDown" / "HotkeyUp"     — CGEventTap received the key
+#   "Recording from"               — cpal opened the mic (device + sample rate)
+#   "Captured Xs of audio"         — recording stopped (duration, RMS, max)
+#   "Processing Xs with backend"   — transcription started (backend name, RMS)
+#   "Parakeet:" / "Whisper:" / "Voxtral:"  — transcription result + time
+#   "Pasting"                      — text sent to clipboard + Cmd+V
+#   "model loaded (Xs)"            — model load time
+#   "Too short, skipping"          — hold was too brief (< hold_delay)
+#   "Transcription panicked"       — engine crashed (catch_unwind caught it)
+
+# Common issues:
+#   No HotkeyDown logged           → TCC: check Accessibility + Input Monitoring
+#   HotkeyDown but no Recording    → hold_delay not reached (quick tap)
+#   Recording but RMS ≈ 0          → wrong input device or mic permission denied
+#   Transcription empty text       → audio too quiet or wrong language setting
+#   "poisoned lock"                → previous panic corrupted Mutex; restart app
+```
 
 ## E2E Testing (macOS)
 
@@ -142,6 +167,8 @@ cargo run --bin whisper-push-test -- check-log "Ready!"     # grep log, exit 0 i
 ```
 
 **How it works:** CGEvent posted at HID layer → real CGEventTap captures it → cpal records from BlackHole → rubato resamples → engine transcribes → clipboard + Cmd+V paste. Zero mocks — 100% production code path.
+
+**Important**: modifier keys (ctrl, shift, cmd, alt) must be posted as `FlagsChanged` CGEvents, not `KeyDown`/`KeyUp` — the CGEventTap only listens for `FlagsChanged` in hold mode.
 
 ## Recent additions (branch `settings-and-brandkit`)
 
