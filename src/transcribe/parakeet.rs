@@ -38,6 +38,7 @@ mod inner {
         info!("Parakeet model unloaded");
     }
 
+    #[allow(dead_code)]
     pub fn is_loaded() -> bool {
         PARAKEET.lock().unwrap().is_some()
     }
@@ -89,6 +90,7 @@ mod inner {
 }
 
 #[cfg(feature = "parakeet")]
+#[allow(unused_imports)] // Used by integration tests
 pub use inner::{is_loaded, load_model, model_dir, transcribe, unload_model};
 
 #[cfg(not(feature = "parakeet"))]

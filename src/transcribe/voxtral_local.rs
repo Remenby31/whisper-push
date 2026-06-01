@@ -32,6 +32,13 @@ mod inner {
     static VOXTRAL: Mutex<Option<VoxtralState>> = Mutex::new(None);
 
     pub fn load_model(model_dir: &str) -> Result<()> {
+        // cubecl (burn's GPU layer) stores autotune cache in CWD/target/.
+        // When running from a .app bundle, CWD may not be writable.
+        // Set CWD to the data dir so the cache lands in a known location.
+        let data_dir = crate::config::data_dir();
+        let _ = std::fs::create_dir_all(&data_dir);
+        let _ = std::env::set_current_dir(&data_dir);
+
         let device = Default::default();
         let model_path = PathBuf::from(model_dir).join("voxtral-q4.gguf");
         let tokenizer_path = PathBuf::from(model_dir).join("tekken.json");

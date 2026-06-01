@@ -56,6 +56,7 @@ pub fn unload_model() {
 }
 
 /// Check if the model is loaded.
+#[allow(dead_code)] // Used by integration tests
 pub fn is_loaded() -> bool {
     MODEL.lock().unwrap_or_else(|e| e.into_inner()).is_some()
 }

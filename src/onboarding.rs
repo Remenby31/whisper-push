@@ -23,8 +23,9 @@ pub fn mark_complete() {
 pub struct WizardResult {
     /// Primary model to use
     pub model: String,
-    /// All models to download
+    /// All models to download (sent by Swift wizard, reserved for future use)
     #[serde(default)]
+    #[allow(dead_code)]
     pub download: Vec<String>,
     #[serde(default)]
     pub auto_start: bool,

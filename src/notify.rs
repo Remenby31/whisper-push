@@ -29,7 +29,7 @@ pub fn send(title: &str, body: &str) {
 fn macos_notify(title: &str, body: &str) -> bool {
     use objc2::rc::Retained;
     use objc2::runtime::AnyClass;
-    use objc2::{msg_send, msg_send_id};
+    use objc2::msg_send;
     use objc2_foundation::NSString;
 
     unsafe {
@@ -38,8 +38,8 @@ fn macos_notify(title: &str, body: &str) -> bool {
             Some(c) => c,
             None => return false,
         };
-        let main_bundle: Retained<objc2::runtime::AnyObject> = msg_send_id![bundle_cls, mainBundle];
-        let bundle_id: Option<Retained<NSString>> = msg_send_id![&main_bundle, bundleIdentifier];
+        let main_bundle: Retained<objc2::runtime::AnyObject> = msg_send![bundle_cls, mainBundle];
+        let bundle_id: Option<Retained<NSString>> = msg_send![&main_bundle, bundleIdentifier];
         if bundle_id.is_none() {
             // Not in an app bundle — NSUserNotification won't show our icon
             return false;
@@ -55,13 +55,13 @@ fn macos_notify(title: &str, body: &str) -> bool {
         };
 
         let center: Option<Retained<objc2::runtime::AnyObject>> =
-            msg_send_id![center_cls, defaultUserNotificationCenter];
+            msg_send![center_cls, defaultUserNotificationCenter];
         let center = match center {
             Some(c) => c,
             None => return false,
         };
 
-        let notification: Retained<objc2::runtime::AnyObject> = msg_send_id![cls, new];
+        let notification: Retained<objc2::runtime::AnyObject> = msg_send![cls, new];
         let ns_title = NSString::from_str(title);
         let ns_body = NSString::from_str(body);
 

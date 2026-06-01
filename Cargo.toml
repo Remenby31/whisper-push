@@ -114,6 +114,7 @@ evdev = "0.12"
 [[bin]]
 name = "whisper-push-test"
 path = "src/bin/test_harness.rs"
+required-features = ["metal"]  # macOS-only: CGEvent, CoreAudio
 
 [[test]]
 name = "transcription_tests"

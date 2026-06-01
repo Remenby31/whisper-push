@@ -242,7 +242,7 @@ fn request_microphone() {
                 tracing::warn!("Microphone: denied by user");
             }
         });
-        let _: () = msg_send![cls, requestAccessForMediaType: &*media_type
+        let _: () = msg_send![cls, requestAccessForMediaType: &*media_type,
                                    completionHandler: &*block];
     }
 }
