@@ -42,9 +42,9 @@ No cloud, no account, no latency. A **35MB native binary** that transcribes spee
 
 ### macOS (Apple Silicon)
 
-**Easiest — download the DMG** (the Whisper model is bundled, so first launch is instant):
+**Easiest — download the DMG** (lightweight — the speech model downloads automatically on first launch):
 
-1. Grab **[Whisper-Push-macOS-arm64.dmg](https://github.com/Remenby31/whisper-push/releases/latest)** (~528 MB)
+1. Grab **[Whisper-Push-macOS-arm64.dmg](https://github.com/Remenby31/whisper-push/releases/latest)** (~18 MB)
 2. Open it and drag **Whisper Push** to **Applications**
 3. Launch from Launchpad / Applications — a guided setup opens to walk you through the three macOS permissions (Microphone, Accessibility, Input Monitoring). It detects when you toggle each one and restarts the app automatically.
 
@@ -58,13 +58,21 @@ cd whisper-push
 make install SIGN_ID="-"   # build + bundle + ad-hoc sign + copy to /Applications + login autostart
 ```
 
-The model (~550MB) downloads automatically on first run when built from source (the bundled-model is only in the DMG path).
+The speech model (~550 MB for Whisper) downloads automatically on first run — same for the DMG and source builds.
 
 ### Linux
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/Remenby31/whisper-push/main/scripts/install.sh | sh
 ```
+
+Or grab a package from the **[latest release](https://github.com/Remenby31/whisper-push/releases/latest)**: `whisper-push_amd64.deb` (CPU) or `whisper-push-cuda_amd64.deb` (NVIDIA), or the portable `whisper-push-linux-x86_64*.tar.gz`.
+
+### Windows
+
+From the **[latest release](https://github.com/Remenby31/whisper-push/releases/latest)**: run `whisper-push-x64.msi` (CPU) or `whisper-push-x64-cuda.msi` (NVIDIA), or use the portable `whisper-push-windows-x64*.zip`.
+
+> On Linux and Windows, first-launch setup runs through notifications and the tray menu — the visual onboarding wizard is macOS-only.
 
 ### Usage
 
