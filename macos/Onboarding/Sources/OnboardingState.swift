@@ -3,8 +3,22 @@ import SwiftUI
 /// Shared state across all onboarding screens.
 @MainActor
 class OnboardingState: ObservableObject {
+    /// Order: welcome → permissions → model → download → ready.
+    /// Permissions come BEFORE model so grants happen up-front while the
+    /// daemon isn't running, guaranteeing no "Quit and reopen" popup.
     enum Step: Int, CaseIterable {
-        case welcome, model, download, ready
+        case welcome, permissions, model, download, ready
+
+        static func from(name: String) -> Step? {
+            switch name {
+            case "welcome": return .welcome
+            case "permissions": return .permissions
+            case "model": return .model
+            case "download": return .download
+            case "ready": return .ready
+            default: return nil
+            }
+        }
     }
 
     @Published var currentStep: Step = .welcome
@@ -12,12 +26,18 @@ class OnboardingState: ObservableObject {
     // CLI args (from Rust)
     let hardwareName: String
     let recommendedBackend: String
+    /// Path to the daemon binary, used by PermissionsView to probe TCC
+    /// state via `--permissions-json`. nil in dev / design preview.
+    let daemonPath: String?
+    /// Design preview mode (driven by the `onboarding-design` Claude skill
+    /// via `make onboarding-preview`). When true the wizard never calls
+    /// the daemon, never downloads, and `finish()` does not emit JSON.
+    let isDesignPreview: Bool
 
     // User choices
     @Published var selectedModels: Set<String> = []
     @Published var autoStart = true
 
-    /// The primary model (first selected, or the recommended one).
     var primaryModel: String {
         let recommended = modelNameForBackend(recommendedBackend)
         if selectedModels.contains(recommended) {
@@ -30,27 +50,34 @@ class OnboardingState: ObservableObject {
         let args = ProcessInfo.processInfo.arguments
         self.hardwareName = Self.argValue(args, flag: "--hardware") ?? "Unknown"
         self.recommendedBackend = Self.argValue(args, flag: "--recommended") ?? "parakeet"
+        self.daemonPath = Self.argValue(args, flag: "--daemon-path")
+        self.isDesignPreview = args.contains("--design-preview")
 
-        // Pre-select models based on available disk space and RAM
         let freeDiskGB = Self.freeDiskSpaceGB()
         let ramGB = Self.totalRAMGB()
         var selected: Set<String> = [modelNameForBackend(self.recommendedBackend)]
 
-        // Voxtral needs ~2.5GB RAM — skip on 8GB machines
         let canRunVoxtral = ramGB > 12
 
         if freeDiskGB > 10 {
-            selected.insert("parakeet-tdt-0.6b-v3")
+            selected.insert("parakeet-tdt-0.6b-v3-int8")
             selected.insert("ggml-large-v3-turbo-q5_0.bin")
             if canRunVoxtral {
                 selected.insert("voxtral-q4.gguf")
             }
         } else if freeDiskGB > 5 {
             selected.insert("ggml-large-v3-turbo-q5_0.bin")
-            selected.insert("parakeet-tdt-0.6b-v3")
+            selected.insert("parakeet-tdt-0.6b-v3-int8")
         }
 
         self.selectedModels = selected
+
+        // Optional jump to a specific step (used by design preview + Rust
+        // resume after a kill).
+        if let stepArg = Self.argValue(args, flag: "--start-at"),
+           let step = Step.from(name: stepArg) {
+            self.currentStep = step
+        }
     }
 
     static func totalRAMGB() -> Double {
@@ -58,12 +85,8 @@ class OnboardingState: ObservableObject {
     }
 
     private static func freeDiskSpaceGB() -> Double {
-        guard let attrs = try? FileManager.default.attributesOfFileSystem(
-            forPath: NSHomeDirectory()
-        ),
-        let freeBytes = attrs[.systemFreeSize] as? Int64 else {
-            return 0
-        }
+        guard let attrs = try? FileManager.default.attributesOfFileSystem(forPath: NSHomeDirectory()),
+              let freeBytes = attrs[.systemFreeSize] as? Int64 else { return 0 }
         return Double(freeBytes) / 1_000_000_000
     }
 
@@ -74,7 +97,6 @@ class OnboardingState: ObservableObject {
 
     func toggleModel(_ modelFile: String) {
         if selectedModels.contains(modelFile) {
-            // Don't allow deselecting the last one
             if selectedModels.count > 1 {
                 selectedModels.remove(modelFile)
             }
@@ -83,8 +105,11 @@ class OnboardingState: ObservableObject {
         }
     }
 
-    /// Write the user's choices as JSON to stdout (read by Rust)
     func finish() {
+        guard !isDesignPreview else {
+            NSApplication.shared.terminate(nil)
+            return
+        }
         let result: [String: Any] = [
             "model": primaryModel,
             "download": Array(selectedModels),
@@ -99,14 +124,21 @@ class OnboardingState: ObservableObject {
 
     func advance() {
         var nextRaw = currentStep.rawValue + 1
-
-        // Skip download screen if all selected models are already installed
         if Step(rawValue: nextRaw) == .download && allSelectedModelsInstalled() {
             nextRaw += 1
         }
-
         if let next = Step(rawValue: nextRaw) {
             withAnimation(.easeInOut(duration: 0.3)) {
+                currentStep = next
+            }
+        }
+    }
+
+    /// Cmd+→ / Cmd+← sweep used by design preview.
+    func sweep(_ direction: Int) {
+        let raw = currentStep.rawValue + direction
+        if let next = Step(rawValue: raw) {
+            withAnimation(.easeInOut(duration: 0.25)) {
                 currentStep = next
             }
         }
@@ -117,9 +149,9 @@ class OnboardingState: ObservableObject {
             .appendingPathComponent("whisper-push/models")
         return selectedModels.allSatisfy { model in
             switch model {
-            case "ggml-large-v3-turbo-q5_0.bin":
+            case "ggml-large-v3-turbo-q5_0.bin", "ggml-small-q5_1.bin":
                 return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent(model).path)
-            case "parakeet-tdt-0.6b-v3":
+            case "parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-int8":
                 return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("parakeet/vocab.txt").path)
             case "voxtral-q4.gguf":
                 return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("voxtral/voxtral-q4.gguf").path)
@@ -132,14 +164,16 @@ class OnboardingState: ObservableObject {
 
 func modelNameForBackend(_ backend: String) -> String {
     switch backend {
-    case "parakeet": return "parakeet-tdt-0.6b-v3"
+    case "parakeet": return "parakeet-tdt-0.6b-v3-int8"
     case "voxtral-local": return "voxtral-q4.gguf"
     default: return "ggml-large-v3-turbo-q5_0.bin"
     }
 }
 
 func backendDisplayName(_ model: String) -> String {
-    if model.contains("parakeet") { return "Parakeet TDT" }
+    if model == "parakeet-tdt-0.6b-v3-int8" { return "Parakeet TDT (int8)" }
+    if model.contains("parakeet") { return "Parakeet TDT (fp32)" }
     if model.contains("voxtral") { return "Voxtral Realtime" }
-    return "Whisper large-v3-turbo"
+    if model.contains("small") { return "Whisper Small" }
+    return "Whisper Turbo"
 }

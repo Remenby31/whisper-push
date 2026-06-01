@@ -35,85 +35,116 @@ pub fn parse_wizard_result(json: &str) -> anyhow::Result<WizardResult> {
     serde_json::from_str(json).map_err(|e| anyhow::anyhow!("Failed to parse wizard result: {e}"))
 }
 
-/// Run the onboarding sequence. Returns the recommended model name.
-pub fn run() -> String {
+/// Outcome of trying to run the SwiftUI wizard.
+#[cfg(target_os = "macos")]
+enum WizardOutcome {
+    Completed(WizardResult),
+    /// User closed the window without finishing.
+    Killed,
+    /// Wizard binary not installed (dev build, Linux).
+    NotInstalled,
+}
+
+/// Run the onboarding sequence. None = wizard interrupted (caller shouldn't
+/// mark onboarding complete).
+pub fn run() -> Option<String> {
     info!("Running first-launch onboarding...");
 
-    // Detect hardware for the wizard
     let hw = crate::hardware::detect();
     let recommended_backend = crate::hardware::recommend_backend(&hw);
     let recommended_model = crate::model_manager::model_for_backend(recommended_backend);
-    info!("Hardware: {} {} — GPU: {}", hw.os, hw.arch, hw.gpu.label());
+    info!("Hardware: {} {}, GPU: {}", hw.os, hw.arch, hw.gpu.label());
     info!("Recommended model: {recommended_model} (backend: {recommended_backend})");
 
-    // Try the SwiftUI wizard (macOS .app bundle only)
     #[cfg(target_os = "macos")]
-    if let Some(result) = run_swift_wizard(&hw.gpu.label(), recommended_backend) {
-        info!(
-            "Wizard chose model: {} (auto_start: {})",
-            result.model, result.auto_start
-        );
-
-        if result.auto_start {
-            crate::autostart::enable();
+    match run_swift_wizard(&hw.gpu.label(), recommended_backend) {
+        WizardOutcome::Completed(result) => {
+            info!(
+                "Wizard chose model: {} (auto_start: {})",
+                result.model, result.auto_start
+            );
+            if result.auto_start {
+                crate::autostart::enable();
+            }
+            if let Ok(mut cfg) = crate::config::Config::load() {
+                cfg.model = result.model.clone();
+                let _ = cfg.save();
+            }
+            mark_complete();
+            crate::permissions::guided_setup();
+            return Some(result.model);
         }
-
-        if let Ok(mut cfg) = crate::config::Config::load() {
-            cfg.model = result.model.clone();
-            let _ = cfg.save();
+        WizardOutcome::Killed => {
+            info!("Wizard exited without finishing");
+            return None;
         }
-
-        mark_complete();
-
-        // Permissions are handled by the app itself (not the wizard)
-        // via guided_setup which opens the right Settings panes and polls
-        crate::permissions::guided_setup();
-
-        return result.model;
+        WizardOutcome::NotInstalled => {}
     }
 
-    // Fallback: notification-based onboarding (no wizard binary, Linux, Windows)
-    run_fallback(recommended_backend, recommended_model)
+    Some(run_fallback(recommended_backend, recommended_model))
 }
 
-/// Launch the SwiftUI onboarding wizard and parse its JSON output.
+/// Locate the wizard binary in its sub-bundle:
+///   <.app>/Contents/Library/Helpers/Onboarding.app/Contents/MacOS/Onboarding
 #[cfg(target_os = "macos")]
-fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> Option<WizardResult> {
-    // Find the wizard binary next to our executable
-    let wizard_path = std::env::current_exe().ok()?.parent()?.join("onboarding");
+fn wizard_binary_path() -> Option<std::path::PathBuf> {
+    let daemon_path = std::env::current_exe().ok()?;
+    let contents = daemon_path.parent()?.parent()?;
+    Some(contents.join("Library/Helpers/Onboarding.app/Contents/MacOS/Onboarding"))
+}
+
+#[cfg(target_os = "macos")]
+fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> WizardOutcome {
+    let Some(daemon_path) = std::env::current_exe().ok() else {
+        return WizardOutcome::NotInstalled;
+    };
+    let Some(wizard_path) = wizard_binary_path() else {
+        return WizardOutcome::NotInstalled;
+    };
 
     if !wizard_path.exists() {
-        info!(
-            "Onboarding wizard not found at {}, using fallback",
-            wizard_path.display()
-        );
-        return None;
+        info!("Onboarding wizard not found at {}", wizard_path.display());
+        return WizardOutcome::NotInstalled;
     }
 
     info!("Launching onboarding wizard: {}", wizard_path.display());
 
-    let output = std::process::Command::new(&wizard_path)
+    let output = match std::process::Command::new(&wizard_path)
         .args([
             "--hardware",
             hardware_name,
             "--recommended",
             recommended_backend,
+            "--daemon-path",
+            &daemon_path.to_string_lossy(),
         ])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
-
-    if !output.status.success() {
-        info!("Wizard exited with status {}", output.status);
-        return None;
-    }
+    {
+        Ok(o) => o,
+        Err(e) => {
+            info!("Failed to spawn wizard: {e}");
+            return WizardOutcome::Killed;
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let json_line = stdout.lines().last()?;
-    info!("Wizard output: {json_line}");
+    let json_line = stdout.lines().last().unwrap_or("");
+    info!(
+        "Wizard exit: {} | last line: {}",
+        output.status,
+        if json_line.is_empty() {
+            "<empty>"
+        } else {
+            json_line
+        }
+    );
 
-    parse_wizard_result(json_line).ok()
+    match parse_wizard_result(json_line) {
+        Ok(r) => WizardOutcome::Completed(r),
+        Err(_) => WizardOutcome::Killed,
+    }
 }
 
 /// Fallback onboarding using notifications (no GUI wizard).

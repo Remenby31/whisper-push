@@ -1,11 +1,17 @@
 # Whisper Push — Rust build helpers
-.PHONY: build release onboarding bundle sign dmg clean check deploy install uninstall
+.PHONY: build release onboarding onboarding-preview bundle sign dmg clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
 BINARY = target/release/whisper-push
 SIGN_ID = Developer ID Application: Baptiste Cruvellier (3SNT64YKAS)
 BUNDLE_ID = com.whisper-push.app
+
+# Onboarding wizard sub-bundle — own Info.plist + own bundle ID so the
+# wizard isn't targeted by "Quit and reopen" popups when the user grants
+# a TCC permission for the daemon.
+WIZARD_BUNDLE = $(APP_DIR)/Contents/Library/Helpers/Onboarding.app
+WIZARD_BUNDLE_ID = com.whisper-push.onboarding
 
 # Install target: a stable /Applications location + login autostart agent
 INSTALL_DIR = /Applications
@@ -28,10 +34,28 @@ check:
 	cargo check
 	@echo "✓ Check passed"
 
-# Build the SwiftUI onboarding wizard
+# Build the SwiftUI onboarding wizard.
+# No `| tail -1`: piping into tail swallowed swift build's exit code (the
+# pipeline's status is tail's, always 0), so a failed build still printed
+# "✓ built" and then died on the cp in `bundle` with a useless one-line
+# "error: fatalError". Let swift build fail loudly and stop make.
 onboarding:
-	@cd macos/Onboarding && swift build -c release 2>&1 | tail -1
+	@cd macos/Onboarding && swift build -c release
 	@echo "✓ Onboarding wizard built"
+
+# Launch the wizard in DESIGN PREVIEW mode — no real downloader, no daemon
+# probe, no JSON-to-stdout exit. Use STEP=... to jump to a screen:
+#   make onboarding-preview                → starts at welcome
+#   make onboarding-preview STEP=download  → starts at download
+# Inside the window, Cmd+→ / Cmd+← sweep through the screens. The
+# `onboarding-design` Claude skill drives this target for fast iteration.
+STEP ?= welcome
+onboarding-preview: onboarding
+	@./macos/Onboarding/.build/release/Onboarding \
+		--design-preview \
+		--start-at $(STEP) \
+		--hardware "Apple M4 Max" \
+		--recommended "parakeet"
 
 # Create macOS .app bundle
 bundle: release onboarding
@@ -42,10 +66,23 @@ bundle: release onboarding
 	@cp resources/Info.plist "$(APP_DIR)/Contents/"
 	@echo "APPL????" > "$(APP_DIR)/Contents/PkgInfo"
 	@# Brand app icon
-	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns" || echo "  (warning: resources/AppIcon.icns missing — bundle will have no icon)"
-	@# Onboarding wizard (SwiftUI)
-	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(APP_DIR)/Contents/MacOS/onboarding"
+	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(APP_DIR)/Contents/Resources/AppIcon.icns" || echo "  (warning: resources/AppIcon.icns missing - bundle will have no icon)"
+	@# Onboarding wizard as a separate sub-bundle (own Info.plist + bundle ID).
+	@mkdir -p "$(WIZARD_BUNDLE)/Contents/MacOS"
+	@mkdir -p "$(WIZARD_BUNDLE)/Contents/Resources"
+	@cp macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding "$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
+	@# Swift Package Manager emits resources (logo PNG) into a sibling
+	@# .bundle. Inside an .app, it must live in Contents/Resources/ so
+	@# Bundle.module finds it via Bundle.main.resourceURL, and so codesign
+	@# doesn't choke on a directory inside Contents/MacOS/.
+	@if [ -d macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding_Onboarding.bundle ]; then \
+		cp -R macos/Onboarding/.build/arm64-apple-macosx/release/Onboarding_Onboarding.bundle "$(WIZARD_BUNDLE)/Contents/Resources/"; \
+	fi
+	@cp resources/Onboarding-Info.plist "$(WIZARD_BUNDLE)/Contents/Info.plist"
+	@echo "APPL????" > "$(WIZARD_BUNDLE)/Contents/PkgInfo"
+	@test -f resources/AppIcon.icns && cp resources/AppIcon.icns "$(WIZARD_BUNDLE)/Contents/Resources/AppIcon.icns" || true
 	@echo "✓ App bundle created at $(APP_DIR)"
+	@echo "  L wizard sub-bundle at Contents/Library/Helpers/Onboarding.app"
 
 # Sign the app with Developer ID
 sign: bundle
@@ -62,21 +99,23 @@ sign: bundle
 		"$(APP_DIR)"
 	@echo "✓ App signed with Developer ID"
 
-# Create a distributable DMG (model downloads on first launch).
+# Create a distributable DMG (model downloads on first launch). Ad-hoc
+# signed (no Developer ID in keychain). Bottom-up: wizard sub-bundle first
+# (own Info.plist with com.whisper-push.onboarding kept as its identity),
+# then the daemon, then the outer .app wrap.
 dmg: bundle
-	@# Sign the bundle.
-	@codesign --force --options runtime \
-		-s "$(SIGN_ID)" \
+	@codesign --force --options runtime -s - \
+		"$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
+	@codesign --force --options runtime -s - \
+		"$(WIZARD_BUNDLE)"
+	@codesign --force --options runtime -s - \
 		-i "$(BUNDLE_ID)" \
 		--entitlements resources/entitlements.plist \
-		--timestamp \
 		"$(APP_DIR)/Contents/MacOS/whisper-push"
-	@codesign --force --options runtime --deep \
-		-s "$(SIGN_ID)" \
+	@codesign --force --options runtime -s - \
 		--entitlements resources/entitlements.plist \
-		--timestamp \
 		"$(APP_DIR)"
-	@echo "✓ App signed (DMG path)"
+	@echo "✓ App ad-hoc signed (DMG path) - right-click then Open to bypass Gatekeeper"
 	@# Package the DMG (drag-to-Applications layout via create-dmg).
 	@mkdir -p build/dist
 	@rm -f "build/dist/Whisper-Push-macOS-arm64.dmg"

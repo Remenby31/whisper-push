@@ -184,6 +184,21 @@ pub fn check_all() -> PermissionStatus {
 }
 
 /// Prompt for missing permissions (shows native system dialogs).
+/// Fire the OS prompt for a single permission. Used by the onboarding
+/// wizard's per-row Grant buttons so prompts fire on user intent.
+#[cfg(target_os = "macos")]
+pub fn request_one(kind: &str) {
+    match kind {
+        "mic" | "microphone" => request_microphone(),
+        "accessibility" => request_accessibility(),
+        "input_monitoring" | "input-monitoring" => request_input_monitoring(),
+        _ => tracing::warn!("Unknown permission kind: {kind}"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_one(_kind: &str) {}
+
 pub fn prompt_missing(status: &PermissionStatus) {
     #[cfg(target_os = "macos")]
     {
