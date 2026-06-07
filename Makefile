@@ -1,5 +1,5 @@
 # Whisper Push — Rust build helpers
-.PHONY: build release onboarding onboarding-preview bundle sign dmg clean check deploy install uninstall
+.PHONY: build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
@@ -99,23 +99,28 @@ sign: bundle
 		"$(APP_DIR)"
 	@echo "✓ App signed with Developer ID"
 
-# Create a distributable DMG (model downloads on first launch). Ad-hoc
-# signed (no Developer ID in keychain). Bottom-up: wizard sub-bundle first
-# (own Info.plist with com.whisper-push.onboarding kept as its identity),
-# then the daemon, then the outer .app wrap.
+# Create a distributable DMG. Uses SIGN_ID for signing — set to "-" for
+# ad-hoc (local dev) or "Developer ID Application: ..." for production.
+# Bottom-up: wizard sub-bundle first, then daemon, then outer .app wrap.
 dmg: bundle
-	@codesign --force --options runtime -s - \
+	@codesign --force --options runtime -s "$(SIGN_ID)" \
 		"$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
-	@codesign --force --options runtime -s - \
+	@codesign --force --options runtime -s "$(SIGN_ID)" \
 		"$(WIZARD_BUNDLE)"
-	@codesign --force --options runtime -s - \
+	@codesign --force --options runtime -s "$(SIGN_ID)" \
 		-i "$(BUNDLE_ID)" \
 		--entitlements resources/entitlements.plist \
+		--timestamp \
 		"$(APP_DIR)/Contents/MacOS/whisper-push"
-	@codesign --force --options runtime -s - \
+	@codesign --force --options runtime -s "$(SIGN_ID)" \
 		--entitlements resources/entitlements.plist \
+		--timestamp \
 		"$(APP_DIR)"
-	@echo "✓ App ad-hoc signed (DMG path) - right-click then Open to bypass Gatekeeper"
+	@if [ "$(SIGN_ID)" = "-" ]; then \
+		echo "✓ App ad-hoc signed (DMG path) - right-click then Open to bypass Gatekeeper"; \
+	else \
+		echo "✓ App signed with Developer ID (DMG path)"; \
+	fi
 	@# Package the DMG (drag-to-Applications layout via create-dmg).
 	@mkdir -p build/dist
 	@rm -f "build/dist/Whisper-Push-macOS-arm64.dmg"
@@ -138,7 +143,14 @@ dmg: bundle
 	@du -h "build/dist/Whisper-Push-macOS-arm64.dmg" | sed 's|^|  |'
 	@echo "✓ DMG created at build/dist/Whisper-Push-macOS-arm64.dmg"
 
-# Notarize the DMG (requires Apple Developer account + App Store Connect API key)
+# Create a ZIP of the signed .app bundle (for auto-updater downloads).
+# Uses ditto to preserve code signatures and extended attributes.
+zip: sign
+	@mkdir -p build/dist
+	@cd build && ditto -c -k --sequesterRsrc --keepParent "$(APP_NAME).app" "dist/Whisper-Push-macOS-arm64.zip"
+	@echo "✓ ZIP created at build/dist/Whisper-Push-macOS-arm64.zip"
+
+# Notarize the DMG (local: uses keychain-profile)
 notarize: dmg
 	@echo "Notarizing..."
 	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
@@ -146,6 +158,17 @@ notarize: dmg
 		--wait
 	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
 	@echo "✓ DMG notarized and stapled"
+
+# Notarize the DMG (CI: uses API key file)
+notarize-ci: dmg
+	@echo "Notarizing (CI)..."
+	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
+		--key "$(APPLE_API_KEY_PATH)" \
+		--key-id "$(APPLE_API_KEY_ID)" \
+		--issuer "$(APPLE_API_ISSUER_ID)" \
+		--wait
+	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
+	@echo "✓ DMG notarized and stapled (CI)"
 
 # Full release: build + sign + DMG + notarize
 release-macos: notarize

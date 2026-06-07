@@ -12,9 +12,11 @@ mod notify;
 mod onboarding;
 mod paste;
 mod permissions;
+mod report;
 mod state;
 mod transcribe;
 mod tray;
+mod updater;
 
 use anyhow::Result;
 use clap::Parser;
@@ -61,9 +63,16 @@ struct Cli {
     /// the popup is resolved so macOS doesn't dismiss it.
     #[arg(long, hide = true, value_name = "KIND")]
     permissions_request: Option<String>,
+
+    /// Post-update cleanup (remove old version backup, show notification).
+    #[arg(long, hide = true)]
+    post_update: bool,
 }
 
 fn main() -> Result<()> {
+    // Install panic hook early — catches panics and logs them + shows notification
+    report::install_panic_hook();
+
     let cli = Cli::parse();
 
     // Permission CLI hooks handled BEFORE init_logging so stdout stays
@@ -140,6 +149,20 @@ fn main() -> Result<()> {
     cleanup_old_logs();
 
     info!("whisper-push v{}", env!("CARGO_PKG_VERSION"));
+
+    // Post-update cleanup: remove old app backup + show notification
+    if cli.post_update {
+        info!("Post-update cleanup");
+        let backup = std::path::PathBuf::from("/Applications/Whisper Push.app.old");
+        if backup.exists() {
+            let _ = std::fs::remove_dir_all(&backup);
+            info!("Removed old version backup");
+        }
+        notify::send(
+            "Whisper Push",
+            &format!("Updated to v{}!", env!("CARGO_PKG_VERSION")),
+        );
+    }
 
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
     app::run(cfg)

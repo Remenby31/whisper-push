@@ -65,6 +65,8 @@ struct App {
     pipeline_tx: Option<crossbeam_channel::Sender<Event>>,
     // Menu items (created in init, kept alive)
     menu_items: Option<MenuItems>,
+    // Pending update info (version, download_url)
+    pending_update: Option<(String, String)>,
 }
 
 struct MenuItems {
@@ -83,6 +85,11 @@ struct MenuItems {
     debug_id: String,
     test_id: String,
     uninstall_id: String,
+    update_item: MenuItem,
+    update_id: String,
+    #[allow(dead_code)]
+    report_item: MenuItem,
+    report_id: String,
     hotkey_ids: Vec<(String, String, String)>,
     hotkey_items: Vec<(CheckMenuItem, String, String)>,
     hotkey_submenu: Submenu,
@@ -116,6 +123,7 @@ impl App {
             capture: Arc::new(Mutex::new(None)),
             pipeline_tx: None,
             menu_items: None,
+            pending_update: None,
         }
     }
 
@@ -281,6 +289,8 @@ impl App {
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
         let debug_item = CheckMenuItem::new("Debug Logging", true, cfg.debug, None);
         let test_item = MenuItem::new("Test (record 3s + transcribe)", true, None);
+        let update_item = MenuItem::new("Check for Updates\u{2026}", true, None);
+        let report_item = MenuItem::new("Report a Problem\u{2026}", true, None);
         let uninstall_item = MenuItem::new("Uninstall...", true, None);
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
@@ -355,6 +365,9 @@ impl App {
 
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&test_item);
+        let _ = menu.append(&update_item);
+        let _ = menu.append(&report_item);
+        let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&uninstall_item);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
@@ -376,6 +389,8 @@ impl App {
         self.menu_items = Some(MenuItems {
             toggle_id: toggle_item.id().0.clone(),
             test_id: test_item.id().0.clone(),
+            update_id: update_item.id().0.clone(),
+            report_id: report_item.id().0.clone(),
             uninstall_id: uninstall_item.id().0.clone(),
             quit_id: quit_item.id().0.clone(),
             notif_id: notifications_item.id().0.clone(),
@@ -395,6 +410,8 @@ impl App {
                 (backend_voxtral_local, "voxtral-local".into()),
                 (backend_whisper, "whisper".into()),
             ],
+            update_item,
+            report_item,
             status_item,
             toggle_item,
             notifications_item,
@@ -589,6 +606,60 @@ impl App {
                 }
                 if id == &mi.setup_id {
                     crate::permissions::guided_setup();
+                    return;
+                }
+                if id == &mi.update_id {
+                    if let Some((version, url)) = self.pending_update.clone() {
+                        mi.update_item.set_text(&format!("Downloading v{version}\u{2026}"));
+                        mi.update_item.set_enabled(false);
+                        std::thread::Builder::new()
+                            .name("update-install".into())
+                            .spawn(move || {
+                                if let Err(e) = crate::updater::install::download_and_install(&url) {
+                                    tracing::error!("Update failed: {e}");
+                                    // Can't send event here because process may exit on success
+                                    crate::notify::send(
+                                        "Whisper Push",
+                                        &format!("Update failed: {e}"),
+                                    );
+                                }
+                            })
+                            .ok();
+                    } else {
+                        // Manual check
+                        mi.update_item.set_text("Checking\u{2026}");
+                        mi.update_item.set_enabled(false);
+                        let tx = self.state.tx.clone();
+                        std::thread::Builder::new()
+                            .name("update-manual-check".into())
+                            .spawn(move || {
+                                match crate::updater::check_for_update() {
+                                    Ok(Some((version, url))) => {
+                                        let _ = tx.send(Event::UpdateAvailable(version, url));
+                                    }
+                                    Ok(None) => {
+                                        crate::notify::send(
+                                            "Whisper Push",
+                                            "You\u{2019}re on the latest version.",
+                                        );
+                                        let _ = tx.send(Event::UpdateFailed(String::new()));
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Update check failed: {e}");
+                                        crate::notify::send(
+                                            "Whisper Push",
+                                            &format!("Update check failed: {e}"),
+                                        );
+                                        let _ = tx.send(Event::UpdateFailed(e.to_string()));
+                                    }
+                                }
+                            })
+                            .ok();
+                    }
+                    return;
+                }
+                if id == &mi.report_id {
+                    crate::report::open_report();
                     return;
                 }
                 if id == &mi.notif_id {
@@ -837,6 +908,28 @@ impl App {
                 }
             }
 
+            Event::UpdateAvailable(ref version, ref url) => {
+                mi.update_item
+                    .set_text(&format!("\u{2b06} Update to v{version}"));
+                mi.update_item.set_enabled(true);
+                self.pending_update = Some((version.clone(), url.clone()));
+                if self.config.lock().unwrap().notifications {
+                    crate::notify::send(
+                        "Whisper Push",
+                        &format!("Version {version} available! Click the menu to update."),
+                    );
+                }
+                info!("Update available: v{version}");
+            }
+
+            Event::UpdateFailed(ref msg) => {
+                mi.update_item.set_text("Check for Updates\u{2026}");
+                mi.update_item.set_enabled(true);
+                if !msg.is_empty() {
+                    warn!("Update failed: {msg}");
+                }
+            }
+
             Event::StateChanged(s) => {
                 self.state.set(s);
                 set_tray_icon(&self.tray, s);
@@ -966,6 +1059,11 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(ref tx) = self.pipeline_tx {
                 let _ = tx.send(Event::LoadModel(startup_model));
             }
+
+            // Background update check (waits 10s before hitting GitHub API)
+            let update_tx = self.state.tx.clone();
+            let check_updates = self.state.config.check_updates;
+            crate::updater::spawn_check(update_tx, check_updates);
 
             info!("Ready! Hold Control to dictate.");
         }

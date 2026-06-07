@@ -133,3 +133,81 @@ fn test_notify_no_crash() {
     // Just ensure calling send doesn't panic
     whisper_push::notify::send("Test", "This is a test notification");
 }
+
+// ── Config: check_updates ──────────────────────────────────────
+
+#[test]
+fn test_config_check_updates_default_true() {
+    let cfg = whisper_push::config::Config::default();
+    assert!(cfg.check_updates);
+}
+
+#[test]
+fn test_config_missing_check_updates_defaults_true() {
+    let partial = r#"hotkey = "ctrl""#;
+    let cfg: whisper_push::config::Config = toml::from_str(partial).unwrap();
+    assert!(cfg.check_updates);
+}
+
+// ── Updater: version comparison ────────────────────────────────
+
+#[test]
+fn test_version_comparison() {
+    assert!(whisper_push::updater::is_newer("1.1.3", "1.2.0"));
+    assert!(whisper_push::updater::is_newer("1.1.3", "2.0.0"));
+    assert!(!whisper_push::updater::is_newer("1.2.0", "1.1.3"));
+    assert!(!whisper_push::updater::is_newer("1.1.3", "1.1.3"));
+}
+
+#[test]
+fn test_version_comparison_v_prefix() {
+    assert!(whisper_push::updater::is_newer("1.1.3", "v1.2.0"));
+    assert!(whisper_push::updater::is_newer("v1.1.3", "v1.2.0"));
+}
+
+// ── Updater: parse release JSON ────────────────────────────────
+
+#[test]
+fn test_parse_release_update_available() {
+    let json = r#"{
+        "tag_name": "v99.0.0",
+        "assets": [{
+            "name": "Whisper-Push-macOS-arm64.zip",
+            "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/Whisper-Push-macOS-arm64.zip"
+        }]
+    }"#;
+    let result = whisper_push::updater::parse_release_json(json).unwrap().unwrap();
+    assert_eq!(result.0, "99.0.0");
+    assert!(result.1.contains("macOS-arm64.zip"));
+}
+
+#[test]
+fn test_parse_release_no_update() {
+    let json = format!(
+        r#"{{ "tag_name": "v{}", "assets": [] }}"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    assert!(whisper_push::updater::parse_release_json(&json).unwrap().is_none());
+}
+
+// ── Report: URL encoding ───────────────────────────────────────
+
+#[test]
+fn test_report_url_encode() {
+    assert_eq!(whisper_push::report::url_encode("hello world"), "hello%20world");
+    assert_eq!(whisper_push::report::url_encode("a&b=c"), "a%26b%3Dc");
+}
+
+#[test]
+fn test_report_build_issue_url() {
+    let url = whisper_push::report::build_issue_url("some logs", "macOS info");
+    assert!(url.starts_with("https://github.com/Remenby31/whisper-push/issues/new"));
+    assert!(url.contains("labels=bug"));
+}
+
+#[test]
+fn test_report_system_info() {
+    let info = whisper_push::report::system_info();
+    assert!(info.contains(env!("CARGO_PKG_VERSION")));
+    assert!(info.contains("macos") || info.contains("linux") || info.contains("windows"));
+}

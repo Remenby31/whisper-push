@@ -51,6 +51,10 @@ pub enum Event {
     RefreshPermissions,
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
+    /// A new version is available (version, download_url)
+    UpdateAvailable(String, String),
+    /// Update download/install failed (error message)
+    UpdateFailed(String),
     /// Request quit
     Quit,
 }

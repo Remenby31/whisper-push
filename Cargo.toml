@@ -73,6 +73,9 @@ crossbeam-channel = "0.5"
 # Single instance
 fs4 = "0.12"
 
+# HTTP client (sync, lightweight — for update checker)
+ureq = "3"
+
 # Error handling
 anyhow = "1"
 

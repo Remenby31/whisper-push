@@ -27,6 +27,8 @@ pub struct Config {
     pub debug: bool,
     /// Auto-start on login
     pub auto_start: bool,
+    /// Check for updates on startup
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             output_device: "auto".into(),
             debug: false,
             auto_start: false,
+            check_updates: true,
         }
     }
 }

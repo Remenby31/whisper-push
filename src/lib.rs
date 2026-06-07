@@ -10,6 +10,8 @@ pub mod notify;
 pub mod onboarding;
 pub mod paste;
 pub mod permissions;
+pub mod report;
 pub mod state;
 pub mod transcribe;
 pub mod tray;
+pub mod updater;

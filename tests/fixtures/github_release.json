@@ -1,0 +1,50 @@
+{
+  "url": "https://api.github.com/repos/Remenby31/whisper-push/releases/123456",
+  "html_url": "https://github.com/Remenby31/whisper-push/releases/tag/v99.0.0",
+  "id": 123456,
+  "tag_name": "v99.0.0",
+  "name": "v99.0.0",
+  "draft": false,
+  "prerelease": false,
+  "created_at": "2026-06-01T10:00:00Z",
+  "published_at": "2026-06-01T10:30:00Z",
+  "assets": [
+    {
+      "name": "Whisper-Push-macOS-arm64.dmg",
+      "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/Whisper-Push-macOS-arm64.dmg",
+      "content_type": "application/x-apple-diskimage",
+      "size": 18000000
+    },
+    {
+      "name": "Whisper-Push-macOS-arm64.zip",
+      "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/Whisper-Push-macOS-arm64.zip",
+      "content_type": "application/zip",
+      "size": 15000000
+    },
+    {
+      "name": "whisper-push_amd64.deb",
+      "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/whisper-push_amd64.deb",
+      "content_type": "application/vnd.debian.binary-package",
+      "size": 12000000
+    },
+    {
+      "name": "whisper-push-linux-x86_64.tar.gz",
+      "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/whisper-push-linux-x86_64.tar.gz",
+      "content_type": "application/gzip",
+      "size": 11000000
+    },
+    {
+      "name": "whisper-push-x64.msi",
+      "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/whisper-push-x64.msi",
+      "content_type": "application/x-msi",
+      "size": 14000000
+    },
+    {
+      "name": "whisper-push-windows-x64.zip",
+      "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/whisper-push-windows-x64.zip",
+      "content_type": "application/zip",
+      "size": 13000000
+    }
+  ],
+  "body": "## What's Changed\n- Auto-updater\n- Notarization\n- Crash reporting"
+}
