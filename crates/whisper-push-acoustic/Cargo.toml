@@ -1,0 +1,14 @@
+[package]
+name = "whisper-push-acoustic"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Acoustic dictionary: speaker-specific MFCC fingerprints + DTW matching, so a spoken word is corrected by its SOUND, not the ASR's (varying) spelling. 100% local, no neural model."
+
+[dependencies]
+rustfft = "6"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+[dev-dependencies]
+hound = "3"

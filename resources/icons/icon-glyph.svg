@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36">
+  <!-- Canonical Whisper Push menu-bar glyph: three sound waves, centered in a
+       square box. The SINGLE source of truth for every tray state — the Rust
+       side recolours this monochrome glyph per state (citron = recording,
+       racing green = loading/processing) and renders idle as a macOS template.
+       Keeping one geometry guarantees identical proportions across states. -->
+  <g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M5 12 Q11 7 17 12 T29 12"/>
+    <path d="M5 18 Q11 13 17 18 T29 18"/>
+    <path d="M5 24 Q11 19 17 24 T29 24"/>
+  </g>
+</svg>

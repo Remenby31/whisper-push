@@ -85,6 +85,29 @@ pub fn run() -> Option<String> {
     Some(run_fallback(recommended_backend, recommended_model))
 }
 
+/// Open the license/payment modal (the onboarding wizard in `--license-only`
+/// mode) and block until it closes. Returns false if the wizard isn't installed
+/// (e.g. a `cargo run` dev build) so the caller can fall back to a CLI dialog.
+#[cfg(target_os = "macos")]
+pub fn run_license_window() -> bool {
+    let Some(wizard) = wizard_binary_path() else {
+        return false;
+    };
+    if !wizard.exists() {
+        return false;
+    }
+    let daemon = std::env::current_exe().unwrap_or_default();
+    std::process::Command::new(&wizard)
+        .args(["--license-only", "--daemon-path", &daemon.to_string_lossy()])
+        .status()
+        .is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run_license_window() -> bool {
+    false
+}
+
 /// Locate the wizard binary in its sub-bundle:
 ///   <.app>/Contents/Library/Helpers/Onboarding.app/Contents/MacOS/Onboarding
 #[cfg(target_os = "macos")]

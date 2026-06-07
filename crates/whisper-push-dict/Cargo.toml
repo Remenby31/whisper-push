@@ -1,0 +1,15 @@
+[package]
+name = "whisper-push-dict"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Adaptive dictation brain: deterministic + conservative-fuzzy output-side correction, plus a learning classifier. Pure, lightweight, model-agnostic — zero ASR deps."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+# Golden-corpus fixtures are JSONL; only the tests need a JSON parser.
+serde_json = "1"

@@ -8,6 +8,10 @@ pub fn paste_text(text: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Auto-capture (Wispr-style): before pasting the new dictation, learn from
+    // any edit the user made to the previously-pasted field.
+    crate::dictionary::capture_pending_correction();
+
     let mut clipboard = arboard::Clipboard::new()?;
 
     // Save current clipboard content
@@ -35,6 +39,9 @@ pub fn paste_text(text: &str) -> Result<()> {
     }
 
     info!("Pasted {} chars", text.len());
+
+    // Snapshot this field so a later edit can be auto-learned.
+    crate::dictionary::arm_correction_capture();
     Ok(())
 }
 

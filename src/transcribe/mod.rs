@@ -55,6 +55,21 @@ pub fn unload_model() {
     info!("Model unloaded");
 }
 
+/// Load the engine for `backend`, backend-aware. Parakeet and Voxtral have
+/// their own loaders; only Whisper uses the generic ggml download path. This is
+/// the single entry point CLI commands (`--transcribe`, `self-test`) should use
+/// so a non-Whisper model is never accidentally routed through the whisper
+/// downloader (which 404s on a Parakeet model name). Voxtral is intentionally
+/// lazy — it must load on the same thread that transcribes, which
+/// `transcribe_with_backend` handles.
+pub fn ensure_loaded(backend: &Backend, model_name: &str) -> Result<()> {
+    match backend {
+        Backend::Parakeet => parakeet::load_model(),
+        Backend::WhisperLocal(_) => load_model(model_name),
+        Backend::VoxtralLocal => Ok(()),
+    }
+}
+
 /// Check if the model is loaded.
 #[allow(dead_code)] // Used by integration tests
 pub fn is_loaded() -> bool {
@@ -62,21 +77,36 @@ pub fn is_loaded() -> bool {
 }
 
 /// Transcribe audio using the active backend.
+///
+/// Every backend funnels through this one choke point, so the adaptive
+/// dictionary is applied uniformly and model-agnostically: the raw model output
+/// is post-corrected by `finalize_and_record` (deterministic learned fixes +
+/// guarded fuzzy) and the trace is stashed so a later correction can learn from
+/// it. When the dictionary is empty/disabled this is a ~0-cost pass-through.
 pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend) -> Result<String> {
-    match backend {
+    // Licensing gate — the single choke point all dictation passes through, so
+    // it can't be bypassed (hold, toggle, tray "Test", CLI --transcribe). Empty
+    // output is already handled gracefully by every caller (= "no speech").
+    if !crate::license::is_entitled() {
+        crate::license::on_blocked();
+        return Ok(String::new());
+    }
+    // Raw text + per-word timings (empty when the backend gives none → the
+    // acoustic layer segments by energy, keeping it model-agnostic).
+    let (raw, words): (String, Vec<crate::acoustic::WordTiming>) = match backend {
         Backend::Parakeet => {
             // Parakeet may have failed to download/load at startup (in which
             // case Whisper was loaded as the fallback). Don't hard-fail the
             // transcription — fall back to Whisper transparently.
-            match parakeet::transcribe(audio) {
-                Ok(text) => Ok(text),
+            match parakeet::transcribe_timed(audio) {
+                Ok(tw) => tw,
                 Err(e) => {
                     tracing::warn!("Parakeet unavailable ({e}); using Whisper instead");
-                    transcribe_whisper(audio, language)
+                    (transcribe_whisper(audio, language)?, Vec::new())
                 }
             }
         }
-        Backend::WhisperLocal(_) => transcribe_whisper(audio, language),
+        Backend::WhisperLocal(_) => (transcribe_whisper(audio, language)?, Vec::new()),
         Backend::VoxtralLocal => {
             // Voxtral must be loaded on the SAME thread that transcribes
             // (WGPU/Metal doesn't support cross-thread model usage)
@@ -88,9 +118,15 @@ pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend)
                     voxtral_local::load_model(dir.to_str().unwrap_or(""))?;
                 }
             }
-            voxtral_local::transcribe(audio)
+            (voxtral_local::transcribe(audio)?, Vec::new())
         }
-    }
+    };
+
+    // 1. Acoustic layer (model-agnostic): correct words by their SOUND, and
+    //    retain audio+timings so a later correction can learn a fingerprint.
+    let acoustic = crate::acoustic::process(audio, &raw, words, language);
+    // 2. Text layer: learned-dictionary post-correction + record for learning.
+    Ok(whisper_push_dict::finalize_and_record(&acoustic, language))
 }
 
 fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {

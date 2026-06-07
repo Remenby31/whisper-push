@@ -29,6 +29,13 @@ pub struct Config {
     pub auto_start: bool,
     /// Check for updates on startup
     pub check_updates: bool,
+    /// Adaptive dictation: post-correct transcriptions from the learned
+    /// dictionary and learn from user corrections. Persistent + cross-model.
+    pub dictionary_enabled: bool,
+    /// Opt-in: when learning a proper noun, check its canonical spelling online
+    /// (Wikipedia). Cold-path only, never per-dictation. Default off (the app is
+    /// otherwise 100% local).
+    pub online_enrichment: bool,
 }
 
 impl Default for Config {
@@ -46,6 +53,8 @@ impl Default for Config {
             debug: false,
             auto_start: false,
             check_updates: true,
+            dictionary_enabled: true,
+            online_enrichment: false,
         }
     }
 }

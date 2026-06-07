@@ -1,10 +1,14 @@
 #![recursion_limit = "1024"]
 
+pub mod acoustic;
 pub mod audio;
 pub mod autostart;
 pub mod config;
+pub mod dictionary;
+pub mod enrich;
 pub mod hardware;
 pub mod hotkey;
+pub mod license;
 pub mod model_manager;
 pub mod notify;
 pub mod onboarding;

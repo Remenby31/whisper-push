@@ -1,7 +1,11 @@
 use tracing::warn;
 
-/// Send an OS notification.
+/// Send an OS notification. No-op when `WHISPER_PUSH_SUPPRESS_NOTIFY` is set
+/// (the autonomous tests drive the learning path and shouldn't spam the user).
 pub fn send(title: &str, body: &str) {
+    if std::env::var_os("WHISPER_PUSH_SUPPRESS_NOTIFY").is_some() {
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         if !macos_notify(title, body) {
