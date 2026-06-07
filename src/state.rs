@@ -49,6 +49,10 @@ pub enum Event {
     PromptPermissions,
     /// Refresh permission status in the menu
     RefreshPermissions,
+    /// The dictionary changed (add/remove/correct/reload) — refresh its submenu
+    DictChanged,
+    /// The license state changed (activate/deactivate) — refresh its submenu
+    LicenseChanged,
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
     /// A new version is available (version, download_url)

@@ -43,7 +43,9 @@ mod inner {
         PARAKEET.lock().unwrap().is_some()
     }
 
-    /// Transcribe 16kHz mono f32 audio to text.
+    /// Transcribe 16kHz mono f32 audio to text. (Kept for tests; the daemon
+    /// uses `transcribe_timed`.)
+    #[allow(dead_code)]
     pub fn transcribe(audio: &[f32]) -> Result<String> {
         let mut guard = PARAKEET.lock().unwrap();
         let parakeet = guard
@@ -59,6 +61,58 @@ mod inner {
         let elapsed = start.elapsed();
         info!("Parakeet: '{}' ({:.2}s)", text, elapsed.as_secs_f64());
         Ok(text)
+    }
+
+    /// Transcribe and also return per-word timings (for the acoustic dictionary).
+    pub fn transcribe_timed(audio: &[f32]) -> Result<(String, Vec<crate::acoustic::WordTiming>)> {
+        let mut guard = PARAKEET.lock().unwrap();
+        let parakeet = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Parakeet model not loaded"))?;
+
+        let start = std::time::Instant::now();
+        let result = parakeet
+            .transcribe_samples(audio.to_vec(), 16000, 1, None)
+            .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {e}"))?;
+        let text = result.text.trim().to_string();
+
+        // Merge SentencePiece tokens (▁ = word start) into words with spans.
+        let mut words: Vec<crate::acoustic::WordTiming> = Vec::new();
+        let mut cur: Option<crate::acoustic::WordTiming> = None;
+        for t in &result.tokens {
+            let starts = t.text.starts_with(' ') || t.text.starts_with('\u{2581}');
+            let clean = t.text.trim_start_matches('\u{2581}').trim_start();
+            if clean.is_empty() {
+                if let Some(c) = cur.as_mut() {
+                    c.end = t.end;
+                }
+                continue;
+            }
+            if starts || cur.is_none() {
+                if let Some(c) = cur.take() {
+                    words.push(c);
+                }
+                cur = Some(crate::acoustic::WordTiming {
+                    text: clean.to_string(),
+                    start: t.start,
+                    end: t.end,
+                });
+            } else if let Some(c) = cur.as_mut() {
+                c.text.push_str(clean);
+                c.end = t.end;
+            }
+        }
+        if let Some(c) = cur {
+            words.push(c);
+        }
+
+        info!(
+            "Parakeet: '{}' ({:.2}s, {} words timed)",
+            text,
+            start.elapsed().as_secs_f64(),
+            words.len()
+        );
+        Ok((text, words))
     }
 
     /// Download Parakeet TDT v3 ONNX model from HuggingFace.
@@ -91,7 +145,14 @@ mod inner {
 
 #[cfg(feature = "parakeet")]
 #[allow(unused_imports)] // Used by integration tests
-pub use inner::{is_loaded, load_model, model_dir, transcribe, unload_model};
+pub use inner::{is_loaded, load_model, model_dir, transcribe, transcribe_timed, unload_model};
+
+#[cfg(not(feature = "parakeet"))]
+pub fn transcribe_timed(
+    _audio: &[f32],
+) -> anyhow::Result<(String, Vec<crate::acoustic::WordTiming>)> {
+    anyhow::bail!("Parakeet not compiled. Build with --features parakeet")
+}
 
 #[cfg(not(feature = "parakeet"))]
 pub fn load_model() -> anyhow::Result<()> {

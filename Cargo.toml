@@ -10,6 +10,14 @@ homepage = "https://whisperpush.com"
 categories = ["multimedia::audio", "accessibility"]
 keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
 
+# The adaptive-dictation "brain" lives in a pure, lightweight workspace member
+# (no whisper.cpp / wgpu / onnx) so `cargo test -p whisper-push-dict` runs in
+# ~1-2s instead of paying the heavy-dep compile tax. The root crate depends on
+# it by path and only calls finalize_and_record / correct_last.
+[workspace]
+members = ["crates/whisper-push-dict", "crates/whisper-push-acoustic"]
+resolver = "3"
+
 [features]
 default = ["voxtral", "parakeet", "metal"]
 metal = ["whisper-rs/metal"]
@@ -73,11 +81,16 @@ crossbeam-channel = "0.5"
 # Single instance
 fs4 = "0.12"
 
-# HTTP client (sync, lightweight — for update checker)
+# HTTP client (sync, lightweight) — update checker, license API, enrichment
 ureq = "3"
 
 # Error handling
 anyhow = "1"
+
+# Adaptive dictation: persistent, cross-model, output-side correction + learning
+whisper-push-dict = { path = "crates/whisper-push-dict" }
+# Acoustic dictionary: correct a word by its sound (MFCC+DTW), model-agnostic
+whisper-push-acoustic = { path = "crates/whisper-push-acoustic" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

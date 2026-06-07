@@ -47,10 +47,7 @@ pub fn recent_logs(max_lines: usize) -> String {
 pub fn system_info() -> String {
     let mut info = Vec::new();
 
-    info.push(format!(
-        "- **Version**: {}",
-        env!("CARGO_PKG_VERSION")
-    ));
+    info.push(format!("- **Version**: {}", env!("CARGO_PKG_VERSION")));
     info.push(format!(
         "- **OS**: {} {}",
         std::env::consts::OS,
@@ -76,7 +73,10 @@ pub fn system_info() -> String {
     // Config summary (no secrets)
     if let Ok(cfg) = config::Config::load() {
         info.push(format!("- **Engine**: {}", cfg.model));
-        info.push(format!("- **Hotkey**: {} ({})", cfg.hotkey, cfg.hotkey_mode));
+        info.push(format!(
+            "- **Hotkey**: {} ({})",
+            cfg.hotkey, cfg.hotkey_mode
+        ));
         info.push(format!("- **Language**: {}", cfg.language));
     }
 
@@ -113,7 +113,8 @@ pub fn build_issue_url(logs: &str, system: &str) -> String {
          ```\n{logs}\n```"
     );
 
-    let base = format!("https://github.com/{GITHUB_REPO}/issues/new?labels=bug&title={title}&body=");
+    let base =
+        format!("https://github.com/{GITHUB_REPO}/issues/new?labels=bug&title={title}&body=");
     let max_body_len = MAX_URL_LEN - base.len();
     let encoded_body = url_encode(&body_template);
 
@@ -214,9 +215,8 @@ pub fn install_panic_hook() {
         {
             let msg = format!("Crashed: {payload}");
             let safe_msg = msg.replace('"', "'").replace('\n', " ");
-            let script = format!(
-                r#"display notification "{safe_msg}" with title "Whisper Push Crashed""#
-            );
+            let script =
+                format!(r#"display notification "{safe_msg}" with title "Whisper Push Crashed""#);
             let _ = std::process::Command::new("osascript")
                 .arg("-e")
                 .arg(&script)
@@ -251,7 +251,11 @@ mod tests {
     fn test_build_issue_url_truncates_long_logs() {
         let long_logs = "x\n".repeat(5000);
         let url = build_issue_url(&long_logs, "info");
-        assert!(url.len() <= MAX_URL_LEN + 200, "URL too long: {}", url.len());
+        assert!(
+            url.len() <= MAX_URL_LEN + 200,
+            "URL too long: {}",
+            url.len()
+        );
     }
 
     #[test]

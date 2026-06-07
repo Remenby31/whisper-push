@@ -1,7 +1,11 @@
 use tracing::warn;
 
-/// Send an OS notification.
+/// Send an OS notification. No-op when `WHISPER_PUSH_SUPPRESS_NOTIFY` is set
+/// (the autonomous tests drive the learning path and shouldn't spam the user).
 pub fn send(title: &str, body: &str) {
+    if std::env::var_os("WHISPER_PUSH_SUPPRESS_NOTIFY").is_some() {
+        return;
+    }
     #[cfg(target_os = "macos")]
     {
         if !macos_notify(title, body) {
@@ -27,9 +31,9 @@ pub fn send(title: &str, body: &str) {
 /// When running as a bare binary, falls back to osascript.
 #[cfg(target_os = "macos")]
 fn macos_notify(title: &str, body: &str) -> bool {
+    use objc2::msg_send;
     use objc2::rc::Retained;
     use objc2::runtime::AnyClass;
-    use objc2::msg_send;
     use objc2_foundation::NSString;
 
     unsafe {

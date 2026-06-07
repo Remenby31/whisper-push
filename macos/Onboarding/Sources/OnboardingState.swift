@@ -7,11 +7,13 @@ class OnboardingState: ObservableObject {
     /// Permissions come BEFORE model so grants happen up-front while the
     /// daemon isn't running, guaranteeing no "Quit and reopen" popup.
     enum Step: Int, CaseIterable {
-        case welcome, permissions, model, download, ready
+        // Paywall (license) comes AFTER permissions so the user is set up first.
+        case welcome, permissions, license, model, download, ready
 
         static func from(name: String) -> Step? {
             switch name {
             case "welcome": return .welcome
+            case "license": return .license
             case "permissions": return .permissions
             case "model": return .model
             case "download": return .download
@@ -33,6 +35,9 @@ class OnboardingState: ObservableObject {
     /// via `make onboarding-preview`). When true the wizard never calls
     /// the daemon, never downloads, and `finish()` does not emit JSON.
     let isDesignPreview: Bool
+    /// Standalone license/payment modal (menu bar → License → Subscription).
+    /// Shows only LicenseView; its buttons close the window instead of advancing.
+    let licenseOnly: Bool
 
     // User choices
     @Published var selectedModels: Set<String> = []
@@ -52,6 +57,7 @@ class OnboardingState: ObservableObject {
         self.recommendedBackend = Self.argValue(args, flag: "--recommended") ?? "parakeet"
         self.daemonPath = Self.argValue(args, flag: "--daemon-path")
         self.isDesignPreview = args.contains("--design-preview")
+        self.licenseOnly = args.contains("--license-only")
 
         let freeDiskGB = Self.freeDiskSpaceGB()
         let ramGB = Self.totalRAMGB()
@@ -77,6 +83,10 @@ class OnboardingState: ObservableObject {
         if let stepArg = Self.argValue(args, flag: "--start-at"),
            let step = Step.from(name: stepArg) {
             self.currentStep = step
+        }
+        // Standalone payment modal: land directly on the license screen.
+        if self.licenseOnly {
+            self.currentStep = .license
         }
     }
 

@@ -42,6 +42,11 @@ struct OnboardingApp: App {
             .environmentObject(state)
             .frame(width: 520, height: 440)
             .fixedSize()
+            // The wizard is designed for a light, branded surface (racing-green
+            // text on light). Pin a light appearance so dark-mode Macs don't get
+            // dark-on-dark (the contrast bug); also gives every screen a
+            // consistent look in the DMG regardless of system setting.
+            .preferredColorScheme(.light)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
@@ -52,11 +57,21 @@ struct ContentView: View {
     @EnvironmentObject var state: OnboardingState
 
     var body: some View {
+        // Standalone payment modal (menu bar → License → Subscription).
+        if state.licenseOnly {
+            return AnyView(LicenseView())
+        }
+        return AnyView(fullWizard)
+    }
+
+    private var fullWizard: some View {
         ZStack(alignment: .top) {
             Group {
                 switch state.currentStep {
                 case .welcome:
                     WelcomeView()
+                case .license:
+                    LicenseView()
                 case .permissions:
                     PermissionsView()
                 case .model:
@@ -90,11 +105,12 @@ private struct DesignPreviewBadge: View {
 
     private var stepName: String {
         switch state.currentStep {
-        case .welcome:     return "1/5 Welcome"
-        case .permissions: return "2/5 Permissions"
-        case .model:       return "3/5 Model Picker"
-        case .download:    return "4/5 Download"
-        case .ready:       return "5/5 Ready"
+        case .welcome:     return "1/6 Welcome"
+        case .permissions: return "2/6 Permissions"
+        case .license:     return "3/6 Subscription"
+        case .model:       return "4/6 Model Picker"
+        case .download:    return "5/6 Download"
+        case .ready:       return "6/6 Ready"
         }
     }
 
