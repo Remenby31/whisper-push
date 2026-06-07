@@ -488,9 +488,9 @@ mod cli_transcribe {
 }
 
 mod cli_dict {
-    use crate::dictionary::{self, Correction, EditKind, Source};
     use crate::DictAction;
-    use anyhow::{anyhow, Result};
+    use crate::dictionary::{self, Correction, EditKind, Source};
+    use anyhow::{Result, anyhow};
 
     pub fn run(action: &DictAction) -> Result<()> {
         // Load the dictionary regardless of the runtime toggle — management
@@ -525,7 +525,11 @@ mod cli_dict {
                             }
                         );
                     }
-                    println!("\n{} entr{}", entries.len(), if entries.len() == 1 { "y" } else { "ies" });
+                    println!(
+                        "\n{} entr{}",
+                        entries.len(),
+                        if entries.len() == 1 { "y" } else { "ies" }
+                    );
                 }
             }
             DictAction::Add {
@@ -540,7 +544,14 @@ mod cli_dict {
             }
             DictAction::Remove { term } => {
                 let removed = dictionary::remove_entry(term).map_err(|e| anyhow!(e))?;
-                println!("{}", if removed { format!("Removed: {term}") } else { format!("Not found: {term}") });
+                println!(
+                    "{}",
+                    if removed {
+                        format!("Removed: {term}")
+                    } else {
+                        format!("Not found: {term}")
+                    }
+                );
             }
             DictAction::Learn {
                 finalized,
@@ -574,8 +585,8 @@ mod cli_dict {
 
 mod cli_acoustic {
     use crate::AcousticAction;
-    use anyhow::{anyhow, Result};
-    use whisper_push_acoustic::{fingerprint, AcousticStore};
+    use anyhow::{Result, anyhow};
+    use whisper_push_acoustic::{AcousticStore, fingerprint};
 
     fn store_path() -> std::path::PathBuf {
         crate::config::data_dir().join("acoustic.bin")
@@ -606,7 +617,11 @@ mod cli_acoustic {
                 }
             }
             AcousticAction::List => {
-                println!("{} acoustic fingerprint(s) at {}", store.len(), path.display());
+                println!(
+                    "{} acoustic fingerprint(s) at {}",
+                    store.len(),
+                    path.display()
+                );
             }
         }
         Ok(())
@@ -614,7 +629,7 @@ mod cli_acoustic {
 }
 
 mod cli_selftest {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
     use std::path::Path;
 
     /// Full-pipeline proof: learn a word's sound from `wav1` with the real model,
@@ -675,7 +690,7 @@ mod cli_selftest {
 /// with zero GUI flakiness. The AX read itself is hardened + validated in the
 /// daemon (see `dictionary::ax`). This is the closed loop: change → run → fix.
 mod cli_capture_selftest {
-    use anyhow::{bail, Result};
+    use anyhow::{Result, bail};
 
     struct Scenario {
         name: &'static str,
@@ -840,8 +855,10 @@ mod cli_capture_selftest {
             crate::dictionary::arm_with_baseline(s.baseline.clone(), s.lang.to_string(), false);
             crate::dictionary::capture_with_current(&s.edited);
 
-            let learned: Vec<String> =
-                whisper_push_dict::list_entries().iter().map(|e| e.term.clone()).collect();
+            let learned: Vec<String> = whisper_push_dict::list_entries()
+                .iter()
+                .map(|e| e.term.clone())
+                .collect();
             let ok = match s.expect_term {
                 Some(term) => learned.iter().any(|t| t == term),
                 None => learned.is_empty(),
@@ -860,7 +877,9 @@ mod cli_capture_selftest {
         let _ = std::fs::remove_dir_all(&tmp);
         println!();
         if fails == 0 {
-            println!("PASS: auto-capture learns the right edits and ignores rewrites/meaning-changes.");
+            println!(
+                "PASS: auto-capture learns the right edits and ignores rewrites/meaning-changes."
+            );
             Ok(())
         } else {
             bail!("FAIL: {fails} capture scenario(s) failed")
@@ -869,8 +888,8 @@ mod cli_capture_selftest {
 }
 
 mod cli_license {
-    use crate::license::{self, ActivateOutcome, DeactivateOutcome, ValidateOutcome};
     use crate::LicenseAction;
+    use crate::license::{self, ActivateOutcome, DeactivateOutcome, ValidateOutcome};
     use anyhow::Result;
 
     pub fn run(action: &LicenseAction) -> Result<()> {
@@ -884,7 +903,9 @@ mod cli_license {
                     ActivateOutcome::Rejected(r) => {
                         format!("{{\"activated\":false,\"error\":{}}}", json_str(&r))
                     }
-                    ActivateOutcome::Offline => "{\"activated\":false,\"error\":\"offline\"}".into(),
+                    ActivateOutcome::Offline => {
+                        "{\"activated\":false,\"error\":\"offline\"}".into()
+                    }
                 };
                 println!("{line}");
             }

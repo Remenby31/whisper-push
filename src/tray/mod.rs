@@ -592,7 +592,8 @@ impl App {
     /// Refresh the License submenu title + status line (cheap, no rebuild).
     fn refresh_license_submenu(&mut self) {
         if let Some(mi) = self.menu_items.as_ref() {
-            mi.license_status_item.set_text(crate::license::status_text());
+            mi.license_status_item
+                .set_text(crate::license::status_text());
             mi.license_submenu.set_text(crate::license::submenu_title());
         }
     }
@@ -763,12 +764,14 @@ impl App {
                 }
                 if id == &mi.update_id {
                     if let Some((version, url)) = self.pending_update.clone() {
-                        mi.update_item.set_text(&format!("Downloading v{version}\u{2026}"));
+                        mi.update_item
+                            .set_text(&format!("Downloading v{version}\u{2026}"));
                         mi.update_item.set_enabled(false);
                         std::thread::Builder::new()
                             .name("update-install".into())
                             .spawn(move || {
-                                if let Err(e) = crate::updater::install::download_and_install(&url) {
+                                if let Err(e) = crate::updater::install::download_and_install(&url)
+                                {
                                     tracing::error!("Update failed: {e}");
                                     // Can't send event here because process may exit on success
                                     crate::notify::send(
@@ -785,26 +788,24 @@ impl App {
                         let tx = self.state.tx.clone();
                         std::thread::Builder::new()
                             .name("update-manual-check".into())
-                            .spawn(move || {
-                                match crate::updater::check_for_update() {
-                                    Ok(Some((version, url))) => {
-                                        let _ = tx.send(Event::UpdateAvailable(version, url));
-                                    }
-                                    Ok(None) => {
-                                        crate::notify::send(
-                                            "Whisper Push",
-                                            "You\u{2019}re on the latest version.",
-                                        );
-                                        let _ = tx.send(Event::UpdateFailed(String::new()));
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Update check failed: {e}");
-                                        crate::notify::send(
-                                            "Whisper Push",
-                                            &format!("Update check failed: {e}"),
-                                        );
-                                        let _ = tx.send(Event::UpdateFailed(e.to_string()));
-                                    }
+                            .spawn(move || match crate::updater::check_for_update() {
+                                Ok(Some((version, url))) => {
+                                    let _ = tx.send(Event::UpdateAvailable(version, url));
+                                }
+                                Ok(None) => {
+                                    crate::notify::send(
+                                        "Whisper Push",
+                                        "You\u{2019}re on the latest version.",
+                                    );
+                                    let _ = tx.send(Event::UpdateFailed(String::new()));
+                                }
+                                Err(e) => {
+                                    tracing::error!("Update check failed: {e}");
+                                    crate::notify::send(
+                                        "Whisper Push",
+                                        &format!("Update check failed: {e}"),
+                                    );
+                                    let _ = tx.send(Event::UpdateFailed(e.to_string()));
                                 }
                             })
                             .ok();
@@ -1776,7 +1777,11 @@ fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let entries = crate::dictionary::list_entries();
     let mut items = Vec::new();
     if entries.is_empty() {
-        let ph = MenuItem::new("  (empty \u{2014} your corrections will appear here)", false, None);
+        let ph = MenuItem::new(
+            "  (empty \u{2014} your corrections will appear here)",
+            false,
+            None,
+        );
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;
@@ -1811,7 +1816,10 @@ fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
         crate::notify::send("Whisper Push", "No recent dictation to correct.");
         return;
     };
-    let corrected = match osascript_input("Edit the last dictation — fix any wrong words:", &last.finalized) {
+    let corrected = match osascript_input(
+        "Edit the last dictation — fix any wrong words:",
+        &last.finalized,
+    ) {
         Some(t) if !t.trim().is_empty() => t,
         _ => return, // cancelled or empty
     };
@@ -1918,7 +1926,9 @@ fn license_deactivate_dialog(tx: crossbeam_channel::Sender<Event>) {
     use crate::license::DeactivateOutcome::*;
     let msg = match crate::license::deactivate() {
         Done => "This device has been deactivated.".to_string(),
-        Offline => "Couldn't reach the server \u{2014} deactivate from your account page instead.".into(),
+        Offline => {
+            "Couldn't reach the server \u{2014} deactivate from your account page instead.".into()
+        }
     };
     crate::notify::send("Whisper Push", &msg);
     let _ = tx.send(Event::LicenseChanged);

@@ -176,7 +176,9 @@ fn test_parse_release_update_available() {
             "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/Whisper-Push-macOS-arm64.zip"
         }]
     }"#;
-    let result = whisper_push::updater::parse_release_json(json).unwrap().unwrap();
+    let result = whisper_push::updater::parse_release_json(json)
+        .unwrap()
+        .unwrap();
     assert_eq!(result.0, "99.0.0");
     assert!(result.1.contains("macOS-arm64.zip"));
 }
@@ -187,14 +189,21 @@ fn test_parse_release_no_update() {
         r#"{{ "tag_name": "v{}", "assets": [] }}"#,
         env!("CARGO_PKG_VERSION")
     );
-    assert!(whisper_push::updater::parse_release_json(&json).unwrap().is_none());
+    assert!(
+        whisper_push::updater::parse_release_json(&json)
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ── Report: URL encoding ───────────────────────────────────────
 
 #[test]
 fn test_report_url_encode() {
-    assert_eq!(whisper_push::report::url_encode("hello world"), "hello%20world");
+    assert_eq!(
+        whisper_push::report::url_encode("hello world"),
+        "hello%20world"
+    );
     assert_eq!(whisper_push::report::url_encode("a&b=c"), "a%26b%3Dc");
 }
 

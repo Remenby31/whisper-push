@@ -75,7 +75,10 @@ fn zip_asset_name() -> &'static str {
 pub fn check_for_update() -> anyhow::Result<Option<(String, String)>> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let response = ureq::get(&url)
-        .header("User-Agent", &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")))
+        .header(
+            "User-Agent",
+            &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),
+        )
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| anyhow::anyhow!("GitHub API request failed: {e}"))?;

@@ -22,8 +22,8 @@ mod normalize;
 mod phonetic;
 
 pub use compiled::{CommonWords, Compiled};
-pub use finalize::{finalize, finalize_traced, Applied};
-pub use learn::{classify, learn, EditClass, EditKind, LastDictation, LearnReport, Pair};
+pub use finalize::{Applied, finalize, finalize_traced};
+pub use learn::{EditClass, EditKind, LastDictation, LearnReport, Pair, classify, learn};
 pub use model::{Dictionary, Entry, LoadError, Source};
 pub use normalize::{key_of, normalize};
 
@@ -314,7 +314,9 @@ pub fn correct(finalized: &str, corrected: &str, lang: &str) -> Correction {
 
 /// Snapshot of all entries (for a management UI / CLI listing).
 pub fn list_entries() -> Vec<Entry> {
-    read_state().map(|s| s.dict.entries.clone()).unwrap_or_default()
+    read_state()
+        .map(|s| s.dict.entries.clone())
+        .unwrap_or_default()
 }
 
 /// Number of entries currently loaded.

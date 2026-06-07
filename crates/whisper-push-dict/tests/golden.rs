@@ -18,7 +18,10 @@ fn lines(text: &str) -> Vec<Value> {
 fn entry_from(v: &Value) -> Entry {
     let mut e = Entry::new(v["term"].as_str().expect("entry.term"));
     if let Some(vs) = v.get("variants").and_then(|x| x.as_array()) {
-        e.variants = vs.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        e.variants = vs
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
     }
     e.starred = v.get("starred").and_then(|x| x.as_bool()).unwrap_or(false);
     if v.get("source").and_then(|x| x.as_str()) == Some("auto") {
@@ -28,7 +31,10 @@ fn entry_from(v: &Value) -> Entry {
         e.lang = Some(l.to_string());
     }
     if let Some(ctx) = v.get("context").and_then(|x| x.as_array()) {
-        e.context = ctx.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        e.context = ctx
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
     }
     e
 }
@@ -56,7 +62,9 @@ fn finalize_corpus() {
         let expect = v["expect"].as_str().expect("expect");
         let got = finalize(input, lang, &compiled);
         if got != expect {
-            failures.push(format!("[{name}] {input:?} → {got:?} (expected {expect:?})"));
+            failures.push(format!(
+                "[{name}] {input:?} → {got:?} (expected {expect:?})"
+            ));
         }
     }
     assert!(
@@ -78,7 +86,11 @@ fn learn_corpus() {
         let mut dict = dict_from(v.get("dict"));
         let finalized = v["finalized"].as_str().expect("finalized").to_string();
         let corrected = v["corrected"].as_str().expect("corrected");
-        let lang = v.get("lang").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
+        let lang = v
+            .get("lang")
+            .and_then(|x| x.as_str())
+            .unwrap_or("auto")
+            .to_string();
 
         let applied = v
             .get("applied")

@@ -52,7 +52,11 @@ fn extract_zip(zip_path: &Path) -> Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let status = std::process::Command::new("ditto")
-            .args(["-xk", &zip_path.to_string_lossy(), &extract_dir.to_string_lossy()])
+            .args([
+                "-xk",
+                &zip_path.to_string_lossy(),
+                &extract_dir.to_string_lossy(),
+            ])
             .status()
             .context("running ditto")?;
         if !status.success() {

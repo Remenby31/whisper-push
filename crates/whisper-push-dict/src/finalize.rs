@@ -14,8 +14,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::compiled::{Compiled, CommonWords, FuzzyTerm};
-use crate::normalize::{key_of, normalize, reconstruct, tokenize, Tok};
+use crate::compiled::{CommonWords, Compiled, FuzzyTerm};
+use crate::normalize::{Tok, key_of, normalize, reconstruct, tokenize};
 use crate::phonetic::{fold_lang, similarity};
 
 // ── Tuning knobs (named, calibratable on the golden corpus) ────────────────
@@ -242,8 +242,8 @@ fn accept_candidate(
         }
     }
     // Length must be plausible.
-    let dl = (word_norm.chars().count() as i64 - ft.norm.chars().count() as i64).unsigned_abs()
-        as usize;
+    let dl =
+        (word_norm.chars().count() as i64 - ft.norm.chars().count() as i64).unsigned_abs() as usize;
     if dl > FUZZY_MAX_LEN_DELTA {
         return false;
     }
@@ -275,7 +275,13 @@ mod tests {
 
     fn compiled(entries: Vec<Entry>) -> Compiled {
         let common = Arc::new(CommonWords::builtin());
-        Compiled::build(&Dictionary { version: 1, entries }, common)
+        Compiled::build(
+            &Dictionary {
+                version: 1,
+                entries,
+            },
+            common,
+        )
     }
 
     fn entry(term: &str, variants: &[&str]) -> Entry {
@@ -313,7 +319,10 @@ mod tests {
     fn fuzzy_never_touches_common_words() {
         // A term that is dangerously close to everyday English words.
         let c = compiled(vec![entry("Theire", &["thair"])]);
-        assert_eq!(finalize("their car is there", "en", &c), "their car is there");
+        assert_eq!(
+            finalize("their car is there", "en", &c),
+            "their car is there"
+        );
     }
 
     #[test]
@@ -370,9 +379,15 @@ mod tests {
         e.context = vec!["Acme".into()];
         let c = compiled(vec![e]);
         // Everyday word, no supporting context → NEVER touched (guard holds).
-        assert_eq!(finalize("please mark the page", "en", &c), "please mark the page");
+        assert_eq!(
+            finalize("please mark the page", "en", &c),
+            "please mark the page"
+        );
         // The cue "Acme" is present → homophone override → "mark" → "Marc".
-        assert_eq!(finalize("Acme needs mark today", "en", &c), "Acme needs Marc today");
+        assert_eq!(
+            finalize("Acme needs mark today", "en", &c),
+            "Acme needs Marc today"
+        );
     }
 
     #[test]

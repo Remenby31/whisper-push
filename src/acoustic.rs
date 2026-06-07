@@ -11,7 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock, RwLock};
-use whisper_push_acoustic::{fingerprint, segment_by_energy, AcousticStore};
+use whisper_push_acoustic::{AcousticStore, fingerprint, segment_by_energy};
 
 pub const SAMPLE_RATE: u32 = 16_000;
 /// DTW distance under which two words are "the same sound". Tuned on real
@@ -60,7 +60,9 @@ pub fn init_ephemeral() {
 }
 
 fn store_read() -> Option<std::sync::RwLockReadGuard<'static, AcousticStore>> {
-    STORE.get().map(|l| l.read().unwrap_or_else(|e| e.into_inner()))
+    STORE
+        .get()
+        .map(|l| l.read().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// **Hot path.** Keep this dictation's audio + word spans (for a later
@@ -245,7 +247,11 @@ fn tokenize(text: &str) -> Vec<Tok> {
         match is_word {
             Some(b) if b == w => buf.push(c),
             Some(b) => {
-                out.push(if b { Tok::Word(std::mem::take(&mut buf)) } else { Tok::Sep(std::mem::take(&mut buf)) });
+                out.push(if b {
+                    Tok::Word(std::mem::take(&mut buf))
+                } else {
+                    Tok::Sep(std::mem::take(&mut buf))
+                });
                 buf.push(c);
                 is_word = Some(w);
             }

@@ -327,7 +327,13 @@ pub fn learn(
                     upsert(dict, &p.corrected, &p.heard, &last.lang);
                     // Remember the neighbouring words as context cues (the
                     // "meaning" signal that later relaxes the fuzzy gate).
-                    add_context(dict, &p.corrected, &[&p.left_ctx, &p.right_ctx], common, &last.lang);
+                    add_context(
+                        dict,
+                        &p.corrected,
+                        &[&p.left_ctx, &p.right_ctx],
+                        common,
+                        &last.lang,
+                    );
                     report.learned.push((p.heard.clone(), p.corrected.clone()));
                     report.changed = true;
                 }
@@ -432,7 +438,12 @@ mod tests {
     fn punctual_proper_noun_is_learned() {
         let common = CommonWords::builtin();
         let mut d = Dictionary::default();
-        let r = learn(&mut d, &last("I met Claud in Paris"), "I met Claude in Paris", &common);
+        let r = learn(
+            &mut d,
+            &last("I met Claud in Paris"),
+            "I met Claude in Paris",
+            &common,
+        );
         assert_eq!(r.kind, Some(EditKind::Punctual));
         assert!(r.changed);
         let e = d.find("Claude").expect("learned Claude");
@@ -461,7 +472,12 @@ mod tests {
         let mut d = Dictionary::default();
         // "noon" → "two": single substitution, high doc similarity, but the
         // words don't sound alike ⇒ content edit, not an ASR fix.
-        let r = learn(&mut d, &last("the meeting is at noon"), "the meeting is at two", &common);
+        let r = learn(
+            &mut d,
+            &last("the meeting is at noon"),
+            "the meeting is at two",
+            &common,
+        );
         assert_eq!(r.kind, Some(EditKind::Rewrite));
         assert!(d.entries.is_empty());
     }
@@ -471,7 +487,12 @@ mod tests {
         let common = CommonWords::builtin();
         let mut d = Dictionary::default();
         // "form" → "from": sounds alike, but "from" is an everyday word.
-        let r = learn(&mut d, &last("a letter form you"), "a letter from you", &common);
+        let r = learn(
+            &mut d,
+            &last("a letter form you"),
+            "a letter from you",
+            &common,
+        );
         assert!(d.entries.is_empty(), "should not learn everyday-word fix");
         let _ = r;
     }

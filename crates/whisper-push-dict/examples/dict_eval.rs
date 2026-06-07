@@ -29,7 +29,10 @@ fn lines(text: &str) -> Vec<Value> {
 fn entry_from(v: &Value) -> Entry {
     let mut e = Entry::new(v["term"].as_str().unwrap_or(""));
     if let Some(vs) = v.get("variants").and_then(|x| x.as_array()) {
-        e.variants = vs.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        e.variants = vs
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
     }
     e.starred = v.get("starred").and_then(|x| x.as_bool()).unwrap_or(false);
     if v.get("source").and_then(|x| x.as_str()) == Some("auto") {
@@ -39,7 +42,10 @@ fn entry_from(v: &Value) -> Entry {
         e.lang = Some(l.to_string());
     }
     if let Some(ctx) = v.get("context").and_then(|x| x.as_array()) {
-        e.context = ctx.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        e.context = ctx
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
     }
     e
 }
@@ -108,7 +114,11 @@ fn main() {
             let mut dict = dict_from(v.get("dict"));
             let finalized = v["finalized"].as_str().unwrap_or("").to_string();
             let corrected = v["corrected"].as_str().unwrap_or("");
-            let lang = v.get("lang").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
+            let lang = v
+                .get("lang")
+                .and_then(|x| x.as_str())
+                .unwrap_or("auto")
+                .to_string();
             let applied = v
                 .get("applied")
                 .and_then(|x| x.as_array())
@@ -206,7 +216,11 @@ fn emit_corrected(fz_path: &str, ln_path: &str, common: &Arc<CommonWords>) {
             let mut dict = dict_from(v.get("dict"));
             let finalized = v["finalized"].as_str().unwrap_or("").to_string();
             let corrected = v["corrected"].as_str().unwrap_or("");
-            let lang = v.get("lang").and_then(|x| x.as_str()).unwrap_or("auto").to_string();
+            let lang = v
+                .get("lang")
+                .and_then(|x| x.as_str())
+                .unwrap_or("auto")
+                .to_string();
             let applied = v
                 .get("applied")
                 .and_then(|x| x.as_array())
@@ -241,7 +255,9 @@ fn emit_corrected(fz_path: &str, ln_path: &str, common: &Arc<CommonWords>) {
                     let arr = report
                         .learned
                         .iter()
-                        .map(|(h, t)| Value::Array(vec![Value::String(h.clone()), Value::String(t.clone())]))
+                        .map(|(h, t)| {
+                            Value::Array(vec![Value::String(h.clone()), Value::String(t.clone())])
+                        })
                         .collect();
                     m.insert("expect_learn".into(), Value::Array(arr));
                 }

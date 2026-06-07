@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 // Re-export the management API so callers can use `dictionary::…`.
 pub use whisper_push_dict::{
-    add_entry, correct, correct_last, entry_count, last_dictation, list_entries, reload,
-    remove_entry, Correction, EditKind, Source,
+    Correction, EditKind, Source, add_entry, correct, correct_last, entry_count, last_dictation,
+    list_entries, reload, remove_entry,
 };
 
 /// `dictionary.toml` lives next to `config.toml`.
@@ -31,7 +31,10 @@ pub fn init(enabled: bool) {
     let path = dictionary_path();
     match whisper_push_dict::init(path.clone()) {
         Ok(()) => tracing::info!("dictionary ready: {} entries", entry_count()),
-        Err(e) => tracing::warn!("dictionary disabled (load failed at {}): {e}", path.display()),
+        Err(e) => tracing::warn!(
+            "dictionary disabled (load failed at {}): {e}",
+            path.display()
+        ),
     }
 }
 
@@ -61,8 +64,8 @@ pub fn ensure_file() -> PathBuf {
 // best-effort — any Accessibility failure just means no auto-capture, never a
 // broken dictation.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Set when the dictionary changed off the UI thread (auto-capture), so the
 /// tray can refresh its word list on its next tick.
@@ -418,7 +421,8 @@ mod ax {
             }
             let attr_focus = CFString::new("AXFocusedUIElement");
             let mut elem: CFTypeRef = std::ptr::null();
-            let err = AXUIElementCopyAttributeValue(sys, attr_focus.as_concrete_TypeRef(), &mut elem);
+            let err =
+                AXUIElementCopyAttributeValue(sys, attr_focus.as_concrete_TypeRef(), &mut elem);
             CFRelease(sys as CFTypeRef);
             if err != 0 || elem.is_null() {
                 return None;

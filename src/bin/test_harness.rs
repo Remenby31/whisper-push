@@ -15,7 +15,10 @@ use clap::{Parser, Subcommand};
 use std::process;
 
 #[derive(Parser)]
-#[command(name = "whisper-push-test", about = "E2E test harness for whisper-push")]
+#[command(
+    name = "whisper-push-test",
+    about = "E2E test harness for whisper-push"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -65,11 +68,35 @@ const KEYCODE_LCMD: u16 = 55;
 const KEYCODE_RCMD: u16 = 54;
 
 const NAMED_KEYS: &[(&str, u16)] = &[
-    ("a", 0), ("b", 11), ("c", 8), ("d", 2), ("e", 14), ("f", 3),
-    ("g", 5), ("h", 4), ("i", 34), ("j", 38), ("k", 40), ("l", 37),
-    ("m", 46), ("n", 45), ("o", 31), ("p", 35), ("q", 12), ("r", 15),
-    ("s", 1), ("t", 17), ("u", 32), ("v", 9), ("w", 13), ("x", 7),
-    ("y", 16), ("z", 6), ("space", 49), ("return", 36), ("tab", 48),
+    ("a", 0),
+    ("b", 11),
+    ("c", 8),
+    ("d", 2),
+    ("e", 14),
+    ("f", 3),
+    ("g", 5),
+    ("h", 4),
+    ("i", 34),
+    ("j", 38),
+    ("k", 40),
+    ("l", 37),
+    ("m", 46),
+    ("n", 45),
+    ("o", 31),
+    ("p", 35),
+    ("q", 12),
+    ("r", 15),
+    ("s", 1),
+    ("t", 17),
+    ("u", 32),
+    ("v", 9),
+    ("w", 13),
+    ("x", 7),
+    ("y", 16),
+    ("z", 6),
+    ("space", 49),
+    ("return", 36),
+    ("tab", 48),
     ("escape", 53),
 ];
 
@@ -99,35 +126,51 @@ fn parse_key(spec: &str) -> Result<ParsedKey, String> {
             match p.as_str() {
                 "ctrl" | "lctrl" => {
                     flags |= CGEventFlags::CGEventFlagControl;
-                    if keycode.is_none() { keycode = Some(KEYCODE_LCTRL); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_LCTRL);
+                    }
                 }
                 "rctrl" => {
                     flags |= CGEventFlags::CGEventFlagControl;
-                    if keycode.is_none() { keycode = Some(KEYCODE_RCTRL); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_RCTRL);
+                    }
                 }
                 "shift" | "lshift" => {
                     flags |= CGEventFlags::CGEventFlagShift;
-                    if keycode.is_none() { keycode = Some(KEYCODE_LSHIFT); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_LSHIFT);
+                    }
                 }
                 "rshift" => {
                     flags |= CGEventFlags::CGEventFlagShift;
-                    if keycode.is_none() { keycode = Some(KEYCODE_RSHIFT); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_RSHIFT);
+                    }
                 }
                 "alt" | "option" | "lalt" => {
                     flags |= CGEventFlags::CGEventFlagAlternate;
-                    if keycode.is_none() { keycode = Some(KEYCODE_LALT); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_LALT);
+                    }
                 }
                 "ralt" => {
                     flags |= CGEventFlags::CGEventFlagAlternate;
-                    if keycode.is_none() { keycode = Some(KEYCODE_RALT); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_RALT);
+                    }
                 }
                 "cmd" | "lcmd" => {
                     flags |= CGEventFlags::CGEventFlagCommand;
-                    if keycode.is_none() { keycode = Some(KEYCODE_LCMD); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_LCMD);
+                    }
                 }
                 "rcmd" => {
                     flags |= CGEventFlags::CGEventFlagCommand;
-                    if keycode.is_none() { keycode = Some(KEYCODE_RCMD); }
+                    if keycode.is_none() {
+                        keycode = Some(KEYCODE_RCMD);
+                    }
                 }
                 other => {
                     if let Some((_, code)) = NAMED_KEYS.iter().find(|(n, _)| *n == other) {
@@ -166,9 +209,16 @@ fn post_hotkey(key: &str, down: bool) -> Result<(), String> {
         // NOT KeyDown/KeyUp. The CGEventTap in the app listens for FlagsChanged,
         // so we must post the right event type.
         let is_modifier = [
-            KEYCODE_LCTRL, KEYCODE_RCTRL, KEYCODE_LSHIFT, KEYCODE_RSHIFT,
-            KEYCODE_LALT, KEYCODE_RALT, KEYCODE_LCMD, KEYCODE_RCMD,
-        ].contains(&parsed.keycode);
+            KEYCODE_LCTRL,
+            KEYCODE_RCTRL,
+            KEYCODE_LSHIFT,
+            KEYCODE_RSHIFT,
+            KEYCODE_LALT,
+            KEYCODE_RALT,
+            KEYCODE_LCMD,
+            KEYCODE_RCMD,
+        ]
+        .contains(&parsed.keycode);
 
         if is_modifier {
             // For modifiers: create a FlagsChanged event.
@@ -193,7 +243,10 @@ fn post_hotkey(key: &str, down: bool) -> Result<(), String> {
         }
 
         let dir = if down { "down" } else { "up" };
-        eprintln!("posted: {key} {dir} (keycode={}, modifier={is_modifier})", parsed.keycode);
+        eprintln!(
+            "posted: {key} {dir} (keycode={}, modifier={is_modifier})",
+            parsed.keycode
+        );
         Ok(())
     }
 }
@@ -267,10 +320,13 @@ fn wait_log(pattern: &str, timeout: u64) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
 
-    eprintln!("watching {} for '{pattern}' (timeout {timeout}s)", path.display());
+    eprintln!(
+        "watching {} for '{pattern}' (timeout {timeout}s)",
+        path.display()
+    );
 
-    let mut file = std::fs::File::open(&path)
-        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+    let mut file =
+        std::fs::File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
 
     // Seek to end — only watch new lines
     file.seek(SeekFrom::End(0))
@@ -281,7 +337,9 @@ fn wait_log(pattern: &str, timeout: u64) -> Result<(), String> {
 
     loop {
         if std::time::Instant::now() > deadline {
-            return Err(format!("timeout after {timeout}s: pattern '{pattern}' not found"));
+            return Err(format!(
+                "timeout after {timeout}s: pattern '{pattern}' not found"
+            ));
         }
 
         line.clear();
@@ -291,7 +349,10 @@ fn wait_log(pattern: &str, timeout: u64) -> Result<(), String> {
                 if let Some(newer) = latest_log_path() {
                     if newer != path {
                         eprintln!("log rolled to {}", newer.display());
-                        return wait_log(pattern, deadline.duration_since(std::time::Instant::now()).as_secs());
+                        return wait_log(
+                            pattern,
+                            deadline.duration_since(std::time::Instant::now()).as_secs(),
+                        );
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -316,6 +377,9 @@ fn check_log(pattern: &str) -> Result<(), String> {
         eprintln!("found '{pattern}' in {}", path.display());
         Ok(())
     } else {
-        Err(format!("pattern '{pattern}' not found in {}", path.display()))
+        Err(format!(
+            "pattern '{pattern}' not found in {}",
+            path.display()
+        ))
     }
 }

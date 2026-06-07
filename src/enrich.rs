@@ -29,7 +29,9 @@ pub fn maybe_suggest(term: &str, lang: &str) {
             tracing::info!("enrichment: '{term}' → canonical '{canonical}'");
             crate::notify::send(
                 "Whisper Push",
-                &format!("Spelling check: did you mean \u{201c}{canonical}\u{201d}? (edit in Dictionary)"),
+                &format!(
+                    "Spelling check: did you mean \u{201c}{canonical}\u{201d}? (edit in Dictionary)"
+                ),
             );
         }
     });

@@ -84,8 +84,8 @@ pub fn fingerprint(samples: &[f32], sample_rate: u32) -> Fingerprint {
         for (k, c) in mfcc.iter_mut().enumerate() {
             let mut sum = 0.0;
             for (m, &lm) in logmel.iter().enumerate() {
-                sum += lm
-                    * (std::f32::consts::PI * k as f32 * (m as f32 + 0.5) / N_MEL as f32).cos();
+                sum +=
+                    lm * (std::f32::consts::PI * k as f32 * (m as f32 + 0.5) / N_MEL as f32).cos();
             }
             *c = sum;
         }
@@ -427,10 +427,7 @@ mod tests {
         let probe = fingerprint(&chirp(250.0, 1000.0, 0.4, 0.04), 16000);
         let far = fingerprint(&chirp(1500.0, 400.0, 0.4, 0.0), 16000);
         // Threshold midway between same-word and different-word distances.
-        let d_far = distance(
-            &fingerprint(&chirp(250.0, 1000.0, 0.4, 0.0), 16000),
-            &far,
-        );
+        let d_far = distance(&fingerprint(&chirp(250.0, 1000.0, 0.4, 0.0), 16000), &far);
         let thr = d_far * 0.5;
         assert_eq!(store.best_match(&probe, thr), Some("Kasar"));
         assert_eq!(store.best_match(&far, thr), None);

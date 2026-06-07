@@ -148,7 +148,9 @@ mod inner {
 pub use inner::{is_loaded, load_model, model_dir, transcribe, transcribe_timed, unload_model};
 
 #[cfg(not(feature = "parakeet"))]
-pub fn transcribe_timed(_audio: &[f32]) -> anyhow::Result<(String, Vec<crate::acoustic::WordTiming>)> {
+pub fn transcribe_timed(
+    _audio: &[f32],
+) -> anyhow::Result<(String, Vec<crate::acoustic::WordTiming>)> {
     anyhow::bail!("Parakeet not compiled. Build with --features parakeet")
 }
 

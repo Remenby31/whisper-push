@@ -91,12 +91,24 @@ impl LicenseState {
     /// so activate and validate stay in sync (DRY).
     fn apply(&mut self, v: &Value) {
         if let Some(lk) = v.get("license_key") {
-            self.key_status = lk.get("status").and_then(Value::as_str).and_then(KeyStatus::parse);
-            let exp = lk.get("expires_at").and_then(Value::as_str).map(str::to_string);
+            self.key_status = lk
+                .get("status")
+                .and_then(Value::as_str)
+                .and_then(KeyStatus::parse);
+            let exp = lk
+                .get("expires_at")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             self.expires_at_unix = exp.as_deref().and_then(parse_iso_date);
             self.expires_at_raw = exp;
-            self.activation_limit = lk.get("activation_limit").and_then(Value::as_u64).map(|n| n as u32);
-            self.activation_usage = lk.get("activation_usage").and_then(Value::as_u64).map(|n| n as u32);
+            self.activation_limit = lk
+                .get("activation_limit")
+                .and_then(Value::as_u64)
+                .map(|n| n as u32);
+            self.activation_usage = lk
+                .get("activation_usage")
+                .and_then(Value::as_u64)
+                .map(|n| n as u32);
         }
         self.product_kind = v
             .pointer("/meta/variant_id")
@@ -117,7 +129,9 @@ impl LicenseState {
 pub enum LicensedKind {
     Lifetime,
     /// Annual subscription; `renews` is the period end if the key carries one.
-    Subscription { renews: Option<u64> },
+    Subscription {
+        renews: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -212,11 +226,17 @@ fn evaluate(s: &LicenseState, now: u64) -> LicenseStatus {
 
     // No key → trial window.
     if s.license_key.is_none() {
-        let started = if s.trial_started_at == 0 { now } else { s.trial_started_at };
+        let started = if s.trial_started_at == 0 {
+            now
+        } else {
+            s.trial_started_at
+        };
         let elapsed = now.saturating_sub(started);
         let window = TRIAL_DAYS * DAY;
         return if elapsed < window {
-            Trial { days_left: (window - elapsed).div_ceil(DAY) }
+            Trial {
+                days_left: (window - elapsed).div_ceil(DAY),
+            }
         } else {
             Locked
         };
@@ -242,7 +262,9 @@ fn evaluate(s: &LicenseState, now: u64) -> LicenseStatus {
         return licensed(s);
     }
     if since <= OFFLINE_GRACE && !tampered {
-        return GraceOffline { days_left: (OFFLINE_GRACE - since).div_ceil(DAY) };
+        return GraceOffline {
+            days_left: (OFFLINE_GRACE - since).div_ceil(DAY),
+        };
     }
     Locked
 }
@@ -257,7 +279,9 @@ fn licensed(s: &LicenseState) -> LicenseStatus {
     if lifetime {
         LicenseStatus::Licensed(LicensedKind::Lifetime)
     } else {
-        LicenseStatus::Licensed(LicensedKind::Subscription { renews: s.expires_at_unix })
+        LicenseStatus::Licensed(LicensedKind::Subscription {
+            renews: s.expires_at_unix,
+        })
     }
 }
 
@@ -270,7 +294,9 @@ pub fn status() -> LicenseStatus {
 pub fn is_entitled() -> bool {
     matches!(
         status(),
-        LicenseStatus::Trial { .. } | LicenseStatus::Licensed(_) | LicenseStatus::GraceOffline { .. }
+        LicenseStatus::Trial { .. }
+            | LicenseStatus::Licensed(_)
+            | LicenseStatus::GraceOffline { .. }
     )
 }
 
@@ -330,26 +356,51 @@ pub fn activate(key: &str, email: &str) -> ActivateOutcome {
     }
 
     let name = instance_name();
-    let v = match post_form(API_ACTIVATE, &[("license_key", &key), ("instance_name", &name)]) {
+    let v = match post_form(
+        API_ACTIVATE,
+        &[("license_key", &key), ("instance_name", &name)],
+    ) {
         Ok(v) | Err(NetErr::Http(v)) => v,
         Err(NetErr::Offline) => return ActivateOutcome::Offline,
     };
 
     if !v.get("activated").and_then(Value::as_bool).unwrap_or(false) {
-        let err = v.get("error").and_then(Value::as_str).unwrap_or("Activation failed");
+        let err = v
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("Activation failed");
         return ActivateOutcome::Rejected(humanize(err));
     }
 
-    let instance_id = v.pointer("/instance/id").and_then(Value::as_str).map(str::to_string);
-    let test_mode = v.pointer("/license_key/test_mode").and_then(Value::as_bool).unwrap_or(false);
-    let store_id = v.pointer("/meta/store_id").and_then(Value::as_u64).unwrap_or(0);
-    let product_id = v.pointer("/meta/product_id").and_then(Value::as_u64).unwrap_or(0);
-    let cust_email = v.pointer("/meta/customer_email").and_then(Value::as_str).unwrap_or("").to_lowercase();
+    let instance_id = v
+        .pointer("/instance/id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let test_mode = v
+        .pointer("/license_key/test_mode")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let store_id = v
+        .pointer("/meta/store_id")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let product_id = v
+        .pointer("/meta/product_id")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cust_email = v
+        .pointer("/meta/customer_email")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_lowercase();
 
     // Any rejection past this point must free the slot we just created.
     let reject = |reason: &str| -> ActivateOutcome {
         if let Some(id) = instance_id.as_deref() {
-            let _ = post_form(API_DEACTIVATE, &[("license_key", &key), ("instance_id", id)]);
+            let _ = post_form(
+                API_DEACTIVATE,
+                &[("license_key", &key), ("instance_id", id)],
+            );
         }
         ActivateOutcome::Rejected(reason.into())
     };
@@ -403,7 +454,10 @@ pub fn validate() -> ValidateOutcome {
     s.last_validation_attempt = now();
     s.apply(&v);
     let valid = v.get("valid").and_then(Value::as_bool).unwrap_or(false);
-    let email_ok = match (verified.as_deref(), v.pointer("/meta/customer_email").and_then(Value::as_str)) {
+    let email_ok = match (
+        verified.as_deref(),
+        v.pointer("/meta/customer_email").and_then(Value::as_str),
+    ) {
         (Some(a), Some(b)) => a == b.to_lowercase(),
         _ => true, // can't compare → don't fail on this alone
     };
@@ -416,7 +470,11 @@ pub fn validate() -> ValidateOutcome {
         if !email_ok {
             s.key_status = Some(KeyStatus::Disabled);
         }
-        let err = v.get("error").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let err = v
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
         if err.contains("instance") {
             s.instance_id = None; // instance revoked elsewhere → allow re-activation
         }
@@ -432,7 +490,10 @@ pub fn deactivate() -> DeactivateOutcome {
         (s.license_key.clone(), s.instance_id.clone())
     };
     match (key, id) {
-        (Some(key), Some(id)) => match post_form(API_DEACTIVATE, &[("license_key", &key), ("instance_id", &id)]) {
+        (Some(key), Some(id)) => match post_form(
+            API_DEACTIVATE,
+            &[("license_key", &key), ("instance_id", &id)],
+        ) {
             Err(NetErr::Offline) => DeactivateOutcome::Offline,
             _ => {
                 clear();
@@ -450,7 +511,12 @@ fn clear() {
     let mut s = write();
     let trial = s.trial_started_at;
     let hw = s.clock_high_water;
-    *s = LicenseState { version: 1, trial_started_at: trial, clock_high_water: hw, ..Default::default() };
+    *s = LicenseState {
+        version: 1,
+        trial_started_at: trial,
+        clock_high_water: hw,
+        ..Default::default()
+    };
     save(&s);
 }
 
@@ -462,8 +528,12 @@ static LAST_NOTIFY: AtomicU64 = AtomicU64::new(0);
 /// user to the in-app Subscription modal (menu bar → License → Subscription).
 pub fn on_blocked() {
     let body = match status() {
-        LicenseStatus::Locked => "Your 7-day trial has ended. Open the menu bar \u{2192} License \u{2192} Subscription to continue.",
-        LicenseStatus::Expired => "Your Whisper Push subscription expired. Open License \u{2192} Subscription to renew.",
+        LicenseStatus::Locked => {
+            "Your 7-day trial has ended. Open the menu bar \u{2192} License \u{2192} Subscription to continue."
+        }
+        LicenseStatus::Expired => {
+            "Your Whisper Push subscription expired. Open License \u{2192} Subscription to renew."
+        }
         LicenseStatus::Disabled => "Your Whisper Push license is no longer active.",
         _ => return, // entitled
     };
@@ -487,7 +557,9 @@ fn throttle(slot: &AtomicU64, t: u64, gap: u64) -> bool {
 /// One-line status for the tray.
 pub fn status_text() -> String {
     match status() {
-        LicenseStatus::Trial { days_left } => format!("Trial: {days_left} day{} left", plural(days_left)),
+        LicenseStatus::Trial { days_left } => {
+            format!("Trial: {days_left} day{} left", plural(days_left))
+        }
         LicenseStatus::Licensed(LicensedKind::Lifetime) => "Licensed \u{2014} Lifetime".into(),
         LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
             match read().expires_at_raw.as_deref().and_then(|s| s.get(0..10)) {
@@ -495,7 +567,10 @@ pub fn status_text() -> String {
                 None => "Licensed \u{2014} Annual".into(),
             }
         }
-        LicenseStatus::GraceOffline { days_left } => format!("Offline \u{2014} {days_left} day{} to reconnect", plural(days_left)),
+        LicenseStatus::GraceOffline { days_left } => format!(
+            "Offline \u{2014} {days_left} day{} to reconnect",
+            plural(days_left)
+        ),
         LicenseStatus::Expired => "Subscription expired \u{2014} renew".into(),
         LicenseStatus::Disabled => "License inactive".into(),
         LicenseStatus::Locked => "Trial expired \u{2014} activate".into(),
@@ -506,7 +581,9 @@ pub fn status_text() -> String {
 pub fn submenu_title() -> String {
     match status() {
         LicenseStatus::Licensed(_) => "License \u{2713}".into(),
-        LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => "License \u{2014} Trial".into(),
+        LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => {
+            "License \u{2014} Trial".into()
+        }
         _ => "\u{26a0} License".into(),
     }
 }
@@ -514,10 +591,18 @@ pub fn submenu_title() -> String {
 /// Machine-readable status (for the CLI / Swift onboarding).
 pub fn status_json() -> String {
     match status() {
-        LicenseStatus::Trial { days_left } => format!("{{\"status\":\"trial\",\"days_left\":{days_left}}}"),
-        LicenseStatus::Licensed(LicensedKind::Lifetime) => "{\"status\":\"licensed\",\"kind\":\"lifetime\"}".into(),
-        LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => "{\"status\":\"licensed\",\"kind\":\"subscription\"}".into(),
-        LicenseStatus::GraceOffline { days_left } => format!("{{\"status\":\"grace_offline\",\"days_left\":{days_left}}}"),
+        LicenseStatus::Trial { days_left } => {
+            format!("{{\"status\":\"trial\",\"days_left\":{days_left}}}")
+        }
+        LicenseStatus::Licensed(LicensedKind::Lifetime) => {
+            "{\"status\":\"licensed\",\"kind\":\"lifetime\"}".into()
+        }
+        LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
+            "{\"status\":\"licensed\",\"kind\":\"subscription\"}".into()
+        }
+        LicenseStatus::GraceOffline { days_left } => {
+            format!("{{\"status\":\"grace_offline\",\"days_left\":{days_left}}}")
+        }
         LicenseStatus::Expired => "{\"status\":\"expired\"}".into(),
         LicenseStatus::Disabled => "{\"status\":\"disabled\"}".into(),
         LicenseStatus::Locked => "{\"status\":\"locked\"}".into(),
@@ -535,7 +620,10 @@ pub fn license_path() -> std::path::PathBuf {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn belongs_to_us(store_id: u64, product_id: u64) -> bool {
@@ -605,7 +693,10 @@ fn earliest_launch(persisted: u64) -> Option<u64> {
         t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
     };
     let dir = crate::config::data_dir();
-    for cand in [mtime(dir.join(".onboarding_done")), mtime(dir)].into_iter().flatten() {
+    for cand in [mtime(dir.join(".onboarding_done")), mtime(dir)]
+        .into_iter()
+        .flatten()
+    {
         min = Some(min.map_or(cand, |m| m.min(cand)));
     }
     min
@@ -697,9 +788,18 @@ mod tests {
 
     #[test]
     fn trial_counts_down_then_locks() {
-        let s = LicenseState { trial_started_at: 1_000_000, ..Default::default() };
-        assert_eq!(evaluate(&s, 1_000_000), LicenseStatus::Trial { days_left: 7 });
-        assert_eq!(evaluate(&s, 1_000_000 + 3 * DAY), LicenseStatus::Trial { days_left: 4 });
+        let s = LicenseState {
+            trial_started_at: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            evaluate(&s, 1_000_000),
+            LicenseStatus::Trial { days_left: 7 }
+        );
+        assert_eq!(
+            evaluate(&s, 1_000_000 + 3 * DAY),
+            LicenseStatus::Trial { days_left: 4 }
+        );
         assert_eq!(evaluate(&s, 1_000_000 + 7 * DAY), LicenseStatus::Locked);
         assert_eq!(evaluate(&s, 1_000_000 + 99 * DAY), LicenseStatus::Locked);
     }
@@ -708,11 +808,20 @@ mod tests {
     fn lifetime_never_expires_and_survives_offline_window() {
         let base = 2_000_000;
         let s = licensed_state(base);
-        assert_eq!(evaluate(&s, base), LicenseStatus::Licensed(LicensedKind::Lifetime));
+        assert_eq!(
+            evaluate(&s, base),
+            LicenseStatus::Licensed(LicensedKind::Lifetime)
+        );
         // Just past revalidation window → grace.
-        assert!(matches!(evaluate(&s, base + REVALIDATE_EVERY + DAY), LicenseStatus::GraceOffline { .. }));
+        assert!(matches!(
+            evaluate(&s, base + REVALIDATE_EVERY + DAY),
+            LicenseStatus::GraceOffline { .. }
+        ));
         // Past the offline grace → locked.
-        assert_eq!(evaluate(&s, base + OFFLINE_GRACE + DAY), LicenseStatus::Locked);
+        assert_eq!(
+            evaluate(&s, base + OFFLINE_GRACE + DAY),
+            LicenseStatus::Locked
+        );
     }
 
     #[test]
@@ -720,7 +829,10 @@ mod tests {
         let base = 3_000_000;
         let mut s = licensed_state(base);
         s.expires_at_unix = Some(base + 30 * DAY);
-        assert!(matches!(evaluate(&s, base), LicenseStatus::Licensed(LicensedKind::Subscription { .. })));
+        assert!(matches!(
+            evaluate(&s, base),
+            LicenseStatus::Licensed(LicensedKind::Subscription { .. })
+        ));
         assert_eq!(evaluate(&s, base + 31 * DAY), LicenseStatus::Expired);
     }
 
@@ -750,8 +862,14 @@ mod tests {
     #[test]
     fn iso_date_parses() {
         assert_eq!(parse_iso_date("1970-01-01"), Some(0));
-        assert_eq!(parse_iso_date("2000-01-01T00:00:00.000000Z"), Some(946_684_800));
-        assert_eq!(parse_iso_date("2000-01-01T12:00:00Z"), Some(946_684_800 + 12 * 3600));
+        assert_eq!(
+            parse_iso_date("2000-01-01T00:00:00.000000Z"),
+            Some(946_684_800)
+        );
+        assert_eq!(
+            parse_iso_date("2000-01-01T12:00:00Z"),
+            Some(946_684_800 + 12 * 3600)
+        );
         assert_eq!(parse_iso_date("garbage"), None);
         assert_eq!(parse_iso_date("2020-13-40"), None);
     }

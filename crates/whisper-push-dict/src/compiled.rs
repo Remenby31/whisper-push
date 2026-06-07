@@ -165,7 +165,11 @@ impl Compiled {
                     starred: e.starred,
                     count: e.count,
                     boost: e.starred || e.source == Source::Manual,
-                    context: e.context.iter().map(|c| crate::normalize::normalize(c)).collect(),
+                    context: e
+                        .context
+                        .iter()
+                        .map(|c| crate::normalize::normalize(c))
+                        .collect(),
                     lang: e.lang.clone(),
                 });
             }
