@@ -150,11 +150,13 @@ class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
 
         case "parakeet-tdt-0.6b-v3-int8":
             let dir = dataDir.appendingPathComponent("parakeet")
-            let base = "https://huggingface.co/nasedkinpv/parakeet-tdt-0.6b-v3-onnx-int8/resolve/main"
+            let base = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"
+            // int8 graphs are self-contained (no external .data sidecar). Saved
+            // under the plain names the Rust loader (parakeet-rs) expects — must
+            // match src/transcribe/parakeet.rs::download_model.
             return [
-                (URL(string: "\(base)/encoder-int8.onnx")!, dir.appendingPathComponent("encoder-model.onnx")),
-                (URL(string: "\(base)/encoder-int8.onnx.data")!, dir.appendingPathComponent("encoder-model.onnx.data")),
-                (URL(string: "\(base)/decoder_joint-int8.onnx")!, dir.appendingPathComponent("decoder_joint-model.onnx")),
+                (URL(string: "\(base)/encoder-model.int8.onnx")!, dir.appendingPathComponent("encoder-model.onnx")),
+                (URL(string: "\(base)/decoder_joint-model.int8.onnx")!, dir.appendingPathComponent("decoder_joint-model.onnx")),
                 (URL(string: "\(base)/vocab.txt")!, dir.appendingPathComponent("vocab.txt")),
             ]
 

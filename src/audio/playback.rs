@@ -20,22 +20,62 @@ pub fn set_output_device(name: &str) {
 
 /// Play a start/stop sound non-blocking.
 pub fn play_sound(name: &str) {
-    let wav_data = match name {
-        "start" => START_SOUND,
-        "stop" => STOP_SOUND,
+    // `gain` boosts the START blip: macOS automatically ducks all audio while an
+    // app opens the mic, and "start" plays at that exact instant — so without a
+    // boost it sounds much quieter than "stop" (which plays after the mic
+    // closes). The two source files are equally loud; this just compensates for
+    // the ducking. Plenty of headroom (the clips peak at ~18% full-scale).
+    let (wav_data, gain) = match name {
+        "start" => (START_SOUND, 4.0f32),
+        // "stop" isn't ducked (the mic is closed by then), so a smaller boost
+        // matches the (boosted-but-ducked) start's perceived loudness.
+        "stop" => (STOP_SOUND, 1.6f32),
         _ => return,
     };
+
+    // macOS, default output: use `afplay` (system audio). The raw cpal output
+    // path swallows the very short "start" blip when the mic input stream opens
+    // at the same instant; afplay is immune to that and handles short clips +
+    // device latency cleanly. We still use cpal when the user picked a specific
+    // output device (afplay can't target one) so that preference isn't lost.
+    #[cfg(target_os = "macos")]
+    {
+        let selected = OUTPUT_DEVICE.read().map(|g| g.clone()).unwrap_or_default();
+        if selected.is_empty() || selected == "auto" {
+            if let Some(path) = extracted_sound_path(name, wav_data) {
+                let _ = std::process::Command::new("/usr/bin/afplay")
+                    .arg("-v")
+                    .arg(format!("{gain}"))
+                    .arg(path)
+                    .spawn();
+                return;
+            }
+        }
+    }
 
     // Spawn a thread to avoid blocking the caller
     let data = wav_data.to_vec();
     std::thread::spawn(move || {
-        if let Err(e) = play_wav_bytes(&data) {
+        if let Err(e) = play_wav_bytes(&data, gain) {
             warn!("Sound playback error: {e}");
         }
     });
 }
 
-fn play_wav_bytes(wav_data: &[u8]) -> Result<()> {
+/// Extract an embedded sound to a file once (so `afplay` can read it). Returns
+/// the cached path, or None if it couldn't be written.
+#[cfg(target_os = "macos")]
+fn extracted_sound_path(name: &str, wav_data: &[u8]) -> Option<std::path::PathBuf> {
+    let dir = crate::config::data_dir().join("sounds");
+    let path = dir.join(format!("{name}.wav"));
+    if !path.exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        std::fs::write(&path, wav_data).ok()?;
+    }
+    Some(path)
+}
+
+fn play_wav_bytes(wav_data: &[u8], gain: f32) -> Result<()> {
     let cursor = std::io::Cursor::new(wav_data);
     let reader = hound::WavReader::new(cursor)?;
     let spec = reader.spec();
@@ -44,11 +84,12 @@ fn play_wav_bytes(wav_data: &[u8]) -> Result<()> {
         hound::SampleFormat::Float => reader
             .into_samples::<f32>()
             .filter_map(|s| s.ok())
+            .map(|s| (s * gain).clamp(-1.0, 1.0))
             .collect(),
         hound::SampleFormat::Int => reader
             .into_samples::<i16>()
             .filter_map(|s| s.ok())
-            .map(|s| s as f32 / i16::MAX as f32)
+            .map(|s| (s as f32 / i16::MAX as f32 * gain).clamp(-1.0, 1.0))
             .collect(),
     };
 

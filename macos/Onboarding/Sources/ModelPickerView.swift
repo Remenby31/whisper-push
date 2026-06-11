@@ -40,7 +40,7 @@ struct ModelPickerView: View {
             ModelInfo(id: "parakeet-int8",
                       name: "Parakeet TDT v3 (int8)",
                       modelFile: "parakeet-tdt-0.6b-v3-int8",
-                      size: "890 MB",
+                      size: "670 MB",
                       warning: nil,
                       alreadyDownloaded: Self.isModelDownloaded("parakeet-tdt-0.6b-v3-int8")),
             ModelInfo(id: "parakeet",

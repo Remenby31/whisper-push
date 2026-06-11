@@ -3,6 +3,7 @@
 
 #[cfg(feature = "parakeet")]
 mod inner {
+    use crate::util::LockSafe;
     use anyhow::{Context, Result};
     use parakeet_rs::{ParakeetTDT, Transcriber};
     use std::path::PathBuf;
@@ -12,42 +13,82 @@ mod inner {
     static PARAKEET: Mutex<Option<ParakeetTDT>> = Mutex::new(None);
 
     pub fn model_dir() -> PathBuf {
+        // Override (testing / advanced users) — point at an alternate model dir.
+        if let Ok(p) = std::env::var("WHISPER_PUSH_PARAKEET_DIR") {
+            return PathBuf::from(p);
+        }
         crate::config::data_dir().join("models").join("parakeet")
     }
 
-    /// Load Parakeet TDT model. Downloads from HuggingFace if not present.
-    pub fn load_model() -> Result<()> {
+    /// Load a Parakeet TDT variant. `model_name` selects the weights:
+    /// `…-int8` → the int8 graphs (~670 MB, self-contained); anything else →
+    /// fp32 (a 42 MB graph + a 2.3 GB `encoder-model.onnx.data` sidecar). int8
+    /// is ~3.8x smaller — far less for the OS to compress/decompress under memory
+    /// pressure (the cause of the slow first-dictation-after-idle) and faster on
+    /// CPU; fp32 is the max-accuracy option.
+    ///
+    /// Both variants share `models/parakeet/` (parakeet-rs wants fixed
+    /// filenames), so only one is present at a time; a `.variant` marker records
+    /// which (absent ⇒ legacy fp32 install). Switching variants re-downloads.
+    pub fn load_model(model_name: &str) -> Result<()> {
         let dir = model_dir();
-
-        if !dir.join("vocab.txt").exists() {
-            info!("Parakeet model not found, downloading...");
-            download_model(&dir)?;
+        let want_int8 = model_name.ends_with("-int8");
+        let variant = if want_int8 { "int8" } else { "fp32" };
+        let on_disk = std::fs::read_to_string(dir.join(".variant"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "fp32".into());
+        if !dir.join("vocab.txt").exists() || on_disk != variant {
+            info!("Parakeet {variant}: downloading...");
+            download_model(&dir, want_int8)?;
+            // int8 graphs are self-contained — drop any leftover fp32 sidecar.
+            if want_int8 {
+                let _ = std::fs::remove_file(dir.join("encoder-model.onnx.data"));
+            }
+            let _ = std::fs::write(dir.join(".variant"), variant);
         }
 
-        info!("Loading Parakeet TDT from {}...", dir.display());
+        info!("Loading Parakeet TDT ({variant}) from {}...", dir.display());
         let parakeet = ParakeetTDT::from_pretrained(&dir, None)
             .map_err(|e| anyhow::anyhow!("Failed to load Parakeet: {e}"))?;
 
-        *PARAKEET.lock().unwrap() = Some(parakeet);
+        *PARAKEET.lock_safe() = Some(parakeet);
         info!("Parakeet model loaded and ready");
         Ok(())
     }
 
     pub fn unload_model() {
-        *PARAKEET.lock().unwrap() = None;
+        *PARAKEET.lock_safe() = None;
         info!("Parakeet model unloaded");
     }
 
     #[allow(dead_code)]
     pub fn is_loaded() -> bool {
-        PARAKEET.lock().unwrap().is_some()
+        PARAKEET.lock_safe().is_some()
+    }
+
+    /// Keep the model's pages resident by running a tiny inference on silence.
+    /// Non-blocking — if a real transcription holds the lock, skip this tick.
+    pub fn warm() {
+        let Ok(mut guard) = PARAKEET.try_lock() else {
+            return;
+        };
+        let Some(parakeet) = guard.as_mut() else {
+            return; // Parakeet isn't the loaded backend
+        };
+        let silence = vec![0.0f32; crate::transcribe::WARM_SAMPLES];
+        let t = std::time::Instant::now();
+        match parakeet.transcribe_samples(silence, 16000, 1, None) {
+            Ok(_) => tracing::debug!("parakeet kept warm ({:.2}s)", t.elapsed().as_secs_f64()),
+            Err(e) => tracing::debug!("parakeet warm failed: {e}"),
+        }
     }
 
     /// Transcribe 16kHz mono f32 audio to text. (Kept for tests; the daemon
     /// uses `transcribe_timed`.)
     #[allow(dead_code)]
     pub fn transcribe(audio: &[f32]) -> Result<String> {
-        let mut guard = PARAKEET.lock().unwrap();
+        let mut guard = PARAKEET.lock_safe();
         let parakeet = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Parakeet model not loaded"))?;
@@ -65,7 +106,7 @@ mod inner {
 
     /// Transcribe and also return per-word timings (for the acoustic dictionary).
     pub fn transcribe_timed(audio: &[f32]) -> Result<(String, Vec<crate::acoustic::WordTiming>)> {
-        let mut guard = PARAKEET.lock().unwrap();
+        let mut guard = PARAKEET.lock_safe();
         let parakeet = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("Parakeet model not loaded"))?;
@@ -115,37 +156,54 @@ mod inner {
         Ok((text, words))
     }
 
-    /// Download Parakeet TDT v3 ONNX model from HuggingFace.
-    /// Required files for ParakeetTDT: encoder + decoder + vocab.
-    fn download_model(dest: &PathBuf) -> Result<()> {
+    /// Download a Parakeet TDT v3 ONNX variant from HuggingFace into `dest`.
+    ///
+    /// int8 graphs are self-contained (no external `.data`); fp32 ships a tiny
+    /// graph + a large `encoder-model.onnx.data` sidecar. Either way we save
+    /// under the fixed filenames parakeet-rs expects (it doesn't look for the
+    /// ".int8.onnx" name); ONNX Runtime executes the quantised ops transparently.
+    fn download_model(dest: &PathBuf, int8: bool) -> Result<()> {
         std::fs::create_dir_all(dest)?;
 
         let api = hf_hub::api::sync::Api::new()?;
         let repo = api.model("istupakov/parakeet-tdt-0.6b-v3-onnx".to_string());
 
-        let files = [
-            "encoder-model.onnx",
-            "encoder-model.onnx.data",
-            "decoder_joint-model.onnx",
-            "vocab.txt",
-        ];
-        for filename in &files {
-            info!("Downloading {filename}...");
+        // (source file on HF, name we save it under)
+        let files: &[(&str, &str)] = if int8 {
+            &[
+                ("encoder-model.int8.onnx", "encoder-model.onnx"),
+                ("decoder_joint-model.int8.onnx", "decoder_joint-model.onnx"),
+                ("vocab.txt", "vocab.txt"),
+            ]
+        } else {
+            &[
+                ("encoder-model.onnx", "encoder-model.onnx"),
+                ("encoder-model.onnx.data", "encoder-model.onnx.data"),
+                ("decoder_joint-model.onnx", "decoder_joint-model.onnx"),
+                ("vocab.txt", "vocab.txt"),
+            ]
+        };
+        for (src_name, dst_name) in files {
+            info!("Downloading {src_name}...");
             let src = repo
-                .get(filename)
-                .with_context(|| format!("Failed to download {filename}"))?;
-            std::fs::copy(&src, dest.join(filename))
-                .with_context(|| format!("Failed to copy {filename}"))?;
+                .get(src_name)
+                .with_context(|| format!("Failed to download {src_name}"))?;
+            std::fs::copy(&src, dest.join(dst_name))
+                .with_context(|| format!("Failed to copy {src_name}"))?;
         }
 
-        info!("Parakeet model downloaded to {}", dest.display());
+        info!(
+            "Parakeet {} model downloaded to {}",
+            if int8 { "int8" } else { "fp32" },
+            dest.display()
+        );
         Ok(())
     }
 }
 
 #[cfg(feature = "parakeet")]
 #[allow(unused_imports)] // Used by integration tests
-pub use inner::{is_loaded, load_model, model_dir, transcribe, transcribe_timed, unload_model};
+pub use inner::{is_loaded, load_model, model_dir, transcribe, transcribe_timed, unload_model, warm};
 
 #[cfg(not(feature = "parakeet"))]
 pub fn transcribe_timed(
@@ -155,11 +213,13 @@ pub fn transcribe_timed(
 }
 
 #[cfg(not(feature = "parakeet"))]
-pub fn load_model() -> anyhow::Result<()> {
+pub fn load_model(_model_name: &str) -> anyhow::Result<()> {
     anyhow::bail!("Parakeet not compiled. Build with --features parakeet")
 }
 #[cfg(not(feature = "parakeet"))]
 pub fn unload_model() {}
+#[cfg(not(feature = "parakeet"))]
+pub fn warm() {}
 #[cfg(not(feature = "parakeet"))]
 pub fn is_loaded() -> bool {
     false

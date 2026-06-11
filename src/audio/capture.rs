@@ -1,3 +1,4 @@
+use crate::util::LockSafe;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use rubato::Resampler;
@@ -39,8 +40,15 @@ impl AudioCapture {
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 let mono = super::downmix_to_mono(data, device_channels);
 
+                // Feed the live mic level to the "listening" pill (cheap RMS).
+                if !mono.is_empty() {
+                    let rms =
+                        (mono.iter().map(|s| s * s).sum::<f32>() / mono.len() as f32).sqrt();
+                    crate::overlay::feed_level(rms);
+                }
+
                 if let Some(ref resampler) = resampler {
-                    let mut acc = resample_buf.lock().unwrap();
+                    let mut acc = resample_buf.lock_safe();
                     acc.extend_from_slice(&mono);
 
                     while acc.len() >= RESAMPLE_CHUNK_SIZE {
@@ -48,13 +56,13 @@ impl AudioCapture {
                         if let Ok(mut r) = resampler.lock() {
                             if let Ok(resampled) = r.process(&[&chunk], None) {
                                 if let Some(channel) = resampled.first() {
-                                    buffer_clone.lock().unwrap().extend_from_slice(channel);
+                                    buffer_clone.lock_safe().extend_from_slice(channel);
                                 }
                             }
                         }
                     }
                 } else {
-                    buffer_clone.lock().unwrap().extend_from_slice(&mono);
+                    buffer_clone.lock_safe().extend_from_slice(&mono);
                 }
             },
             |err| warn!("Audio stream error: {err}"),
@@ -78,7 +86,7 @@ impl AudioCapture {
             let _ = stream.pause();
         }
         self.stream.take();
-        let audio = std::mem::take(&mut *self.buffer.lock().unwrap());
+        let audio = std::mem::take(&mut *self.buffer.lock_safe());
         let duration = audio.len() as f32 / SAMPLE_RATE as f32;
         let rms = if audio.is_empty() {
             0.0

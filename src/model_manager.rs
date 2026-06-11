@@ -4,38 +4,81 @@ use std::path::PathBuf;
 
 /// Available models with their sizes and download sources.
 pub struct ModelInfo {
+    /// Model file / canonical id (also the value stored in `config.model`).
     pub name: &'static str,
-    pub backend: &'static str,
+    /// Short human label for menus (mirrors the onboarding picker).
+    pub label: &'static str,
     pub size_mb: u32,
     pub description: &'static str,
     pub is_downloaded: bool,
 }
 
-/// List all available models and their download status.
+/// List all available models and their download status. This is the single
+/// source of truth for the tray "Engine" dropdown and mirrors the onboarding
+/// model picker (`macos/Onboarding/Sources/ModelPickerView.swift`) — keep the
+/// two in sync (same names, labels, sizes).
 pub fn list_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
-            name: "ggml-large-v3-turbo-q5_0.bin",
-            backend: "whisper",
-            size_mb: 547,
-            description: "Whisper large-v3-turbo Q5 — 99 languages, ~1.2s/10s audio",
-            is_downloaded: whisper_model_path().exists(),
+            name: "parakeet-tdt-0.6b-v3-int8",
+            label: "Parakeet TDT v3 (int8)",
+            size_mb: 670,
+            description: "Parakeet TDT 0.6B int8 — fastest + lightest, 25 EU languages",
+            is_downloaded: parakeet_variant_downloaded(true),
         },
         ModelInfo {
             name: "parakeet-tdt-0.6b-v3",
-            backend: "parakeet",
-            size_mb: 600,
-            description: "Parakeet TDT 0.6B — fastest, 25 EU languages, ~27ms/10s audio",
-            is_downloaded: parakeet_model_dir().join("vocab.txt").exists(),
+            label: "Parakeet TDT v3 (fp32)",
+            size_mb: 2500,
+            description: "Parakeet TDT 0.6B fp32 — highest accuracy, 25 EU languages",
+            is_downloaded: parakeet_variant_downloaded(false),
+        },
+        ModelInfo {
+            name: "ggml-small-q5_1.bin",
+            label: "Whisper Small (q5)",
+            size_mb: 181,
+            description: "Whisper small Q5 — 99 languages, lightweight",
+            is_downloaded: whisper_model_path("ggml-small-q5_1.bin").exists(),
+        },
+        ModelInfo {
+            name: "ggml-large-v3-turbo-q5_0.bin",
+            label: "Whisper Turbo (q5)",
+            size_mb: 550,
+            description: "Whisper large-v3-turbo Q5 — 99 languages, ~1.2s/10s audio",
+            is_downloaded: whisper_model_path("ggml-large-v3-turbo-q5_0.bin").exists(),
         },
         ModelInfo {
             name: "voxtral-q4.gguf",
-            backend: "voxtral-local",
+            label: "Voxtral Realtime",
             size_mb: 2300,
             description: "Voxtral Mini 4B Q4 — streaming, 13 languages, ~400ms/10s audio",
             is_downloaded: voxtral_model_dir().join("voxtral-q4.gguf").exists(),
         },
     ]
+}
+
+/// Is the requested Parakeet variant the one currently on disk? Both variants
+/// share `models/parakeet/` (same filenames); a `.variant` marker file records
+/// which is present (absent ⇒ legacy fp32 install). Mirrors the Swift check.
+fn parakeet_variant_downloaded(want_int8: bool) -> bool {
+    let dir = parakeet_model_dir();
+    if !dir.join("vocab.txt").exists() {
+        return false;
+    }
+    let variant = std::fs::read_to_string(dir.join(".variant"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "fp32".into());
+    if want_int8 {
+        variant == "int8"
+    } else {
+        variant == "fp32"
+    }
+}
+
+/// Look up a model by its `name` (config value).
+pub fn find_model(name: &str) -> Option<ModelInfo> {
+    list_models().into_iter().find(|m| m.name == name)
 }
 
 /// Check which models are downloaded.
@@ -50,10 +93,8 @@ pub fn print_status() {
     }
 }
 
-fn whisper_model_path() -> PathBuf {
-    crate::config::data_dir()
-        .join("models")
-        .join("ggml-large-v3-turbo-q5_0.bin")
+fn whisper_model_path(filename: &str) -> PathBuf {
+    crate::config::data_dir().join("models").join(filename)
 }
 
 fn parakeet_model_dir() -> PathBuf {
@@ -90,26 +131,6 @@ pub fn resolve_backend(model: &str) -> crate::transcribe::Backend {
         "parakeet" => crate::transcribe::Backend::Parakeet,
         "voxtral-local" => crate::transcribe::Backend::VoxtralLocal,
         _ => crate::transcribe::Backend::WhisperLocal(model.to_string()),
-    }
-}
-
-/// Check if the model for a backend is already downloaded.
-pub fn is_model_downloaded(backend: &str) -> bool {
-    match backend {
-        "whisper" => whisper_model_path().exists(),
-        "parakeet" => parakeet_model_dir().join("vocab.txt").exists(),
-        "voxtral-local" => voxtral_model_dir().join("voxtral-q4.gguf").exists(),
-        _ => false,
-    }
-}
-
-/// Get the approximate download size in MB for a backend.
-pub fn model_size_mb(backend: &str) -> u32 {
-    match backend {
-        "whisper" => 547,
-        "parakeet" => 600,
-        "voxtral-local" => 2300,
-        _ => 0,
     }
 }
 
@@ -169,19 +190,29 @@ mod tests {
     }
 
     #[test]
-    fn test_list_models_has_three_entries() {
+    fn test_list_models_mirrors_onboarding() {
         let models = list_models();
-        assert_eq!(models.len(), 3);
-        assert_eq!(models[0].backend, "whisper");
-        assert_eq!(models[1].backend, "parakeet");
-        assert_eq!(models[2].backend, "voxtral-local");
+        // The five models the onboarding picker offers (keep in sync).
+        assert_eq!(models.len(), 5);
+        let names: Vec<&str> = models.iter().map(|m| m.name).collect();
+        assert!(names.contains(&"parakeet-tdt-0.6b-v3-int8"));
+        assert!(names.contains(&"parakeet-tdt-0.6b-v3"));
+        assert!(names.contains(&"ggml-small-q5_1.bin"));
+        assert!(names.contains(&"ggml-large-v3-turbo-q5_0.bin"));
+        assert!(names.contains(&"voxtral-q4.gguf"));
+        // find_model round-trips and the backend is derivable from each name.
+        for m in &models {
+            assert!(find_model(m.name).is_some());
+            assert!(!backend_for_model(m.name).is_empty());
+        }
     }
 
     #[test]
-    fn test_list_models_sizes_positive() {
+    fn test_list_models_fields_nonempty() {
         for m in list_models() {
             assert!(m.size_mb > 0, "Model {} has 0 size", m.name);
             assert!(!m.name.is_empty());
+            assert!(!m.label.is_empty());
             assert!(!m.description.is_empty());
         }
     }

@@ -1,5 +1,9 @@
+use crate::util::LockSafe;
 use crate::state::Event;
+use core_foundation::base::TCFType;
 use crossbeam_channel::Sender;
+use std::cell::Cell;
+use std::ffi::c_void;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info};
@@ -7,6 +11,17 @@ use tracing::{debug, info};
 // CGEvent types
 const K_CG_EVENT_FLAGS_CHANGED: u32 = 12;
 const K_CG_EVENT_KEY_DOWN: u32 = 10;
+
+thread_local! {
+    /// Raw mach-port of the live CGEventTap, so its callback can re-enable it
+    /// when macOS disables the tap (after a timeout or on wake-from-sleep) —
+    /// otherwise the hotkey silently dies after long uptime / sleep.
+    static TAP_PORT: Cell<*const c_void> = const { Cell::new(std::ptr::null()) };
+}
+
+unsafe extern "C" {
+    fn CGEventTapEnable(tap: *const c_void, enable: bool);
+}
 
 // Modifier flags in CGEventFlags
 const CG_EVENT_FLAG_CONTROL: u64 = 1 << 18;
@@ -191,15 +206,15 @@ static CAPTURE_TX: Mutex<Option<Sender<Event>>> = Mutex::new(None);
 
 /// Apply a new hotkey to the running tap immediately (no restart).
 pub fn rebind(hotkey: &str, mode: &str) {
-    *MATCH_CFG.lock().unwrap() = Some(parse_hotkey(hotkey, mode));
+    *MATCH_CFG.lock_safe() = Some(parse_hotkey(hotkey, mode));
     info!("Hotkey rebound: '{hotkey}' ({mode})");
 }
 
 /// Arm capture of the next key combo. `tx` is the channel that receives the
 /// resulting `Event::HotkeyCaptured`.
 pub fn start_capture(tx: Sender<Event>) {
-    *CAPTURE_TX.lock().unwrap() = Some(tx);
-    *CAPTURE_PENDING_MOD.lock().unwrap() = None;
+    *CAPTURE_TX.lock_safe() = Some(tx);
+    *CAPTURE_PENDING_MOD.lock_safe() = None;
     CAPTURING.store(true, Ordering::SeqCst);
     info!("Hotkey capture armed — waiting for a key combo");
 }
@@ -212,7 +227,7 @@ fn try_capture(event_type: u32, key_code: i64, flags: u64) -> Option<(String, St
         let mods = flag_mod_names(flags);
         if !mods.is_empty() {
             if let Some(key) = key_code_to_name(key_code) {
-                *CAPTURE_PENDING_MOD.lock().unwrap() = None;
+                *CAPTURE_PENDING_MOD.lock_safe() = None;
                 let combo = format!("{}+{}", mods.join("+"), key);
                 return Some((combo, "toggle".to_string()));
             }
@@ -221,7 +236,7 @@ fn try_capture(event_type: u32, key_code: i64, flags: u64) -> Option<(String, St
     } else if event_type == K_CG_EVENT_FLAGS_CHANGED {
         if let Some((flag, name)) = modifier_by_keycode(key_code) {
             let pressed = flags & flag != 0;
-            let mut pending = CAPTURE_PENDING_MOD.lock().unwrap();
+            let mut pending = CAPTURE_PENDING_MOD.lock_safe();
             if pressed {
                 *pending = Some(key_code); // remember; commit on release
                 None
@@ -303,11 +318,37 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
             CGEventTapOptions::ListenOnly,
             vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
             |_proxy, event_type, event| {
+                // macOS disables the tap after an internal timeout or on
+                // wake-from-sleep; re-enable it or the hotkey goes dead until
+                // the app is restarted (observed as "stops working after a
+                // while / after standby").
+                if matches!(
+                    event_type,
+                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                ) {
+                    let port = TAP_PORT.with(|p| p.get());
+                    if !port.is_null() {
+                        unsafe { CGEventTapEnable(port, true) };
+                        info!("hotkey tap was disabled by the system — re-enabled");
+                    }
+                    return None;
+                }
                 let raw_type = match event_type {
                     CGEventType::FlagsChanged => K_CG_EVENT_FLAGS_CHANGED,
                     CGEventType::KeyDown => K_CG_EVENT_KEY_DOWN,
                     _ => return None,
                 };
+                // Drop OS key auto-repeat: holding a non-modifier hotkey would
+                // otherwise fire a storm of KeyDown events (repeated toggles /
+                // start-sounds, icon flapping). Modifiers don't auto-repeat, so
+                // hold-mode FlagsChanged is unaffected.
+                if matches!(event_type, CGEventType::KeyDown)
+                    && event.get_integer_value_field(
+                        core_graphics::event::EventField::KEYBOARD_EVENT_AUTOREPEAT,
+                    ) != 0
+                {
+                    return None;
+                }
                 let kc = event.get_integer_value_field(
                     core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
                 );
@@ -319,14 +360,14 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                         CAPTURING.store(false, Ordering::SeqCst);
                         rebind(&hk, &m);
                         hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
-                        if let Some(tx) = CAPTURE_TX.lock().unwrap().as_ref() {
+                        if let Some(tx) = CAPTURE_TX.lock_safe().as_ref() {
                             let _ = tx.send(Event::HotkeyCaptured(hk, m));
                         }
                     }
                     return None;
                 }
 
-                let cfg = match *MATCH_CFG.lock().unwrap() {
+                let cfg = match *MATCH_CFG.lock_safe() {
                     Some(c) => c,
                     None => return None,
                 };
@@ -374,6 +415,10 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
             },
         )
         .expect("Failed to create CGEventTap — check Accessibility permission");
+
+        // Remember the tap's port so the callback can re-enable it if macOS
+        // disables the tap (timeout / wake-from-sleep).
+        TAP_PORT.with(|p| p.set(tap.mach_port.as_concrete_TypeRef() as *const c_void));
 
         info!("CGEventTap created — listening for hotkey events");
 

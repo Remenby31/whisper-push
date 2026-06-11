@@ -23,8 +23,10 @@ pub fn paste_text(text: &str) -> Result<()> {
     // Small delay for clipboard to be ready
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // Simulate paste keystroke
-    simulate_paste()?;
+    // Simulate paste keystroke. Capture the result instead of `?`-ing it so we
+    // ALWAYS restore the user's clipboard below — otherwise a failed keystroke
+    // would leave their clipboard clobbered with the dictated text.
+    let paste_result = simulate_paste();
 
     // Wait for the paste to be consumed
     std::thread::sleep(std::time::Duration::from_millis(150));
@@ -38,6 +40,7 @@ pub fn paste_text(text: &str) -> Result<()> {
         }
     }
 
+    paste_result?;
     info!("Pasted {} chars", text.len());
 
     // Snapshot this field so a later edit can be auto-learned.

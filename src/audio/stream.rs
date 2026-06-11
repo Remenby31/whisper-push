@@ -1,6 +1,7 @@
 //! Streaming audio capture — feeds chunks to a consumer in real-time.
 //! Used for streaming transcription (Voxtral Realtime).
 
+use crate::util::LockSafe;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use crossbeam_channel::Receiver;
 use rubato::Resampler;
@@ -53,7 +54,7 @@ impl StreamingCapture {
                 let mono = super::downmix_to_mono(data, device_channels);
 
                 let samples_16k = if let Some(ref resampler) = resampler {
-                    let mut racc = resample_acc.lock().unwrap();
+                    let mut racc = resample_acc.lock_safe();
                     racc.extend_from_slice(&mono);
 
                     let mut output = Vec::new();
@@ -72,7 +73,7 @@ impl StreamingCapture {
                     mono
                 };
 
-                let mut acc = acc_buf.lock().unwrap();
+                let mut acc = acc_buf.lock_safe();
                 acc.extend_from_slice(&samples_16k);
 
                 while acc.len() >= chunk_size_target {

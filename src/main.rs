@@ -14,6 +14,7 @@ mod license;
 mod model_manager;
 mod notify;
 mod onboarding;
+mod overlay;
 mod paste;
 mod permissions;
 mod report;
@@ -21,6 +22,7 @@ mod state;
 mod transcribe;
 mod tray;
 mod updater;
+mod util;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -937,6 +939,19 @@ mod app {
     use crate::config::Config;
     use anyhow::Result;
 
+    /// Opt the daemon out of macOS App Nap for the whole process lifetime
+    /// (without disabling system sleep, so the Mac still sleeps normally). The
+    /// returned activity token must outlive the app, so we leak it.
+    #[cfg(target_os = "macos")]
+    fn disable_app_nap() {
+        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+        let token = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+            &NSString::from_str("Whisper Push keeps its speech model warm for instant dictation"),
+        );
+        std::mem::forget(token);
+    }
+
     pub fn run(mut cfg: Config) -> Result<()> {
         // Ensure single instance
         let _lock = crate::state::acquire_lock()?;
@@ -949,6 +964,16 @@ mod app {
         crate::acoustic::init();
         // Optional online enrichment (opt-in, default off).
         crate::enrich::set_enabled(cfg.online_enrichment);
+
+        // Keep the speech model resident in RAM during active use, so the first
+        // dictation after a short pause stays instant instead of paying a
+        // multi-second page-in of the (large) model weights.
+        crate::transcribe::spawn_keep_warm();
+        // macOS App Nap throttles background (LSUIElement) apps: it would delay
+        // the keep-warm heartbeat and hasten eviction of the model's pages.
+        // Opt out — without disabling system sleep, so battery is unaffected.
+        #[cfg(target_os = "macos")]
+        disable_app_nap();
 
         // First-launch onboarding. None = wizard exited without finishing
         // (e.g. user closed the window); exit cleanly without marking done.

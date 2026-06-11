@@ -27,6 +27,7 @@ voxtral = ["dep:voxtral-mini-realtime", "dep:burn"]
 parakeet = ["dep:parakeet-rs"]
 
 [dependencies]
+libc = "0.2"             # getrusage (page-fault accounting for cold-start diagnostics)
 # Audio capture & playback
 cpal = "0.15"
 rubato = "0.16"
@@ -94,7 +95,7 @@ whisper-push-acoustic = { path = "crates/whisper-push-acoustic" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSThread", "NSDate", "NSRunLoop"] }
+objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSThread", "NSDate", "NSRunLoop", "NSProcessInfo", "NSTimer", "NSGeometry", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSEvent",
@@ -103,6 +104,14 @@ objc2-app-kit = { version = "0.3", features = [
     "NSImage",
     "NSStatusBar",
     "NSStatusItem",
+    # Floating "listening" pill overlay.
+    "NSResponder",
+    "NSWindow",
+    "NSPanel",
+    "NSView",
+    "NSBox",
+    "NSColor",
+    "NSScreen",
     "block2",
 ] }
 block2 = "0.6"

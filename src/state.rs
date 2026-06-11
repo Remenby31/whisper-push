@@ -1,7 +1,10 @@
+use crate::util::LockSafe;
 use crate::config::Config;
 use anyhow::Result;
 use crossbeam_channel::Sender;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Application states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +56,9 @@ pub enum Event {
     DictChanged,
     /// The license state changed (activate/deactivate) — refresh its submenu
     LicenseChanged,
+    /// Trailing tray-icon refresh: re-apply the current state's icon on the main
+    /// thread after a coalesced burst (see `tray::set_tray_icon`).
+    RefreshTrayIcon,
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
     /// A new version is available (version, download_url)
@@ -80,15 +86,46 @@ impl AppState {
     }
 
     pub fn current(&self) -> State {
-        *self.state.lock().unwrap()
+        *self.state.lock_safe()
     }
 
     pub fn set(&self, new_state: State) {
-        let mut s = self.state.lock().unwrap();
+        let mut s = self.state.lock_safe();
         if *s != new_state {
             *s = new_state;
+            // Stamp when we entered Processing (0 otherwise) so the watchdog can
+            // detect a wedge — a lost Processing→Idle transition that would
+            // otherwise leave the app silently refusing dictations.
+            PROCESSING_SINCE.store(
+                if new_state == State::Processing {
+                    now_secs()
+                } else {
+                    0
+                },
+                Ordering::Relaxed,
+            );
             let _ = self.tx.send(Event::StateChanged(new_state));
         }
+    }
+}
+
+/// Unix-secs since the app entered `Processing` (0 = not processing).
+static PROCESSING_SINCE: AtomicU64 = AtomicU64::new(0);
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// How long (secs) the app has been stuck in `Processing`, or `None` if it isn't
+/// processing. A real transcription finishes in well under 10 s, so a large
+/// value means the state machine wedged (see `tray`'s watchdog).
+pub fn processing_stuck_secs() -> Option<u64> {
+    match PROCESSING_SINCE.load(Ordering::Relaxed) {
+        0 => None,
+        since => Some(now_secs().saturating_sub(since)),
     }
 }
 
