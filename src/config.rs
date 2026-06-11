@@ -36,6 +36,8 @@ pub struct Config {
     /// (Wikipedia). Cold-path only, never per-dictation. Default off (the app is
     /// otherwise 100% local).
     pub online_enrichment: bool,
+    /// Show the floating "listening" pill (live mic waveform) while recording.
+    pub overlay_enabled: bool,
 }
 
 impl Default for Config {
@@ -55,6 +57,7 @@ impl Default for Config {
             check_updates: true,
             dictionary_enabled: true,
             online_enrichment: false,
+            overlay_enabled: true,
         }
     }
 }

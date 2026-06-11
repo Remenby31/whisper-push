@@ -3,6 +3,7 @@
 
 #[cfg(feature = "voxtral")]
 mod inner {
+    use crate::util::LockSafe;
     use anyhow::{Context, Result, bail};
     use burn::backend::Wgpu;
     use burn::tensor::Tensor;
@@ -63,7 +64,7 @@ mod inner {
         let time_embed = TimeEmbedding::new(3072);
         let t_embed = time_embed.embed::<Backend>(6.0, &device);
 
-        *VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()) = Some(VoxtralState {
+        *VOXTRAL.lock_safe() = Some(VoxtralState {
             model,
             tokenizer,
             mel_extractor,
@@ -80,16 +81,16 @@ mod inner {
     }
 
     pub fn is_loaded() -> bool {
-        VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        VOXTRAL.lock_safe().is_some()
     }
 
     #[allow(dead_code)]
     pub fn unload_model() {
-        *VOXTRAL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *VOXTRAL.lock_safe() = None;
     }
 
     pub fn transcribe(audio: &[f32]) -> Result<String> {
-        let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = VOXTRAL.lock_safe();
         let state = guard
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Voxtral not loaded"))?;
@@ -146,6 +147,7 @@ mod inner {
     /// Accumulates audio, re-encodes encoder each chunk (~50ms),
     /// persists decoder KV cache to only decode NEW positions (~5ms/token).
     pub mod streaming {
+        use crate::util::LockSafe;
         use anyhow::Result;
         use tracing::info;
         use voxtral_mini_realtime::audio::AudioBuffer;
@@ -186,7 +188,7 @@ mod inner {
                 return Ok(Vec::new());
             }
 
-            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = VOXTRAL.lock_safe();
             let state = guard
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("Not loaded"))?;
@@ -244,7 +246,7 @@ mod inner {
         }
 
         pub fn finish(session: StreamingSession) -> Result<String> {
-            let guard = VOXTRAL.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = VOXTRAL.lock_safe();
             let state = guard.as_ref().ok_or_else(|| anyhow::anyhow!("Unloaded"))?;
             let all: Vec<i32> = session
                 .generated_tokens

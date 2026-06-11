@@ -9,6 +9,7 @@
 //! Model-agnostic: uses the backend's word timings when available (Parakeet),
 //! else falls back to energy-based segmentation (Whisper/Voxtral/anything).
 
+use crate::util::LockSafe;
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock, RwLock};
 use whisper_push_acoustic::{AcousticStore, fingerprint, segment_by_energy};
@@ -88,7 +89,7 @@ pub fn process(audio: &[f32], raw: &str, words: Vec<WordTiming>, _lang: &str) ->
     };
 
     let corrected = apply_match(audio, raw, &words, _lang);
-    let mut hist = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut hist = HISTORY.lock_safe();
     hist.push_front(LastAudio {
         audio: audio.to_vec(),
         words,
@@ -154,7 +155,7 @@ fn apply_match(audio: &[f32], raw: &str, words: &[WordTiming], lang: &str) -> St
 /// `term`. Fingerprints that word's audio segment and persists it.
 pub fn learn_word(heard: &str, term: &str) -> bool {
     let fp = {
-        let hist = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+        let hist = HISTORY.lock_safe();
         let hn = whisper_push_dict::normalize(heard);
         // Search recent dictations (most recent first) for that spoken word.
         let mut found = None;
@@ -194,7 +195,7 @@ pub fn len() -> usize {
 /// any correction). Used by the e2e self-test to learn the right sound.
 #[allow(dead_code)]
 pub fn last_heard_word() -> Option<String> {
-    let hist = HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+    let hist = HISTORY.lock_safe();
     hist.front()
         .and_then(|l| l.words.first())
         .map(|w| w.text.clone())

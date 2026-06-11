@@ -341,7 +341,7 @@ fn test_whisper_via_backend_dispatch() {
 // ═══════════════════════════════════════════════════════════════
 
 fn test_parakeet_load_unload() {
-    match transcribe::parakeet::load_model() {
+    match transcribe::parakeet::load_model("parakeet-tdt-0.6b-v3-int8") {
         Ok(()) => {
             assert!(transcribe::parakeet::is_loaded());
             transcribe::parakeet::unload_model();
@@ -363,7 +363,7 @@ fn test_parakeet_transcribe_english() {
         }
     };
 
-    if transcribe::parakeet::load_model().is_err() {
+    if transcribe::parakeet::load_model("parakeet-tdt-0.6b-v3-int8").is_err() {
         println!("Parakeet model not downloaded, skipping");
         return;
     }
@@ -384,7 +384,7 @@ fn test_parakeet_transcribe_english() {
 fn test_parakeet_silence() {
     let silence = vec![0.0f32; 48_000];
 
-    if transcribe::parakeet::load_model().is_err() {
+    if transcribe::parakeet::load_model("parakeet-tdt-0.6b-v3-int8").is_err() {
         println!("Parakeet model not downloaded, skipping");
         return;
     }
@@ -429,7 +429,7 @@ fn test_parakeet_performance() {
         }
     };
 
-    if transcribe::parakeet::load_model().is_err() {
+    if transcribe::parakeet::load_model("parakeet-tdt-0.6b-v3-int8").is_err() {
         println!("Parakeet model not downloaded, skipping");
         return;
     }
@@ -736,7 +736,10 @@ fn test_switch_backend_unload_old() {
 
 fn test_all_backends_listed_in_model_manager() {
     let models = model_manager::list_models();
-    let backends: Vec<&str> = models.iter().map(|m| m.backend).collect();
+    let backends: Vec<&str> = models
+        .iter()
+        .map(|m| model_manager::backend_for_model(m.name))
+        .collect();
     assert!(backends.contains(&"whisper"));
     assert!(backends.contains(&"parakeet"));
     assert!(backends.contains(&"voxtral-local"));

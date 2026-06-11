@@ -1,9 +1,11 @@
+use crate::util::LockSafe;
 use crate::audio::capture::AudioCapture;
 use crate::config::Config;
 use crate::state::{AppState, Event, State};
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
@@ -146,7 +148,7 @@ struct MenuItems {
     acc_perm_id: String,
     input_mon_perm_id: String,
     setup_id: String,
-    backend_items: Vec<(MenuItem, String)>, // (item, config value)
+    model_items: Vec<(MenuItem, String)>, // (item, model name = config.model value)
     // Dictionary (adaptive correction)
     dict_submenu: Submenu,
     #[allow(dead_code)]
@@ -183,7 +185,7 @@ impl App {
     }
 
     fn create_tray(&mut self) {
-        let cfg = self.config.lock().unwrap().clone();
+        let cfg = self.config.lock_safe().clone();
 
         // Build menu
         let is_ready = self.state.current() == State::Idle;
@@ -274,70 +276,23 @@ impl App {
 
         // Model selector
         let models = crate::model_manager::list_models();
-        let current_backend = crate::model_manager::backend_for_model(&cfg.model);
-        let parakeet_status = models
-            .iter()
-            .find(|m| m.backend == "parakeet")
-            .map(|m| m.is_downloaded)
-            .unwrap_or(false);
-        let voxtral_status = models
-            .iter()
-            .find(|m| m.backend == "voxtral-local")
-            .map(|m| m.is_downloaded)
-            .unwrap_or(false);
-        let whisper_status = models
-            .iter()
-            .find(|m| m.backend == "whisper")
-            .map(|m| m.is_downloaded)
-            .unwrap_or(false);
-
-        let engine_label =
-            |name: &str, backend_key: &str, downloaded: bool, current: &str| -> String {
-                let active = if backend_key == current {
-                    "\u{25CF} "
-                } else {
-                    "    "
-                }; // ● or spaces
-                let dl = if downloaded { "" } else { " \u{2913}" }; // ⤓ if not downloaded
-                format!("{active}{name}{dl}")
-            };
-
-        let backend_parakeet = MenuItem::new(
-            &engine_label(
-                "Parakeet TDT v3 (600 MB)",
-                "parakeet",
-                parakeet_status,
-                current_backend,
-            ),
-            true,
-            None,
-        );
-        let backend_voxtral_local = MenuItem::new(
-            &engine_label(
-                "Voxtral Realtime 2602 (2.3 GB, streaming)",
-                "voxtral-local",
-                voxtral_status,
-                current_backend,
-            ),
-            true,
-            None,
-        );
-        let backend_whisper = MenuItem::new(
-            &engine_label(
-                "Whisper large-v3-turbo (550 MB)",
-                "whisper",
-                whisper_status,
-                current_backend,
-            ),
-            true,
-            None,
-        );
-
-        // Engine submenu (compact dropdown).
+        // Engine submenu — one entry per model, mirroring the onboarding picker
+        // (model_manager::list_models is the shared source of truth). ● marks the
+        // active model; ⤓ marks one not yet downloaded — clicking it downloads it
+        // on the pipeline thread (LoadModel), then loads it.
         let backend_submenu = Submenu::new("Engine", true);
-        let _ = backend_submenu.append(&backend_parakeet);
-        let _ = backend_submenu.append(&backend_voxtral_local);
-        let _ = backend_submenu.append(&backend_whisper);
+        let mut model_items: Vec<(MenuItem, String)> = Vec::new();
+        for m in &models {
+            let active = if m.name == cfg.model {
+                "\u{25CF} "
+            } else {
+                "    "
+            };
+            let dl = if m.is_downloaded { "" } else { " \u{2913}" };
+            let item = MenuItem::new(format!("{active}{}{dl}", m.label), true, None);
+            let _ = backend_submenu.append(&item);
+            model_items.push((item, m.name.to_string()));
+        }
 
         // Toggles
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
@@ -511,11 +466,7 @@ impl App {
             input_mon_perm_item,
             perms_submenu,
             warn_item,
-            backend_items: vec![
-                (backend_parakeet, "parakeet".into()),
-                (backend_voxtral_local, "voxtral-local".into()),
-                (backend_whisper, "whisper".into()),
-            ],
+            model_items,
             update_item,
             report_item,
             dict_submenu,
@@ -623,7 +574,7 @@ impl App {
                 );
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 set_tray_icon(&self.tray, State::Idle);
-                if self.config.lock().unwrap().notifications {
+                if self.config.lock_safe().notifications {
                     crate::notify::send("Whisper Push", "Model loaded and ready!");
                 }
                 info!("Ready");
@@ -655,7 +606,7 @@ impl App {
                 }
                 if id == &mi.test_id {
                     // Test: record 3 seconds + transcribe + show result
-                    let cfg = self.config.lock().unwrap().clone();
+                    let cfg = self.config.lock_safe().clone();
                     std::thread::spawn(move || {
                         info!("=== TEST: Recording 3 seconds... ===");
                         crate::notify::send("Whisper Push", "Recording 3 seconds...");
@@ -817,19 +768,19 @@ impl App {
                     return;
                 }
                 if id == &mi.notif_id {
-                    let mut c = self.config.lock().unwrap();
+                    let mut c = self.config.lock_safe();
                     c.notifications = !c.notifications;
                     let _ = c.save();
                     return;
                 }
                 if id == &mi.sound_id {
-                    let mut c = self.config.lock().unwrap();
+                    let mut c = self.config.lock_safe();
                     c.sound_feedback = !c.sound_feedback;
                     let _ = c.save();
                     return;
                 }
                 if id == &mi.debug_id {
-                    let mut c = self.config.lock().unwrap();
+                    let mut c = self.config.lock_safe();
                     c.debug = !c.debug;
                     let _ = c.save();
                     return;
@@ -869,7 +820,7 @@ impl App {
                     return;
                 }
                 if id == &mi.dict_enabled_id {
-                    let mut c = self.config.lock().unwrap();
+                    let mut c = self.config.lock_safe();
                     c.dictionary_enabled = !c.dictionary_enabled;
                     let on = c.dictionary_enabled;
                     let _ = c.save();
@@ -918,7 +869,7 @@ impl App {
                 }
                 for (item_id, hotkey, mode) in &mi.hotkey_ids {
                     if id == item_id {
-                        let mut c = self.config.lock().unwrap();
+                        let mut c = self.config.lock_safe();
                         c.hotkey = hotkey.clone();
                         c.hotkey_mode = mode.clone();
                         let _ = c.save();
@@ -943,7 +894,7 @@ impl App {
                 }
                 for (item_id, name) in &mi.input_ids {
                     if id == item_id {
-                        let mut c = self.config.lock().unwrap();
+                        let mut c = self.config.lock_safe();
                         c.input_device = name.clone();
                         let _ = c.save();
                         for (item, n) in &mi.input_device_items {
@@ -955,7 +906,7 @@ impl App {
                 }
                 for (item_id, name) in &mi.output_ids {
                     if id == item_id {
-                        let mut c = self.config.lock().unwrap();
+                        let mut c = self.config.lock_safe();
                         c.output_device = name.clone();
                         let _ = c.save();
                         crate::audio::playback::set_output_device(name);
@@ -966,40 +917,36 @@ impl App {
                         return;
                     }
                 }
-                // Backend selection
-                for (item, backend_value) in &mi.backend_items {
+                // Model selection — `id` matches a model row in the Engine submenu.
+                for (item, model_name) in &mi.model_items {
                     if id == &item.id().0 {
-                        // Save model in config (backend is derived automatically)
-                        let model_name = crate::model_manager::model_for_backend(backend_value);
-                        let mut c = self.config.lock().unwrap();
-                        c.model = model_name.to_string();
-                        let _ = c.save();
-                        drop(c);
-                        // Update ● indicator and remove ⤓ download icon
-                        for (bi, bv) in &mi.backend_items {
-                            let current_text = bi.text();
-                            let stripped = current_text
-                                .trim_start_matches('\u{25CF}')
-                                .trim_start()
-                                .trim_end_matches('\u{2913}')
-                                .trim_end();
-                            if bv == backend_value {
-                                bi.set_text(&format!("\u{25CF} {stripped}"));
-                            } else {
-                                bi.set_text(&format!("    {stripped}"));
+                        {
+                            let mut c = self.config.lock_safe();
+                            c.model = model_name.clone();
+                            let _ = c.save();
+                        }
+                        // Re-render every row: ● on the picked model, ⤓ on any not
+                        // (yet) downloaded — recomputed from the live model list.
+                        let models = crate::model_manager::list_models();
+                        for (bi, bv) in &mi.model_items {
+                            if let Some(m) = models.iter().find(|m| m.name == bv.as_str()) {
+                                let active = if bv == model_name { "\u{25CF} " } else { "    " };
+                                let dl = if m.is_downloaded { "" } else { " \u{2913}" };
+                                bi.set_text(format!("{active}{}{dl}", m.label));
                             }
                         }
-
-                        // Send LoadModel to pipeline thread — it handles unloading
-                        // old models and loading the new one on its own thread
-                        // (required for WGPU/Metal same-thread constraint).
+                        // Send LoadModel to the pipeline thread — it unloads the old
+                        // model and loads (downloading if needed) the new one on its
+                        // own thread (WGPU/Metal same-thread constraint).
                         if let Some(ref tx) = self.pipeline_tx {
-                            let _ = tx.send(Event::LoadModel(model_name.to_string()));
+                            let _ = tx.send(Event::LoadModel(model_name.clone()));
                         }
-                        crate::notify::send(
-                            "Whisper Push",
-                            &format!("Loading {}...", backend_value),
-                        );
+                        let label = models
+                            .iter()
+                            .find(|m| m.name == model_name.as_str())
+                            .map(|m| m.label)
+                            .unwrap_or(model_name.as_str());
+                        crate::notify::send("Whisper Push", &format!("Loading {label}..."));
                         return;
                     }
                 }
@@ -1011,14 +958,14 @@ impl App {
                         crate::license::on_blocked();
                         return;
                     }
-                    let device = self.config.lock().unwrap().input_device.clone();
+                    let device = self.config.lock_safe().input_device.clone();
                     match AudioCapture::start(&device) {
                         Ok(cap) => {
-                            *self.capture.lock().unwrap() = Some(cap);
+                            *self.capture.lock_safe() = Some(cap);
                             self.state.set(State::Recording);
                             mi.toggle_item.set_text("Stop & Transcribe");
                             set_tray_icon(&self.tray, State::Recording);
-                            if self.config.lock().unwrap().sound_feedback {
+                            if self.config.lock_safe().sound_feedback {
                                 crate::audio::playback::play_sound("start");
                             }
                         }
@@ -1037,24 +984,29 @@ impl App {
                 self.state.set(State::Recording);
                 mi.toggle_item.set_text("Recording\u{2026}");
                 set_tray_icon(&self.tray, State::Recording);
+                crate::overlay::set_state(crate::overlay::OverlayState::Recording);
             }
 
             Event::Transcribed(text) => {
-                if let Err(e) = crate::paste::paste_text(&text) {
-                    tracing::error!("Paste failed: {e}");
-                }
-                // No per-dictation notification — it's noise. Notifications are
-                // reserved for meaningful events (learned a word, errors).
-                self.state.set(State::Idle);
-                mi.toggle_item.set_text("Start Recording");
-                mi.toggle_item.set_enabled(true);
-                set_tray_icon(&self.tray, State::Idle);
+                // Paste OFF the UI thread: paste_text blocks ~330 ms (clipboard
+                // settle + AX read + restore) and would otherwise freeze the
+                // tray/menu/hotkey event loop on every dictation. Stays in
+                // Processing until the paste completes, then the StateChanged
+                // handler resets the UI to Idle (single source of truth — no
+                // per-dictation notification, that's noise).
+                let tx = self.state.tx.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = crate::paste::paste_text(&text) {
+                        tracing::error!("Paste failed: {e}");
+                    }
+                    let _ = tx.send(Event::StateChanged(State::Idle));
+                });
             }
 
             Event::HotkeyCaptured(hotkey, mode) => {
                 info!("Custom hotkey captured: '{hotkey}' ({mode})");
                 {
-                    let mut c = self.config.lock().unwrap();
+                    let mut c = self.config.lock_safe();
                     c.hotkey = hotkey.clone();
                     c.hotkey_mode = mode.clone();
                     let _ = c.save();
@@ -1148,7 +1100,7 @@ impl App {
                     .set_text(&format!("\u{2b06} Update to v{version}"));
                 mi.update_item.set_enabled(true);
                 self.pending_update = Some((version.clone(), url.clone()));
-                if self.config.lock().unwrap().notifications {
+                if self.config.lock_safe().notifications {
                     crate::notify::send(
                         "Whisper Push",
                         &format!("Version {version} available! Click the menu to update."),
@@ -1165,9 +1117,18 @@ impl App {
                 }
             }
 
+            Event::RefreshTrayIcon => {
+                // Trailing edge of a coalesced burst — re-apply the true state.
+                set_tray_icon(&self.tray, self.state.current());
+            }
+
             Event::StateChanged(s) => {
                 self.state.set(s);
                 set_tray_icon(&self.tray, s); // also refreshes the tooltip
+                crate::overlay::set_state(match s {
+                    State::Processing => crate::overlay::OverlayState::Processing,
+                    _ => crate::overlay::OverlayState::Idle, // Idle / Loading
+                });
                 // Keep the toggle item in sync for every state (Recording is
                 // owned by its dedicated arm above). Matters most when the
                 // hotkey — not the menu — drives the transition.
@@ -1202,7 +1163,7 @@ impl App {
         mi.toggle_item.set_enabled(false);
         set_tray_icon(&self.tray, State::Processing);
 
-        if self.config.lock().unwrap().sound_feedback {
+        if self.config.lock_safe().sound_feedback {
             crate::audio::playback::play_sound("stop");
         }
 
@@ -1222,7 +1183,7 @@ impl App {
         }
 
         let tx = self.state.tx.clone();
-        let cfg = self.config.lock().unwrap().clone();
+        let cfg = self.config.lock_safe().clone();
         let backend = crate::model_manager::resolve_backend(&cfg.model);
         std::thread::spawn(move || {
             crate::dictionary::update_session_context(&cfg.language);
@@ -1358,11 +1319,50 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
     // EventLoopProxy wake-ups cause macOS Tahoe to close the tray menu (Apple bug).
     // Instead, we use WaitUntil(100ms) so about_to_wait is called periodically.
 
+    // Sender for the coalesced trailing tray-icon refresh (see set_tray_icon).
+    let _ = TRAY_TX.set(state.tx.clone());
+
+    // Safety net against a wedged state machine (a lost Processing→Idle
+    // transition leaves the app silently refusing dictations — observed in the
+    // wild). Force Idle if Processing persists far longer than any real
+    // transcription could take.
+    spawn_state_watchdog(state.tx.clone());
+
+    // Floating "listening" pill — created hidden on the main thread now; shown
+    // with a live citron waveform while recording.
+    crate::overlay::set_enabled(state.config.overlay_enabled);
+    crate::overlay::init();
+
     let mut app = App::new(state, rx);
 
     event_loop.run_app(&mut app)?;
 
     Ok(())
+}
+
+/// Poll interval for the state watchdog.
+const WATCHDOG_TICK: Duration = Duration::from_secs(10);
+/// Force Idle if `Processing` has lasted longer than this — a real transcription
+/// (even a cold-start page-in) finishes in well under 10 s, so this only ever
+/// fires on a genuine wedge, never on a legitimately slow dictation.
+const WATCHDOG_MAX_PROCESSING: u64 = 30;
+
+/// Recover from a wedged state machine: if the app is stuck in `Processing` with
+/// no transcription actually progressing, force it back to `Idle` so it can't
+/// silently refuse all further dictations.
+fn spawn_state_watchdog(tx: Sender<Event>) {
+    std::thread::Builder::new()
+        .name("state-watchdog".into())
+        .spawn(move || loop {
+            std::thread::sleep(WATCHDOG_TICK);
+            if let Some(secs) = crate::state::processing_stuck_secs() {
+                if secs >= WATCHDOG_MAX_PROCESSING {
+                    warn!("state watchdog: stuck in Processing for {secs}s — forcing Idle");
+                    let _ = tx.send(Event::StateChanged(State::Idle));
+                }
+            }
+        })
+        .ok();
 }
 
 /// Autonomous pipeline: listens for hotkey events, captures audio,
@@ -1385,7 +1385,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 if recording.load(Ordering::Relaxed) {
                     continue;
                 }
-                let cfg = config.lock().unwrap();
+                let cfg = config.lock_safe();
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
                 let sound_feedback = cfg.sound_feedback;
@@ -1479,7 +1479,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
 
                                     // Stop capture and feed remaining
                                     drop(stream_capture);
-                                    if cfg2.lock().unwrap().sound_feedback {
+                                    if cfg2.lock_safe().sound_feedback {
                                         crate::audio::playback::play_sound("stop");
                                     }
 
@@ -1541,7 +1541,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 }
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
-                        *capture.lock().unwrap() = Some(cap);
+                        *capture.lock_safe() = Some(cap);
                         recording.store(true, Ordering::Relaxed);
                         // Tell the UI thread so the menu-bar icon turns citron —
                         // without this the icon only updated on menu-driven recording.
@@ -1571,13 +1571,13 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                         crate::license::on_blocked();
                         continue;
                     }
-                    let device = config.lock().unwrap().input_device.clone();
+                    let device = config.lock_safe().input_device.clone();
                     match crate::audio::capture::AudioCapture::start(&device) {
                         Ok(cap) => {
-                            *capture.lock().unwrap() = Some(cap);
+                            *capture.lock_safe() = Some(cap);
                             recording.store(true, Ordering::Relaxed);
                             let _ = ui_tx.send(Event::StateChanged(State::Recording));
-                            if config.lock().unwrap().sound_feedback {
+                            if config.lock_safe().sound_feedback {
                                 crate::audio::playback::play_sound("start");
                             }
                             info!("Recording (toggle)...");
@@ -1606,17 +1606,17 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
 
                 let backend = crate::model_manager::backend_for_model(&model_name);
 
-                // Check if model needs downloading and notify user
-                let needs_download = !crate::model_manager::is_model_downloaded(backend);
-                if needs_download {
-                    let size = crate::model_manager::model_size_mb(backend);
-                    crate::notify::send(
-                        "Whisper Push",
-                        &format!(
-                            "Downloading {} (~{}MB)... This may take a few minutes.",
-                            backend, size
-                        ),
-                    );
+                // Check if this specific model needs downloading and notify user.
+                if let Some(info) = crate::model_manager::find_model(&model_name) {
+                    if !info.is_downloaded {
+                        crate::notify::send(
+                            "Whisper Push",
+                            &format!(
+                                "Downloading {} (~{}MB)... This may take a few minutes.",
+                                info.label, info.size_mb
+                            ),
+                        );
+                    }
                 }
 
                 let load_result = match backend {
@@ -1624,7 +1624,7 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                         let dir = crate::config::data_dir().join("models").join("voxtral");
                         crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
                     }
-                    "parakeet" => crate::transcribe::parakeet::load_model(),
+                    "parakeet" => crate::transcribe::parakeet::load_model(&model_name),
                     _ => crate::transcribe::load_model(&model_name),
                 };
 
@@ -1656,7 +1656,65 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
     }
 }
 
+/// Minimum interval between status-item pushes. macOS ControlCenter's
+/// status-item XPC connection aborts the whole process (SIGABRT in
+/// `_xpc_serializer_pack`, queue `com.apple.controlcenter.statusitems`) when
+/// flooded with rapid icon updates — e.g. a hotkey/key-repeat storm flapping
+/// Recording↔Idle several times a second. We dedupe identical states and
+/// coalesce bursts to at most one push per interval.
+const TRAY_MIN_INTERVAL: Duration = Duration::from_millis(150);
+
+struct TrayThrottle {
+    last_state: Option<State>,
+    last_push: Option<Instant>,
+    flush_scheduled: bool,
+}
+static TRAY_THROTTLE: Mutex<TrayThrottle> = Mutex::new(TrayThrottle {
+    last_state: None,
+    last_push: None,
+    flush_scheduled: false,
+});
+/// Event sender used to re-apply the final icon after a coalesced burst (set
+/// once in `run`). The push itself always happens on the main thread.
+static TRAY_TX: OnceLock<Sender<Event>> = OnceLock::new();
+
 fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
+    // Dedupe + coalesce to protect the ControlCenter status-item XPC (a flood of
+    // updates crashes the process). Only ever called on the main thread, so the
+    // throttle state needs no cross-thread coordination beyond the mutex.
+    {
+        let mut t = TRAY_THROTTLE.lock_safe();
+        if t.last_state == Some(state) {
+            t.flush_scheduled = false; // settled on this state
+            return;
+        }
+        let now = Instant::now();
+        let too_soon = t
+            .last_push
+            .is_some_and(|p| now.duration_since(p) < TRAY_MIN_INTERVAL);
+        if too_soon {
+            // Mid-burst: skip this push but ensure a single trailing refresh
+            // re-applies the final state shortly (on the main thread).
+            if !t.flush_scheduled {
+                t.flush_scheduled = true;
+                if let Some(tx) = TRAY_TX.get() {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(TRAY_MIN_INTERVAL);
+                        let _ = tx.send(Event::RefreshTrayIcon);
+                    });
+                }
+            }
+            return;
+        }
+        t.last_state = Some(state);
+        t.last_push = Some(now);
+        t.flush_scheduled = false;
+    }
+    set_tray_icon_now(tray, state);
+}
+
+fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
     // One glyph, four states — only colour/opacity change (see `glyph_icon`),
     // so the icon never shifts size or shape. All states except Recording are
     // macOS templates (monochrome, auto-adapt: white on a dark menu bar, black
@@ -1689,11 +1747,23 @@ fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
     };
     if let Some(tray) = tray {
         if let Some(icon) = glyph_icon(style) {
-            let _ = tray.set_icon(Some(icon));
+            // Set the image AND its template flag atomically. macOS renders a
+            // template image (the glyph is pure black + alpha) in the menu bar's
+            // contrasting label colour automatically — black on a light bar,
+            // white on a dark one — exactly like native menu-bar icons. Doing it
+            // in one call avoids the stale-flag bug of `set_icon` followed by a
+            // separate `set_icon_as_template` (where switching to the coloured
+            // Recording icon left the template state inconsistent). Recording
+            // passes `is_template = false` so it keeps its citron colour.
+            #[cfg(target_os = "macos")]
+            let _ = tray.set_icon_with_as_template(Some(icon), is_template);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = is_template; // template is a macOS-only concept
+                let _ = tray.set_icon(Some(icon));
+            }
         }
         let _ = tray.set_tooltip(Some(tooltip));
-        #[cfg(target_os = "macos")]
-        tray.set_icon_as_template(is_template);
     }
 }
 
@@ -1702,7 +1772,7 @@ fn stop_and_transcribe(
     config: &Arc<Mutex<Config>>,
     capture: &Arc<Mutex<Option<crate::audio::capture::AudioCapture>>>,
 ) {
-    let cfg = config.lock().unwrap().clone();
+    let cfg = config.lock_safe().clone();
     if cfg.sound_feedback {
         crate::audio::playback::play_sound("stop");
     }
@@ -1733,22 +1803,9 @@ fn stop_and_transcribe(
     crate::dictionary::update_session_context(&cfg.language);
 
     let start = std::time::Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend)
-    }));
-    let result = match result {
-        Ok(r) => r,
-        Err(e) => {
-            let msg = if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else {
-                "unknown panic".into()
-            };
-            Err(anyhow::anyhow!("Transcription panicked: {msg}"))
-        }
-    };
+    // Panics are already caught inside transcribe_with_backend (the choke point)
+    // and returned as Err, so no extra catch_unwind is needed here.
+    let result = crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend);
     match result {
         Ok(text) if !text.is_empty() => {
             info!(

@@ -6,6 +6,7 @@
 //! (`whisper_push_dict::finalize_and_record`) is called straight from
 //! `transcribe::transcribe_with_backend`.
 
+use crate::util::LockSafe;
 use std::path::PathBuf;
 
 // Re-export the management API so callers can use `dictionary::…`.
@@ -140,7 +141,7 @@ pub fn arm_correction_capture_inner(spawn_timer: bool) {
                     "auto-capture: focused field exposes no text via Accessibility \
                      (this app may not support it — use 'Correct Last Dictation' instead)"
                 );
-                *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                *PENDING.lock_safe() = None;
             }
         }
     }
@@ -162,12 +163,12 @@ pub fn arm_with_baseline(baseline: String, lang: String, spawn_timer: bool) {
              (looks like a terminal scroll-back, not an editable dictation)",
             baseline.len()
         );
-        *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *PENDING.lock_safe() = None;
         return;
     }
     tracing::info!("auto-capture: armed (field has {} chars)", baseline.len());
-    *LAST_POLLED.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some((baseline, lang));
+    *LAST_POLLED.lock_safe() = None;
+    *PENDING.lock_safe() = Some((baseline, lang));
     if spawn_timer {
         // Poll the focused field a few times instead of one fixed 12 s read, so
         // an in-place edit is caught while the user is still in the field —
@@ -178,7 +179,7 @@ pub fn arm_with_baseline(baseline: String, lang: String, spawn_timer: bool) {
         std::thread::spawn(|| {
             for _ in 0..POLL_TICKS {
                 std::thread::sleep(POLL_INTERVAL);
-                if PENDING.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+                if PENDING.lock_safe().is_none() {
                     return; // already captured (by a paste or an earlier tick)
                 }
                 #[cfg(target_os = "macos")]
@@ -200,7 +201,7 @@ fn poll_for_edit() {
         return; // can't read right now — keep waiting
     };
     let baseline = {
-        let g = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+        let g = PENDING.lock_safe();
         match &*g {
             Some((b, _)) => b.clone(),
             None => return,
@@ -212,7 +213,7 @@ fn poll_for_edit() {
     // Debounce: learn only once the edit has settled (same as the previous tick),
     // so an erase-then-retype isn't captured at the half-deleted intermediate.
     let settled = {
-        let mut last = LAST_POLLED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST_POLLED.lock_safe();
         let same = last.as_deref() == Some(current.as_str());
         *last = Some(current.clone());
         same
@@ -245,7 +246,7 @@ pub fn capture_pending_correction() {
         let Some(current) = ax::focused_text() else {
             tracing::info!("auto-capture: can't read the field now — skipped");
             // Drop the pending snapshot: we can't diff against it.
-            *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *PENDING.lock_safe() = None;
             return;
         };
         capture_with_current(&current);
@@ -303,7 +304,7 @@ fn trim_to_edit_region(baseline: &str, current: &str) -> Option<(String, String)
 /// auto-learn any punctual fix. Production feeds a direct-AX read; the autonomous
 /// test feeds a System-Events read — identical from here down.
 pub fn capture_with_current(current: &str) {
-    let Some((baseline, lang)) = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+    let Some((baseline, lang)) = PENDING.lock_safe().take() else {
         return; // nothing armed, or already captured
     };
     if current == baseline {
