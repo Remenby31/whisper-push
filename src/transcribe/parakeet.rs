@@ -17,7 +17,7 @@ mod inner {
         if let Ok(p) = std::env::var("WHISPER_PUSH_PARAKEET_DIR") {
             return PathBuf::from(p);
         }
-        crate::config::data_dir().join("models").join("parakeet")
+        crate::config::parakeet_dir()
     }
 
     /// Load a Parakeet TDT variant. `model_name` selects the weights:
@@ -203,7 +203,9 @@ mod inner {
 
 #[cfg(feature = "parakeet")]
 #[allow(unused_imports)] // Used by integration tests
-pub use inner::{is_loaded, load_model, model_dir, transcribe, transcribe_timed, unload_model, warm};
+pub use inner::{
+    is_loaded, load_model, model_dir, transcribe, transcribe_timed, unload_model, warm,
+};
 
 #[cfg(not(feature = "parakeet"))]
 pub fn transcribe_timed(
@@ -230,5 +232,5 @@ pub fn transcribe(_audio: &[f32]) -> anyhow::Result<String> {
 }
 #[cfg(not(feature = "parakeet"))]
 pub fn model_dir() -> std::path::PathBuf {
-    crate::config::data_dir().join("models").join("parakeet")
+    crate::config::parakeet_dir()
 }

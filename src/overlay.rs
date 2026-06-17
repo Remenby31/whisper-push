@@ -36,7 +36,6 @@ fn level() -> f32 {
     f32::from_bits(LEVEL.load(Ordering::Relaxed))
 }
 
-#[allow(dead_code)]
 fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -59,6 +58,13 @@ pub fn init() {
 
 /// Drive the pill from the app state machine (main thread).
 pub fn set_state(state: OverlayState) {
+    // Respect the user's overlay toggle (config `overlay_enabled` / tray): when
+    // disabled, the pill must never appear, whatever the app state.
+    let state = if is_enabled() {
+        state
+    } else {
+        OverlayState::Idle
+    };
     #[cfg(target_os = "macos")]
     macos::set_state(state);
     #[cfg(not(target_os = "macos"))]
@@ -67,12 +73,12 @@ pub fn set_state(state: OverlayState) {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{level, OverlayState};
-    use objc2::rc::Retained;
+    use super::{OverlayState, level};
     use objc2::MainThreadMarker;
+    use objc2::rc::Retained;
     use objc2_app_kit::{
-        NSBackingStoreType, NSBox, NSBoxType, NSColor, NSPanel, NSScreen, NSTitlePosition, NSView,
-        NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSBackingStoreType, NSBox, NSBoxType, NSColor, NSEvent, NSPanel, NSScreen, NSTitlePosition,
+        NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSTimer};
     use std::cell::RefCell;
@@ -113,7 +119,12 @@ mod macos {
         NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a)
     }
 
-    fn make_box(mtm: MainThreadMarker, frame: NSRect, color: &NSColor, radius: f64) -> Retained<NSBox> {
+    fn make_box(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        color: &NSColor,
+        radius: f64,
+    ) -> Retained<NSBox> {
         let b = NSBox::initWithFrame(mtm.alloc(), frame);
         b.setBoxType(NSBoxType::Custom);
         b.setTitlePosition(NSTitlePosition::NoTitle);
@@ -175,7 +186,10 @@ mod macos {
         let mut bars = Vec::with_capacity(BAR_COUNT);
         for i in 0..BAR_COUNT {
             let h = usable * BAR_MIN;
-            let frame = NSRect::new(NSPoint::new(bar_x(i), (PILL_H - h) / 2.0), NSSize::new(BAR_W, h));
+            let frame = NSRect::new(
+                NSPoint::new(bar_x(i), (PILL_H - h) / 2.0),
+                NSSize::new(BAR_W, h),
+            );
             let bar = make_box(mtm, frame, &citron, BAR_W / 2.0);
             root.addSubview(&bar);
             bars.push(bar);
@@ -237,12 +251,34 @@ mod macos {
         }
     }
 
+    /// The screen the user is actually working on.
+    ///
+    /// A menu-bar app has no key window of its own, so `mainScreen` resolves to
+    /// the menu-bar screen — which in a multi-monitor / clamshell setup (lid
+    /// closed, working on an external display) is not necessarily the one the
+    /// user is looking at. The mouse cursor is the reliable proxy: pick the
+    /// screen whose frame contains it. `mouseLocation` and `frame` share the
+    /// same global coordinate space (origin = bottom-left of the primary
+    /// display), so containment is a direct test. Falls back to `mainScreen`
+    /// then the first attached screen so the pill is always placed.
+    fn active_screen(mtm: MainThreadMarker) -> Option<Retained<NSScreen>> {
+        let mouse = NSEvent::mouseLocation();
+        let screens = NSScreen::screens(mtm);
+        for screen in screens.iter() {
+            let f = screen.frame();
+            if mouse.x >= f.origin.x
+                && mouse.x < f.origin.x + f.size.width
+                && mouse.y >= f.origin.y
+                && mouse.y < f.origin.y + f.size.height
+            {
+                return Some(screen);
+            }
+        }
+        NSScreen::mainScreen(mtm).or_else(|| screens.firstObject())
+    }
+
     fn reposition(p: &Pill, mtm: MainThreadMarker) {
-        // A menu-bar app often has no key window, so `mainScreen` can be nil —
-        // fall back to the primary screen so the pill is always placed (not left
-        // stuck at the bottom-left origin).
-        let screen = NSScreen::mainScreen(mtm).or_else(|| NSScreen::screens(mtm).firstObject());
-        let Some(screen) = screen else {
+        let Some(screen) = active_screen(mtm) else {
             return;
         };
         let frame = screen.frame();
@@ -300,14 +336,17 @@ mod macos {
             for i in 0..p.bars.len() {
                 let prox = 1.0 - (i as f64 - center).abs() / (center + 1.0); // centre taller
                 let wobble = 0.6 + 0.4 * (p.phase + i as f64 * 0.9).sin();
-                let target =
-                    (BAR_MIN + (1.0 - BAR_MIN) * amp * (0.55 + 0.45 * prox) * wobble).clamp(BAR_MIN, 1.0);
+                let target = (BAR_MIN + (1.0 - BAR_MIN) * amp * (0.55 + 0.45 * prox) * wobble)
+                    .clamp(BAR_MIN, 1.0);
                 p.smooth[i] += (target - p.smooth[i]) * 0.35;
                 let h = (p.smooth[i] * usable).max(BAR_W * s);
                 let w = BAR_W * s;
                 // bar centre, scaled around the pill centre
                 let bx = cx + (bar_x(i) + BAR_W / 2.0 - cx) * s - w / 2.0;
-                p.bars[i].setFrame(NSRect::new(NSPoint::new(bx, cy - h / 2.0), NSSize::new(w, h)));
+                p.bars[i].setFrame(NSRect::new(
+                    NSPoint::new(bx, cy - h / 2.0),
+                    NSSize::new(w, h),
+                ));
                 p.bars[i].setCornerRadius(w / 2.0);
             }
         });

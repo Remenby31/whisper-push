@@ -75,6 +75,11 @@ fn zip_asset_name() -> &'static str {
 pub fn check_for_update() -> anyhow::Result<Option<(String, String)>> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let response = ureq::get(&url)
+        .config()
+        // Never hang the update thread on a stalled socket (captive portal,
+        // GitHub outage) — it would leave the menu item stuck "Checking…".
+        .timeout_global(Some(std::time::Duration::from_secs(15)))
+        .build()
         .header(
             "User-Agent",
             &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),

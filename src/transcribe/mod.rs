@@ -4,8 +4,8 @@ pub mod voxtral_local;
 use crate::util::LockSafe;
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::info;
 
@@ -122,22 +122,21 @@ pub fn spawn_keep_warm() {
     );
     std::thread::Builder::new()
         .name("keep-warm".into())
-        .spawn(|| loop {
-            std::thread::sleep(KEEP_WARM_INTERVAL);
-            if keep_warm_due() {
-                parakeet::warm();
-                warm_whisper();
+        .spawn(|| {
+            loop {
+                std::thread::sleep(KEEP_WARM_INTERVAL);
+                if keep_warm_due() {
+                    parakeet::warm();
+                    warm_whisper();
+                }
             }
         })
         .ok();
 }
 
-/// Get the path where the model file lives.
-///
-/// Priority: a model bundled inside the .app `Contents/Resources/models/`
-/// Path to a model file in the user data dir (downloaded on first run).
+/// Path to a Whisper model file in the user data dir (downloaded on first run).
 pub fn model_path(filename: &str) -> PathBuf {
-    crate::config::data_dir().join("models").join(filename)
+    crate::config::whisper_model_path(filename)
 }
 
 /// Load the whisper model into memory. Blocks until ready.
@@ -200,8 +199,7 @@ pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend)
     // Licensing gate — the single choke point all dictation passes through, so
     // it can't be bypassed (hold, toggle, tray "Test", CLI --transcribe). Empty
     // output is already handled gracefully by every caller (= "no speech").
-    if !crate::license::is_entitled() {
-        crate::license::on_blocked();
+    if !crate::license::gate() {
         return Ok(String::new());
     }
     // A real dictation — open/extend the keep-warm window for the next one.
@@ -257,7 +255,7 @@ fn transcribe_inner(audio: &[f32], language: &str, backend: &Backend) -> Result<
             {
                 if !voxtral_local::is_loaded() {
                     info!("Loading Voxtral Q4 on transcription thread...");
-                    let dir = crate::config::data_dir().join("models").join("voxtral");
+                    let dir = crate::config::voxtral_dir();
                     voxtral_local::load_model(dir.to_str().unwrap_or(""))?;
                 }
             }

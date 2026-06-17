@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-HARNESS="cargo run --release --bin whisper-push-test --"
+HARNESS="cargo run --release --features metal --bin whisper-push-test --"
 CONFIG="$HOME/Library/Application Support/whisper-push/config.toml"
 CONFIG_BACKUP=""
 AUDIO_FILE="/tmp/whisper-push-e2e.wav"

@@ -77,6 +77,14 @@ pub fn run() -> Option<String> {
         }
         WizardOutcome::Killed => {
             info!("Wizard exited without finishing");
+            // Don't leave the user without a clue why the app didn't start.
+            popup(
+                rfd::MessageLevel::Warning,
+                "Whisper Push — Setup",
+                "Setup was closed before finishing, so Whisper Push won't start yet. \
+                 Reopen the app to finish setting up."
+                    .to_string(),
+            );
             return None;
         }
         WizardOutcome::NotInstalled => {}
@@ -171,39 +179,86 @@ fn run_swift_wizard(hardware_name: &str, recommended_backend: &str) -> WizardOut
     }
 }
 
-/// Fallback onboarding using notifications (no GUI wizard).
+/// Fallback onboarding for platforms / builds without the GUI wizard (Linux,
+/// Windows, and macOS dev builds where the Swift wizard isn't bundled). Always
+/// ends with a native help popup so the user gets guidance in every case.
 fn run_fallback(recommended_backend: &str, recommended_model: &str) -> String {
-    info!("Using notification-based onboarding (no wizard)");
+    info!("Using popup-based onboarding (no GUI wizard)");
+    let _ = recommended_backend;
 
-    crate::notify::send(
-        "Whisper Push",
-        &format!("Welcome! Setting up with {}...", recommended_backend),
-    );
-
-    // Check permissions
-    let perms = crate::permissions::check_all();
-    if !perms.all_granted() {
-        crate::permissions::prompt_missing(&perms);
-    }
-
-    // Save config
+    // Save the recommended model before guiding the user.
     if let Ok(mut cfg) = crate::config::Config::load() {
         cfg.model = recommended_model.to_string();
         let _ = cfg.save();
         info!("Config updated: model={recommended_model}");
     }
 
+    // Surface any missing permissions (no-op where the platform has none).
+    let perms = crate::permissions::check_all();
+    if !perms.all_granted() {
+        crate::permissions::prompt_missing(&perms);
+    }
+
     mark_complete();
-
-    crate::notify::send(
-        "Whisper Push",
-        &format!(
-            "Ready! Using {}. Hold Control to dictate.",
-            recommended_model
-        ),
-    );
-
+    show_help_popup(recommended_model);
     recommended_model.to_string()
+}
+
+/// Native, blocking welcome/help dialog — shown on first launch in every path the
+/// GUI wizard doesn't cover (Linux, Windows, macOS dev builds), so the user is
+/// never left without guidance. Runs on the main thread (called from app startup,
+/// before the event loop). Uses `rfd`: NSAlert on macOS, MessageBox on Windows,
+/// GTK on Linux.
+fn show_help_popup(model: &str) {
+    let hotkey = crate::config::Config::load()
+        .map(|c| c.hotkey)
+        .unwrap_or_else(|_| "ctrl".to_string());
+    let tray = if cfg!(target_os = "macos") {
+        "menu bar"
+    } else {
+        "system tray"
+    };
+    let perms = if cfg!(target_os = "macos") {
+        "\n\nmacOS will ask for Microphone, Accessibility and Input Monitoring \
+         permissions — grant all three (tray icon → Permissions → Run Guided \
+         Setup) so the hotkey and dictation work."
+    } else if cfg!(target_os = "linux") {
+        "\n\nIf the hotkey doesn't respond, add your user to the 'input' group:\n\
+         sudo usermod -aG input $USER   (then log out and back in)."
+    } else {
+        ""
+    };
+    let body = format!(
+        "Whisper Push is running in your {tray}.\n\n\
+         • Hold {hotkey} and speak — release to type your words wherever your cursor is.\n\
+         • Open the {tray} icon to change the hotkey, model, and settings.\n\n\
+         Speech model: {model}{perms}"
+    );
+    popup(rfd::MessageLevel::Info, "Welcome to Whisper Push", body);
+}
+
+/// Show a blocking native dialog, swallowing any backend failure (e.g. no display
+/// on a headless Linux box, or a missing GTK/portal service) so first-launch can
+/// never crash on the popup itself.
+fn popup(level: rfd::MessageLevel, title: &str, body: String) {
+    // On Linux, rfd's gtk3 *sync* dialog blocks FOREVER if GTK can't initialise
+    // (a headless box, or the daemon launched before the graphical session): the
+    // backend waits on a condvar with no timeout, which catch_unwind cannot save
+    // us from. With no display, skip the dialog and fall back to a notification.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        crate::notify::app(&body);
+        return;
+    }
+    let title = title.to_string();
+    let _ = std::panic::catch_unwind(move || {
+        rfd::MessageDialog::new()
+            .set_level(level)
+            .set_title(title)
+            .set_description(body)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    });
 }
 
 #[cfg(test)]

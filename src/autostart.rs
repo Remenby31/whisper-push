@@ -28,7 +28,11 @@ mod macos {
     const PLIST_LABEL: &str = "com.whisper-push.app";
 
     pub fn enable() {
-        let plist_dir = dirs::home_dir().unwrap().join("Library/LaunchAgents");
+        let Some(home) = dirs::home_dir() else {
+            warn!("Auto-start: can't resolve home directory");
+            return;
+        };
+        let plist_dir = home.join("Library/LaunchAgents");
         let plist_path = plist_dir.join(format!("{PLIST_LABEL}.plist"));
 
         let app_path = std::env::current_exe().unwrap_or_default();
@@ -62,8 +66,11 @@ mod macos {
     }
 
     pub fn disable() {
-        let plist_path = dirs::home_dir()
-            .unwrap()
+        let Some(home) = dirs::home_dir() else {
+            warn!("Auto-start: can't resolve home directory");
+            return;
+        };
+        let plist_path = home
             .join("Library/LaunchAgents")
             .join(format!("{PLIST_LABEL}.plist"));
         let _ = std::fs::remove_file(&plist_path);
@@ -76,7 +83,10 @@ mod linux {
     use tracing::info;
 
     pub fn enable() {
-        let autostart_dir = dirs::config_dir().unwrap().join("autostart");
+        let Some(config) = dirs::config_dir() else {
+            return;
+        };
+        let autostart_dir = config.join("autostart");
         let desktop_path = autostart_dir.join("whisper-push.desktop");
         let exe = std::env::current_exe().unwrap_or_default();
 
@@ -97,9 +107,10 @@ mod linux {
     }
 
     pub fn disable() {
-        let desktop_path = dirs::config_dir()
-            .unwrap()
-            .join("autostart/whisper-push.desktop");
+        let Some(config) = dirs::config_dir() else {
+            return;
+        };
+        let desktop_path = config.join("autostart/whisper-push.desktop");
         let _ = std::fs::remove_file(&desktop_path);
         info!("Auto-start disabled");
     }

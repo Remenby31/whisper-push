@@ -74,6 +74,20 @@ pub fn downmix_to_mono(data: &[f32], channels: usize) -> Vec<f32> {
     }
 }
 
+/// Downmix into a reused buffer — no per-call heap allocation, for the real-time
+/// audio callback (allocating on the render thread risks dropouts).
+pub fn downmix_into(data: &[f32], channels: usize, out: &mut Vec<f32>) {
+    out.clear();
+    if channels <= 1 {
+        out.extend_from_slice(data);
+    } else {
+        out.extend(
+            data.chunks(channels)
+                .map(|frame| frame.iter().sum::<f32>() / channels as f32),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

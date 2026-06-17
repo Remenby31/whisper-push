@@ -276,10 +276,7 @@ fn main() -> Result<()> {
             let _ = std::fs::remove_dir_all(&backup);
             info!("Removed old version backup");
         }
-        notify::send(
-            "Whisper Push",
-            &format!("Updated to v{}!", env!("CARGO_PKG_VERSION")),
-        );
+        notify::app(&format!("Updated to v{}!", env!("CARGO_PKG_VERSION")));
     }
 
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
@@ -359,9 +356,11 @@ mod doctor {
         println!("GPU:       {}", hw.gpu.label());
         println!("Recommend: {}", crate::hardware::recommend_backend(&hw));
 
-        // Compiled features
+        // Compiled features. Metal is auto-enabled on macOS via a target-specific
+        // whisper-rs dependency, so report it on macOS regardless of the crate
+        // `metal` feature flag (now off in the cross-platform default).
         let mut features = Vec::new();
-        if cfg!(feature = "metal") {
+        if cfg!(target_os = "macos") || cfg!(feature = "metal") {
             features.push("metal");
         }
         if cfg!(feature = "cuda") {

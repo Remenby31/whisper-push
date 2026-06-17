@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-HARNESS="cargo run --release --bin whisper-push-test --"
+HARNESS="cargo run --release --features metal --bin whisper-push-test --"
 CARGO_TOML="Cargo.toml"
 CARGO_BACKUP=""
 ORIGINAL_VERSION=""

@@ -1,5 +1,5 @@
-use crate::util::LockSafe;
 use crate::config::Config;
+use crate::util::LockSafe;
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,10 +38,6 @@ pub enum Event {
     HotkeyToggle,
     /// A custom hotkey was captured (hotkey string, mode)
     HotkeyCaptured(String, String),
-    /// Recording captured, ready to transcribe
-    AudioCaptured(Vec<f32>),
-    /// Transcription result
-    Transcribed(String),
     /// Model loaded and ready
     ModelReady,
     /// State changed (for tray icon update)

@@ -24,7 +24,8 @@ build:
 	cargo build
 	@echo "✓ Debug build complete"
 
-# Release build (default features include metal + parakeet + voxtral)
+# Release build. Default features = parakeet + voxtral; on macOS, Metal is
+# auto-enabled via a target-specific whisper-rs dependency, so this is GPU-built.
 release:
 	cargo build --release
 	@echo "✓ Release build complete"

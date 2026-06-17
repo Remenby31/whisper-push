@@ -337,13 +337,10 @@ pub fn capture_with_current(current: &str) {
             }
             MENU_DIRTY.store(true, Ordering::Relaxed);
             let n = report.learned.len();
-            crate::notify::send(
-                "Whisper Push",
-                &format!(
-                    "Learned {n} word{} from your correction",
-                    if n == 1 { "" } else { "s" }
-                ),
-            );
+            crate::notify::app(&format!(
+                "Learned {n} word{} from your correction",
+                if n == 1 { "" } else { "s" }
+            ));
         }
         Correction::Done(report) => {
             tracing::info!(

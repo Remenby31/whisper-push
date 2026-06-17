@@ -64,14 +64,26 @@ impl Default for Config {
 
 impl Config {
     /// Load config from the platform-default path.
+    ///
+    /// A corrupt file (e.g. a crash during a non-atomic write by an older build)
+    /// must never brick startup: back it up to `.bad` and fall back to defaults,
+    /// rather than propagating the parse error and refusing to boot.
     pub fn load() -> Result<Self> {
         let path = config_path();
-        if path.exists() {
-            Self::load_from(&path)
-        } else {
+        if !path.exists() {
             let cfg = Self::default();
             cfg.save()?;
-            Ok(cfg)
+            return Ok(cfg);
+        }
+        match Self::load_from(&path) {
+            Ok(cfg) => Ok(cfg),
+            Err(e) => {
+                tracing::error!("config.toml unreadable ({e}); backing up to .bad, using defaults");
+                let _ = std::fs::rename(&path, path.with_extension("toml.bad"));
+                let cfg = Self::default();
+                let _ = cfg.save();
+                Ok(cfg)
+            }
         }
     }
 
@@ -82,14 +94,18 @@ impl Config {
         Ok(cfg)
     }
 
-    /// Save config to the platform-default path.
+    /// Save config to the platform-default path. Written atomically (tmp file +
+    /// rename) so a crash/power-loss mid-write can't truncate config.toml — this
+    /// is the most-written user file (every tray toggle).
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, content)?;
+        std::fs::rename(&tmp, &path)?;
         Ok(())
     }
 }
@@ -107,6 +123,28 @@ pub fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("whisper-push")
+}
+
+// ─── Model paths (single source of truth — was re-derived in ~8 places) ──────
+
+/// Directory holding downloaded models.
+pub fn models_dir() -> PathBuf {
+    data_dir().join("models")
+}
+
+/// Whisper `.bin` model path for the given filename.
+pub fn whisper_model_path(filename: &str) -> PathBuf {
+    models_dir().join(filename)
+}
+
+/// Parakeet ONNX model directory.
+pub fn parakeet_dir() -> PathBuf {
+    models_dir().join("parakeet")
+}
+
+/// Voxtral model directory.
+pub fn voxtral_dir() -> PathBuf {
+    models_dir().join("voxtral")
 }
 
 /// Log directory inside the data dir.

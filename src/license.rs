@@ -524,21 +524,49 @@ fn clear() {
 
 static LAST_NOTIFY: AtomicU64 = AtomicU64::new(0);
 
-/// Called from the gate when not entitled: a throttled notification pointing the
-/// user to the in-app Subscription modal (menu bar → License → Subscription).
+/// The one dictation gate: returns true if entitled, otherwise fires the
+/// throttled blocked-notification and returns false. Every "may this dictation
+/// proceed?" check routes through here so the policy + throttle live in one place.
+pub fn gate() -> bool {
+    if is_entitled() {
+        true
+    } else {
+        on_blocked();
+        false
+    }
+}
+
+/// Called from the gate when not entitled: a throttled notification carrying a
+/// button that opens the in-app Subscription modal directly (same surface as the
+/// menu bar → License → Subscription item).
 pub fn on_blocked() {
-    let body = match status() {
-        LicenseStatus::Locked => {
-            "Your 7-day trial has ended. Open the menu bar \u{2192} License \u{2192} Subscription to continue."
-        }
-        LicenseStatus::Expired => {
-            "Your Whisper Push subscription expired. Open License \u{2192} Subscription to renew."
-        }
-        LicenseStatus::Disabled => "Your Whisper Push license is no longer active.",
+    let (body, button) = match status() {
+        LicenseStatus::Locked => (
+            "Your 7-day trial has ended. Subscribe to keep dictating.",
+            "Subscribe",
+        ),
+        LicenseStatus::Expired => (
+            "Your Whisper Push subscription expired. Renew to keep dictating.",
+            "Renew",
+        ),
+        LicenseStatus::Disabled => (
+            "Your Whisper Push license is no longer active. Open Subscription to fix it.",
+            "Manage",
+        ),
         _ => return, // entitled
     };
     if throttle(&LAST_NOTIFY, now(), 300) {
-        crate::notify::send("Whisper Push", body);
+        crate::notify::app_action(body, button, open_paywall);
+    }
+}
+
+/// Open the in-app subscription / activation modal — the same window the tray's
+/// "Subscription…" item opens, so checkout lives in exactly one place. Runs on
+/// its own thread (the notification delegate spawns it); the daemon then picks up
+/// the resulting license.json via `maybe_reload`, so no manual refresh is needed.
+fn open_paywall() {
+    if !crate::onboarding::run_license_window() {
+        tracing::info!("license: subscribe action — license window unavailable (dev build?)");
     }
 }
 
@@ -753,6 +781,30 @@ fn parse_iso_date(s: &str) -> Option<u64> {
     if s.len() >= 19 && s.as_bytes()[10] == b'T' {
         let part = |a, b| -> i64 { s.get(a..b).and_then(|x| x.parse().ok()).unwrap_or(0) };
         secs += part(11, 13) * 3600 + part(14, 16) * 60 + part(17, 19);
+        // Apply a trailing timezone offset to get true UTC. LS sends e.g.
+        // `…T00:30:00+02:00` or `…Z`; without this a renewal near midnight could
+        // be read hours off and lock a still-valid user (the `>=` expiry check
+        // has no slack). 'Z'/none = already UTC.
+        if let Some(suffix) = s.get(19..) {
+            if let Some(sign_pos) = suffix.rfind(['+', '-']) {
+                let off = &suffix[sign_pos..];
+                let digits: Vec<i64> = off
+                    .chars()
+                    .filter(|c| c.is_ascii_digit())
+                    .filter_map(|c| c.to_digit(10).map(|d| d as i64))
+                    .collect();
+                if digits.len() >= 4 {
+                    let offset =
+                        (digits[0] * 10 + digits[1]) * 3600 + (digits[2] * 10 + digits[3]) * 60;
+                    // local = UTC + offset  ⇒  UTC = local − offset
+                    secs -= if off.starts_with('-') {
+                        -offset
+                    } else {
+                        offset
+                    };
+                }
+            }
+        }
     }
     (secs >= 0).then_some(secs as u64)
 }
@@ -869,6 +921,15 @@ mod tests {
         assert_eq!(
             parse_iso_date("2000-01-01T12:00:00Z"),
             Some(946_684_800 + 12 * 3600)
+        );
+        // Timezone offsets convert to UTC: +02:00 is 2h ahead, so UTC is 2h earlier.
+        assert_eq!(
+            parse_iso_date("2000-01-01T02:00:00+02:00"),
+            Some(946_684_800)
+        );
+        assert_eq!(
+            parse_iso_date("2000-01-01T00:00:00-05:00"),
+            Some(946_684_800 + 5 * 3600)
         );
         assert_eq!(parse_iso_date("garbage"), None);
         assert_eq!(parse_iso_date("2020-13-40"), None);

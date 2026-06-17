@@ -1,5 +1,5 @@
-use crate::util::LockSafe;
 use crate::state::Event;
+use crate::util::LockSafe;
 use core_foundation::base::TCFType;
 use crossbeam_channel::Sender;
 use std::cell::Cell;
@@ -331,6 +331,15 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                         unsafe { CGEventTapEnable(port, true) };
                         info!("hotkey tap was disabled by the system — re-enabled");
                     }
+                    // The key-release that ended an in-flight hold may have been
+                    // dropped while the tap was off (classic clamshell sleep/wake).
+                    // If we still think the key is held, synthesize the release so
+                    // the pipeline stops recording instead of staying armed forever
+                    // (mic stuck open, next press ignored).
+                    if hold_active.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        info!("HotkeyUp (synthesized on tap re-enable)");
+                        let _ = tx.send(Event::HotkeyUp);
+                    }
                     return None;
                 }
                 let raw_type = match event_type {
@@ -413,8 +422,23 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                 }
                 None // ListenOnly — don't modify events
             },
-        )
-        .expect("Failed to create CGEventTap — check Accessibility permission");
+        );
+        // Don't panic the hotkey thread on a transient failure (permission
+        // revoked at runtime, post-grant restart race) — log + notify so the app
+        // stays alive and the user knows the hotkey is down, instead of a silent
+        // crash buried in launchd stderr.
+        let tap = match tap {
+            Ok(t) => t,
+            Err(_) => {
+                tracing::error!(
+                    "Failed to create CGEventTap — check Accessibility/Input Monitoring"
+                );
+                crate::notify::app(
+                    "Hotkey unavailable — grant Accessibility + Input Monitoring, then restart.",
+                );
+                return;
+            }
+        };
 
         // Remember the tap's port so the callback can re-enable it if macOS
         // disables the tap (timeout / wake-from-sleep).
@@ -422,10 +446,13 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
 
         info!("CGEventTap created — listening for hotkey events");
 
-        let loop_source = tap
-            .mach_port
-            .create_runloop_source(0)
-            .expect("Failed to create run loop source");
+        let loop_source = match tap.mach_port.create_runloop_source(0) {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::error!("Failed to create CGEventTap run-loop source");
+                return;
+            }
+        };
         let run_loop = core_foundation::runloop::CFRunLoop::get_current();
         unsafe {
             run_loop.add_source(

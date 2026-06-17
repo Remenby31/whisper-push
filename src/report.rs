@@ -175,7 +175,7 @@ pub fn open_report() {
             .spawn();
     }
 
-    crate::notify::send("Whisper Push", "Opening bug report in browser...");
+    crate::notify::app("Opening bug report in browser...");
 }
 
 /// Install a panic hook that logs crashes and shows a notification.

@@ -50,6 +50,8 @@ pub fn paste_text(text: &str) -> Result<()> {
 
 /// Type text progressively at the cursor — for streaming transcription.
 /// Uses clipboard + Cmd/Ctrl+V for each word (more reliable than character-by-character).
+/// Reserved: streaming dictation is disabled (see CLAUDE.md); batch paste is the live path.
+#[allow(dead_code)]
 pub fn type_text(text: &str) -> Result<()> {
     if text.is_empty() {
         return Ok(());

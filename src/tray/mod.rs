@@ -1,7 +1,6 @@
-use crate::util::LockSafe;
-use crate::audio::capture::AudioCapture;
 use crate::config::Config;
 use crate::state::{AppState, Event, State};
+use crate::util::LockSafe;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -100,7 +99,6 @@ struct App {
     config: Arc<Mutex<Config>>,
     rx: Receiver<Event>,
     tray: Option<TrayIcon>,
-    capture: Arc<Mutex<Option<AudioCapture>>>,
     pipeline_tx: Option<crossbeam_channel::Sender<Event>>,
     // Menu items (created in init, kept alive)
     menu_items: Option<MenuItems>,
@@ -177,7 +175,6 @@ impl App {
             config,
             rx,
             tray: None,
-            capture: Arc::new(Mutex::new(None)),
             pipeline_tx: None,
             menu_items: None,
             pending_update: None,
@@ -510,7 +507,16 @@ impl App {
         {
             builder = builder.with_icon_as_template(true);
         }
-        self.tray = Some(builder.build().expect("failed to create tray icon"));
+        // Don't panic the whole daemon if the status item can't be created
+        // (transient ControlCenter/XPC pressure, locked screen at launch): the
+        // app still works headless via the hotkey + paste path. Degrade, warn.
+        match builder.build() {
+            Ok(tray) => self.tray = Some(tray),
+            Err(e) => {
+                warn!("Failed to create tray icon ({e}) — running without a menu bar item");
+                self.tray = None;
+            }
+        }
 
         // Prompt permissions after a short delay
         if !perms.all_granted() {
@@ -575,7 +581,7 @@ impl App {
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 set_tray_icon(&self.tray, State::Idle);
                 if self.config.lock_safe().notifications {
-                    crate::notify::send("Whisper Push", "Model loaded and ready!");
+                    crate::notify::app("Model loaded and ready!");
                 }
                 info!("Ready");
             }
@@ -594,14 +600,20 @@ impl App {
                         info!("Removed data dir: {}", data_dir.display());
                     }
                     crate::autostart::disable();
-                    crate::notify::send(
-                        "Whisper Push",
-                        "Uninstalled. You can delete the app from Applications.",
-                    );
+                    crate::notify::app("Uninstalled. You can delete the app from Applications.");
                     std::process::exit(0);
                 }
                 if id == &mi.toggle_id {
-                    self.process_event(Event::HotkeyToggle);
+                    // Recording lives entirely on the pipeline thread (the single
+                    // chokepoint, off the UI thread — AudioCapture calls into
+                    // CoreAudio which can block for seconds on Bluetooth). The menu
+                    // just forwards the toggle.
+                    match &self.pipeline_tx {
+                        Some(tx) => {
+                            let _ = tx.send(Event::HotkeyToggle);
+                        }
+                        None => warn!("toggle clicked before pipeline was ready"),
+                    }
                     return;
                 }
                 if id == &mi.test_id {
@@ -609,7 +621,7 @@ impl App {
                     let cfg = self.config.lock_safe().clone();
                     std::thread::spawn(move || {
                         info!("=== TEST: Recording 3 seconds... ===");
-                        crate::notify::send("Whisper Push", "Recording 3 seconds...");
+                        crate::notify::app("Recording 3 seconds...");
 
                         match crate::audio::capture::AudioCapture::start(&cfg.input_device) {
                             Ok(cap) => {
@@ -625,15 +637,11 @@ impl App {
                                 );
 
                                 if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
-                                    crate::notify::send(
-                                        "Whisper Push",
-                                        "Test failed: audio too short",
-                                    );
+                                    crate::notify::app("Test failed: audio too short");
                                     return;
                                 }
                                 if rms < crate::audio::capture::SILENCE_RMS_THRESHOLD {
-                                    crate::notify::send(
-                                        "Whisper Push",
+                                    crate::notify::app(
                                         "Test failed: silence (check mic permission)",
                                     );
                                     return;
@@ -641,10 +649,7 @@ impl App {
 
                                 let bk = crate::model_manager::backend_for_model(&cfg.model);
                                 info!("=== TEST: Transcribing with '{}' ===", bk);
-                                crate::notify::send(
-                                    "Whisper Push",
-                                    &format!("Transcribing with {}...", bk),
-                                );
+                                crate::notify::app(&format!("Transcribing with {}...", bk));
 
                                 let backend = crate::model_manager::resolve_backend(&cfg.model);
 
@@ -661,34 +666,25 @@ impl App {
                                             elapsed.as_secs_f64(),
                                             text
                                         );
-                                        crate::notify::send(
-                                            "Whisper Push",
-                                            &format!(
-                                                "Test OK ({:.1}s): {}",
-                                                elapsed.as_secs_f64(),
-                                                text
-                                            ),
-                                        );
+                                        crate::notify::app(&format!(
+                                            "Test OK ({:.1}s): {}",
+                                            elapsed.as_secs_f64(),
+                                            text
+                                        ));
                                     }
                                     Ok(_) => {
                                         info!("=== TEST: No speech detected ===");
-                                        crate::notify::send(
-                                            "Whisper Push",
-                                            "Test: no speech detected",
-                                        );
+                                        crate::notify::app("Test: no speech detected");
                                     }
                                     Err(e) => {
                                         info!("=== TEST ERROR: {e} ===");
-                                        crate::notify::send(
-                                            "Whisper Push",
-                                            &format!("Test error: {e}"),
-                                        );
+                                        crate::notify::app(&format!("Test error: {e}"));
                                     }
                                 }
                             }
                             Err(e) => {
                                 info!("=== TEST: Capture failed: {e} ===");
-                                crate::notify::send("Whisper Push", &format!("Test failed: {e}"));
+                                crate::notify::app(&format!("Test failed: {e}"));
                             }
                         }
                     });
@@ -710,7 +706,7 @@ impl App {
                     return;
                 }
                 if id == &mi.setup_id {
-                    crate::permissions::guided_setup();
+                    crate::permissions::guided_setup(); // self-spawns + guards re-entry
                     return;
                 }
                 if id == &mi.update_id {
@@ -725,10 +721,7 @@ impl App {
                                 {
                                     tracing::error!("Update failed: {e}");
                                     // Can't send event here because process may exit on success
-                                    crate::notify::send(
-                                        "Whisper Push",
-                                        &format!("Update failed: {e}"),
-                                    );
+                                    crate::notify::app(&format!("Update failed: {e}"));
                                 }
                             })
                             .ok();
@@ -744,18 +737,12 @@ impl App {
                                     let _ = tx.send(Event::UpdateAvailable(version, url));
                                 }
                                 Ok(None) => {
-                                    crate::notify::send(
-                                        "Whisper Push",
-                                        "You\u{2019}re on the latest version.",
-                                    );
+                                    crate::notify::app("You\u{2019}re on the latest version.");
                                     let _ = tx.send(Event::UpdateFailed(String::new()));
                                 }
                                 Err(e) => {
                                     tracing::error!("Update check failed: {e}");
-                                    crate::notify::send(
-                                        "Whisper Push",
-                                        &format!("Update check failed: {e}"),
-                                    );
+                                    crate::notify::app(&format!("Update check failed: {e}"));
                                     let _ = tx.send(Event::UpdateFailed(e.to_string()));
                                 }
                             })
@@ -803,19 +790,16 @@ impl App {
                 }
                 if id == &mi.dict_reload_id {
                     let _ = crate::dictionary::reload();
-                    crate::notify::send(
-                        "Whisper Push",
-                        &format!(
-                            "Dictionary reloaded \u{2014} {} word(s).",
-                            crate::dictionary::entry_count()
-                        ),
-                    );
+                    crate::notify::app(&format!(
+                        "Dictionary reloaded \u{2014} {} word(s).",
+                        crate::dictionary::entry_count()
+                    ));
                     let _ = self.state.tx.send(Event::DictChanged);
                     return;
                 }
                 if id == &mi.dict_forget_voice_id {
                     crate::acoustic::clear();
-                    crate::notify::send("Whisper Push", "Forgot all learned voiceprints.");
+                    crate::notify::app("Forgot all learned voiceprints.");
                     let _ = self.state.tx.send(Event::DictChanged);
                     return;
                 }
@@ -826,14 +810,11 @@ impl App {
                     let _ = c.save();
                     drop(c);
                     crate::dictionary::init(on);
-                    crate::notify::send(
-                        "Whisper Push",
-                        if on {
-                            "Adaptive correction ON"
-                        } else {
-                            "Adaptive correction OFF"
-                        },
-                    );
+                    crate::notify::app(if on {
+                        "Adaptive correction ON"
+                    } else {
+                        "Adaptive correction OFF"
+                    });
                     return;
                 }
                 if id == &mi.license_subscription_id {
@@ -858,10 +839,9 @@ impl App {
                 for (it, term) in &mi.dict_entry_items {
                     if !term.is_empty() && id == &it.id().0 {
                         if let Ok(true) = crate::dictionary::remove_entry(term) {
-                            crate::notify::send(
-                                "Whisper Push",
-                                &format!("Removed \u{201c}{term}\u{201d} from dictionary"),
-                            );
+                            crate::notify::app(&format!(
+                                "Removed \u{201c}{term}\u{201d} from dictionary"
+                            ));
                         }
                         let _ = self.state.tx.send(Event::DictChanged);
                         return;
@@ -880,14 +860,13 @@ impl App {
                         mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                         mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
                         crate::hotkey::rebind(hotkey, mode); // live — no restart
-                        crate::notify::send("Whisper Push", &format!("Hotkey set to {disp}"));
+                        crate::notify::app(&format!("Hotkey set to {disp}"));
                         return;
                     }
                 }
                 if id == &mi.custom_hotkey_id {
                     crate::hotkey::start_capture(self.state.tx.clone());
-                    crate::notify::send(
-                        "Whisper Push",
+                    crate::notify::app(
                         "Press your shortcut now: tap a modifier (e.g. Right \u{2318}) to hold, or a combo like \u{2318}\u{21e7}D to toggle.",
                     );
                     return;
@@ -930,7 +909,11 @@ impl App {
                         let models = crate::model_manager::list_models();
                         for (bi, bv) in &mi.model_items {
                             if let Some(m) = models.iter().find(|m| m.name == bv.as_str()) {
-                                let active = if bv == model_name { "\u{25CF} " } else { "    " };
+                                let active = if bv == model_name {
+                                    "\u{25CF} "
+                                } else {
+                                    "    "
+                                };
                                 let dl = if m.is_downloaded { "" } else { " \u{2913}" };
                                 bi.set_text(format!("{active}{}{dl}", m.label));
                             }
@@ -946,35 +929,11 @@ impl App {
                             .find(|m| m.name == model_name.as_str())
                             .map(|m| m.label)
                             .unwrap_or(model_name.as_str());
-                        crate::notify::send("Whisper Push", &format!("Loading {label}..."));
+                        crate::notify::app(&format!("Loading {label}..."));
                         return;
                     }
                 }
             }
-
-            Event::HotkeyToggle => match self.state.current() {
-                State::Idle => {
-                    if !crate::license::is_entitled() {
-                        crate::license::on_blocked();
-                        return;
-                    }
-                    let device = self.config.lock_safe().input_device.clone();
-                    match AudioCapture::start(&device) {
-                        Ok(cap) => {
-                            *self.capture.lock_safe() = Some(cap);
-                            self.state.set(State::Recording);
-                            mi.toggle_item.set_text("Stop & Transcribe");
-                            set_tray_icon(&self.tray, State::Recording);
-                            if self.config.lock_safe().sound_feedback {
-                                crate::audio::playback::play_sound("start");
-                            }
-                        }
-                        Err(e) => warn!("Capture failed: {e}"),
-                    }
-                }
-                State::Recording => self.finish_recording(),
-                _ => {}
-            },
 
             Event::StateChanged(State::Recording) => {
                 // Reached from BOTH the menu toggle and the physical hotkey
@@ -985,22 +944,6 @@ impl App {
                 mi.toggle_item.set_text("Recording\u{2026}");
                 set_tray_icon(&self.tray, State::Recording);
                 crate::overlay::set_state(crate::overlay::OverlayState::Recording);
-            }
-
-            Event::Transcribed(text) => {
-                // Paste OFF the UI thread: paste_text blocks ~330 ms (clipboard
-                // settle + AX read + restore) and would otherwise freeze the
-                // tray/menu/hotkey event loop on every dictation. Stays in
-                // Processing until the paste completes, then the StateChanged
-                // handler resets the UI to Idle (single source of truth — no
-                // per-dictation notification, that's noise).
-                let tx = self.state.tx.clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = crate::paste::paste_text(&text) {
-                        tracing::error!("Paste failed: {e}");
-                    }
-                    let _ = tx.send(Event::StateChanged(State::Idle));
-                });
             }
 
             Event::HotkeyCaptured(hotkey, mode) => {
@@ -1018,14 +961,16 @@ impl App {
                 let disp = format_hotkey_display(&hotkey, &mode);
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
-                crate::notify::send("Whisper Push", &format!("Custom hotkey set: {disp}"));
+                crate::notify::app(&format!("Custom hotkey set: {disp}"));
             }
 
             Event::PromptPermissions => {
                 info!("Checking/prompting permissions...");
                 let status = crate::permissions::check_all();
                 if !status.all_granted() {
-                    // Guided flow: prompts + opens panes + polls + restarts.
+                    // Guided flow: prompts + opens panes + polls + restarts. It
+                    // self-spawns a worker thread and returns immediately, so this
+                    // never blocks the winit main thread.
                     crate::permissions::guided_setup();
                 }
                 // Schedule a re-check to update the menu
@@ -1101,10 +1046,9 @@ impl App {
                 mi.update_item.set_enabled(true);
                 self.pending_update = Some((version.clone(), url.clone()));
                 if self.config.lock_safe().notifications {
-                    crate::notify::send(
-                        "Whisper Push",
-                        &format!("Version {version} available! Click the menu to update."),
-                    );
+                    crate::notify::app(&format!(
+                        "Version {version} available! Click the menu to update."
+                    ));
                 }
                 info!("Update available: v{version}");
             }
@@ -1118,8 +1062,8 @@ impl App {
             }
 
             Event::RefreshTrayIcon => {
-                // Trailing edge of a coalesced burst — re-apply the true state.
-                set_tray_icon(&self.tray, self.state.current());
+                // Debounce timer fired — push the icon if the state has settled.
+                flush_tray_icon(&self.tray);
             }
 
             Event::StateChanged(s) => {
@@ -1154,52 +1098,6 @@ impl App {
 
             _ => {}
         }
-    }
-
-    fn finish_recording(&mut self) {
-        let mi = self.menu_items.as_ref().unwrap();
-        self.state.set(State::Processing);
-        mi.toggle_item.set_text("Processing...");
-        mi.toggle_item.set_enabled(false);
-        set_tray_icon(&self.tray, State::Processing);
-
-        if self.config.lock_safe().sound_feedback {
-            crate::audio::playback::play_sound("stop");
-        }
-
-        let audio = self
-            .capture
-            .lock()
-            .unwrap()
-            .take()
-            .map(|c| c.stop())
-            .unwrap_or_default();
-        if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
-            self.state.set(State::Idle);
-            mi.toggle_item.set_text("Start Recording");
-            mi.toggle_item.set_enabled(true);
-            set_tray_icon(&self.tray, State::Idle);
-            return;
-        }
-
-        let tx = self.state.tx.clone();
-        let cfg = self.config.lock_safe().clone();
-        let backend = crate::model_manager::resolve_backend(&cfg.model);
-        std::thread::spawn(move || {
-            crate::dictionary::update_session_context(&cfg.language);
-            match crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend) {
-                Ok(text) if !text.is_empty() => {
-                    let _ = tx.send(Event::Transcribed(text));
-                }
-                Ok(_) => {
-                    let _ = tx.send(Event::StateChanged(State::Idle));
-                }
-                Err(e) => {
-                    tracing::error!("Transcription: {e}");
-                    let _ = tx.send(Event::StateChanged(State::Idle));
-                }
-            }
-        });
     }
 }
 
@@ -1249,12 +1147,16 @@ impl ApplicationHandler<UserEvent> for App {
             let pipeline_cfg = self.config.clone();
             let (ptx, prx) = crossbeam_channel::unbounded();
             self.pipeline_tx = Some(ptx.clone());
+            // The pipeline keeps a sender to its own channel so it can re-queue an
+            // event it must not drop (e.g. a model switch that lands during the
+            // hold-delay gate).
+            let self_tx = ptx.clone();
             let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx);
 
             // Pipeline thread: hotkey events + model load → capture → transcribe → paste
             let ui_tx = self.state.tx.clone();
             std::thread::spawn(move || {
-                pipeline_loop(prx, pipeline_cfg, ui_tx);
+                pipeline_loop(prx, pipeline_cfg, ui_tx, self_tx);
             });
 
             // Load model on the pipeline thread (all backends, including Voxtral/WGPU)
@@ -1353,12 +1255,14 @@ const WATCHDOG_MAX_PROCESSING: u64 = 30;
 fn spawn_state_watchdog(tx: Sender<Event>) {
     std::thread::Builder::new()
         .name("state-watchdog".into())
-        .spawn(move || loop {
-            std::thread::sleep(WATCHDOG_TICK);
-            if let Some(secs) = crate::state::processing_stuck_secs() {
-                if secs >= WATCHDOG_MAX_PROCESSING {
-                    warn!("state watchdog: stuck in Processing for {secs}s — forcing Idle");
-                    let _ = tx.send(Event::StateChanged(State::Idle));
+        .spawn(move || {
+            loop {
+                std::thread::sleep(WATCHDOG_TICK);
+                if let Some(secs) = crate::state::processing_stuck_secs() {
+                    if secs >= WATCHDOG_MAX_PROCESSING {
+                        warn!("state watchdog: stuck in Processing for {secs}s — forcing Idle");
+                        let _ = tx.send(Event::StateChanged(State::Idle));
+                    }
                 }
             }
         })
@@ -1368,31 +1272,29 @@ fn spawn_state_watchdog(tx: Sender<Event>) {
 /// Autonomous pipeline: listens for hotkey events, captures audio,
 /// transcribes, and pastes — all in background threads.
 /// Never touches the winit event loop or tray menu.
-fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<Event>) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let recording = Arc::new(AtomicBool::new(false));
-    let capture: Arc<Mutex<Option<crate::audio::capture::AudioCapture>>> =
-        Arc::new(Mutex::new(None));
+fn pipeline_loop(
+    rx: Receiver<Event>,
+    config: Arc<Mutex<Config>>,
+    ui_tx: Sender<Event>,
+    self_tx: Sender<Event>,
+) {
+    // Everything here runs on this one thread — no Arc/Mutex/atomics needed.
+    let mut recording = false;
+    let mut capture: Option<crate::audio::capture::AudioCapture> = None;
 
     loop {
         match rx.recv() {
             Ok(Event::HotkeyDown) => {
-                if !crate::license::is_entitled() {
-                    crate::license::on_blocked();
+                if !crate::license::gate() {
                     continue;
                 }
-                if recording.load(Ordering::Relaxed) {
+                if recording {
                     continue;
                 }
                 let cfg = config.lock_safe();
                 let device = cfg.input_device.clone();
                 let delay = cfg.hold_delay;
                 let sound_feedback = cfg.sound_feedback;
-                // Voxtral streaming hangs on first use (GPU shader compilation blocks
-                // the feed_chunk loop). Use batch mode for all backends — record first,
-                // then transcribe after release.
-                let is_voxtral_streaming = false;
                 drop(cfg);
 
                 // Immediate audio acknowledgement — a 70 ms blip the moment the
@@ -1400,111 +1302,6 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 // that the key was heard; hold_delay still gates recording.
                 if sound_feedback {
                     crate::audio::playback::play_sound("start");
-                }
-
-                if is_voxtral_streaming {
-                    // Streaming mode: use StreamingCapture + StreamingSession
-                    recording.store(true, Ordering::Relaxed);
-                    let rec = recording.clone();
-                    let cfg2 = config.clone();
-                    let rx_clone = rx.clone();
-
-                    // Run streaming in this thread (needs same thread for WGPU)
-                    info!("Starting streaming transcription...");
-                    // (start sound already played immediately on HotkeyDown above)
-
-                    // Ensure Voxtral model is loaded on this thread
-                    if !crate::transcribe::voxtral_local::is_loaded() {
-                        let _ = ui_tx.send(Event::StateChanged(State::Loading));
-                        info!("Loading Voxtral Q4 on first use...");
-                        let load_start = std::time::Instant::now();
-                        let dir = crate::config::data_dir().join("models").join("voxtral");
-                        if let Err(e) =
-                            crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
-                        {
-                            tracing::error!("Voxtral load failed: {e}");
-                            crate::notify::send("Whisper Push", &format!("Error: {e}"));
-                            let _ = ui_tx.send(Event::StateChanged(State::Idle));
-                            rec.store(false, Ordering::Relaxed);
-                            continue;
-                        }
-                        info!("Voxtral ready ({:.1}s)", load_start.elapsed().as_secs_f64());
-                        let _ = ui_tx.send(Event::StateChanged(State::Idle));
-                    }
-
-                    // Start streaming session
-                    match crate::transcribe::voxtral_local::streaming::start() {
-                        Ok(mut session) => {
-                            // Start streaming capture (500ms chunks)
-                            match crate::audio::stream::StreamingCapture::start(&device, 500) {
-                                Ok(stream_capture) => {
-                                    info!("Streaming: capture + session started");
-
-                                    // Feed chunks until HotkeyUp
-                                    loop {
-                                        // Check for HotkeyUp (non-blocking)
-                                        if let Ok(Event::HotkeyUp) = rx_clone.try_recv() {
-                                            break;
-                                        }
-
-                                        // Get next audio chunk (with timeout)
-                                        match stream_capture
-                                            .chunk_rx
-                                            .recv_timeout(std::time::Duration::from_millis(100))
-                                        {
-                                            Ok(chunk) => {
-                                                match crate::transcribe::voxtral_local::streaming::feed_chunk(
-                                                    &mut session, &chunk.samples
-                                                ) {
-                                                    Ok(words) if !words.is_empty() => {
-                                                        let text = words.join(" ");
-                                                        info!("Streaming → '{text}'");
-                                                        if let Err(e) = crate::paste::type_text(&text) {
-                                                            tracing::error!("Type failed: {e}");
-                                                        }
-                                                    }
-                                                    Ok(_) => {} // no new words yet
-                                                    Err(e) => {
-                                                        tracing::error!("Streaming feed error: {e}");
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                                                continue;
-                                            }
-                                            Err(_) => break,
-                                        }
-                                    }
-
-                                    // Stop capture and feed remaining
-                                    drop(stream_capture);
-                                    if cfg2.lock_safe().sound_feedback {
-                                        crate::audio::playback::play_sound("stop");
-                                    }
-
-                                    // Finish and paste any remaining text
-                                    match crate::transcribe::voxtral_local::streaming::finish(
-                                        session,
-                                    ) {
-                                        Ok(final_text) if !final_text.is_empty() => {
-                                            info!("Streaming final: '{final_text}'");
-                                        }
-                                        Ok(_) => info!("Streaming: no final text"),
-                                        Err(e) => tracing::error!("Streaming finish: {e}"),
-                                    }
-                                }
-                                Err(e) => warn!("Stream capture failed: {e}"),
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Streaming session failed: {e}");
-                            crate::notify::send("Whisper Push", &format!("Streaming error: {e}"));
-                        }
-                    }
-
-                    rec.store(false, Ordering::Relaxed);
-                    continue; // Don't fall through to batch mode
                 }
 
                 // Batch mode (Whisper, Parakeet) — do NOT pre-roll the mic.
@@ -1527,7 +1324,16 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                             cancelled = true;
                             break;
                         }
-                        Ok(_) => {} // ignore other events during the gate
+                        // A model switch must not be silently dropped by the gate.
+                        // Re-queue it and cancel this (not-yet-started) recording —
+                        // safe because the mic isn't open yet, so LoadModel is then
+                        // processed cleanly with nothing recording.
+                        Ok(Event::LoadModel(m)) => {
+                            let _ = self_tx.send(Event::LoadModel(m));
+                            cancelled = true;
+                            break;
+                        }
+                        Ok(_) => {} // ignore a duplicate HotkeyDown/Toggle here
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
                         Err(_) => {
                             cancelled = true;
@@ -1541,14 +1347,19 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 }
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
-                        *capture.lock_safe() = Some(cap);
-                        recording.store(true, Ordering::Relaxed);
+                        capture = Some(cap);
+                        recording = true;
                         // Tell the UI thread so the menu-bar icon turns citron —
                         // without this the icon only updated on menu-driven recording.
                         let _ = ui_tx.send(Event::StateChanged(State::Recording));
                         info!("Recording…");
                     }
-                    Err(e) => warn!("Capture failed: {e}"),
+                    Err(e) => {
+                        warn!("Capture failed: {e}");
+                        crate::notify::app(
+                            "Couldn't start recording — check your microphone is connected.",
+                        );
+                    }
                 }
             }
 
@@ -1556,38 +1367,42 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 // A quick-tap HotkeyUp is consumed by the hold_delay gate in
                 // the HotkeyDown arm; if we receive one here it means hold was
                 // confirmed and the mic is open.
-                if !recording.load(Ordering::Relaxed) {
+                if !recording {
                     continue;
                 }
-                recording.store(false, Ordering::Relaxed);
+                recording = false;
                 let _ = ui_tx.send(Event::StateChanged(State::Processing));
-                stop_and_transcribe(&config, &capture);
+                stop_and_transcribe(&config, &mut capture);
                 let _ = ui_tx.send(Event::StateChanged(State::Idle));
             }
 
             Ok(Event::HotkeyToggle) => {
-                if !recording.load(Ordering::Relaxed) {
-                    if !crate::license::is_entitled() {
-                        crate::license::on_blocked();
+                if !recording {
+                    if !crate::license::gate() {
                         continue;
                     }
                     let device = config.lock_safe().input_device.clone();
                     match crate::audio::capture::AudioCapture::start(&device) {
                         Ok(cap) => {
-                            *capture.lock_safe() = Some(cap);
-                            recording.store(true, Ordering::Relaxed);
+                            capture = Some(cap);
+                            recording = true;
                             let _ = ui_tx.send(Event::StateChanged(State::Recording));
                             if config.lock_safe().sound_feedback {
                                 crate::audio::playback::play_sound("start");
                             }
                             info!("Recording (toggle)...");
                         }
-                        Err(e) => warn!("Capture failed: {e}"),
+                        Err(e) => {
+                            warn!("Capture failed: {e}");
+                            crate::notify::app(
+                                "Couldn't start recording — check your microphone is connected.",
+                            );
+                        }
                     }
                 } else {
-                    recording.store(false, Ordering::Relaxed);
+                    recording = false;
                     let _ = ui_tx.send(Event::StateChanged(State::Processing));
-                    stop_and_transcribe(&config, &capture);
+                    stop_and_transcribe(&config, &mut capture);
                     let _ = ui_tx.send(Event::StateChanged(State::Idle));
                 }
             }
@@ -1609,19 +1424,16 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 // Check if this specific model needs downloading and notify user.
                 if let Some(info) = crate::model_manager::find_model(&model_name) {
                     if !info.is_downloaded {
-                        crate::notify::send(
-                            "Whisper Push",
-                            &format!(
-                                "Downloading {} (~{}MB)... This may take a few minutes.",
-                                info.label, info.size_mb
-                            ),
-                        );
+                        crate::notify::app(&format!(
+                            "Downloading {} (~{}MB)... This may take a few minutes.",
+                            info.label, info.size_mb
+                        ));
                     }
                 }
 
                 let load_result = match backend {
                     "voxtral-local" => {
-                        let dir = crate::config::data_dir().join("models").join("voxtral");
+                        let dir = crate::config::voxtral_dir();
                         crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
                     }
                     "parakeet" => crate::transcribe::parakeet::load_model(&model_name),
@@ -1632,17 +1444,14 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
                 match load_result {
                     Ok(()) => {
                         info!("{backend} model loaded ({:.1}s)", elapsed.as_secs_f64());
-                        crate::notify::send(
-                            "Whisper Push",
-                            &format!("{backend} ready! ({:.0}s)", elapsed.as_secs_f64()),
-                        );
+                        crate::notify::app(&format!(
+                            "{backend} ready! ({:.0}s)",
+                            elapsed.as_secs_f64()
+                        ));
                     }
                     Err(e) => {
                         tracing::error!("{backend} load failed: {e}");
-                        crate::notify::send(
-                            "Whisper Push",
-                            &format!("Failed to load {backend}: {e}"),
-                        );
+                        crate::notify::app(&format!("Failed to load {backend}: {e}"));
                     }
                 }
 
@@ -1656,62 +1465,89 @@ fn pipeline_loop(rx: Receiver<Event>, config: Arc<Mutex<Config>>, ui_tx: Sender<
     }
 }
 
-/// Minimum interval between status-item pushes. macOS ControlCenter's
-/// status-item XPC connection aborts the whole process (SIGABRT in
+/// Icon updates are **debounced**: we push to the status item only once the
+/// state has stopped changing for `TRAY_DEBOUNCE`. This (a) protects the macOS
+/// ControlCenter status-item XPC, which aborts the whole process (SIGABRT in
 /// `_xpc_serializer_pack`, queue `com.apple.controlcenter.statusitems`) when
-/// flooded with rapid icon updates — e.g. a hotkey/key-repeat storm flapping
-/// Recording↔Idle several times a second. We dedupe identical states and
-/// coalesce bursts to at most one push per interval.
-const TRAY_MIN_INTERVAL: Duration = Duration::from_millis(150);
+/// flooded with rapid updates, and (b) means a state that flaps quickly — e.g.
+/// after a long uptime + wake-from-sleep — never flickers the menu-bar icon; it
+/// just settles on the final state. The menu-bar icon is a secondary cue (the
+/// pill + sounds are instant), so the small settle delay is unnoticeable.
+const TRAY_DEBOUNCE: Duration = Duration::from_millis(140);
 
 struct TrayThrottle {
-    last_state: Option<State>,
-    last_push: Option<Instant>,
-    flush_scheduled: bool,
+    desired: Option<State>,     // most recently requested state
+    pushed: Option<State>,      // what's currently on the status item
+    settle_at: Option<Instant>, // when `desired` is stable enough to push
+    scheduled: bool,            // a flush is already pending
 }
 static TRAY_THROTTLE: Mutex<TrayThrottle> = Mutex::new(TrayThrottle {
-    last_state: None,
-    last_push: None,
-    flush_scheduled: false,
+    desired: None,
+    pushed: None,
+    settle_at: None,
+    scheduled: false,
 });
-/// Event sender used to re-apply the final icon after a coalesced burst (set
-/// once in `run`). The push itself always happens on the main thread.
+/// Event sender used to fire the debounced flush on the main thread (set once in
+/// `run`). The push itself always happens on the main thread.
 static TRAY_TX: OnceLock<Sender<Event>> = OnceLock::new();
 
+fn schedule_tray_flush(after: Duration) {
+    if let Some(tx) = TRAY_TX.get() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(after);
+            let _ = tx.send(Event::RefreshTrayIcon);
+        });
+    }
+}
+
 fn set_tray_icon(tray: &Option<TrayIcon>, state: State) {
-    // Dedupe + coalesce to protect the ControlCenter status-item XPC (a flood of
-    // updates crashes the process). Only ever called on the main thread, so the
-    // throttle state needs no cross-thread coordination beyond the mutex.
-    {
+    let _ = tray; // the actual push happens in flush_tray_icon (debounced)
+    let mut t = TRAY_THROTTLE.lock_safe();
+    if t.desired == Some(state) {
+        return; // already heading there
+    }
+    t.desired = Some(state);
+    t.settle_at = Some(Instant::now() + TRAY_DEBOUNCE);
+    if !t.scheduled {
+        t.scheduled = true;
+        schedule_tray_flush(TRAY_DEBOUNCE);
+    }
+}
+
+/// Debounced flush (main thread): push `desired` only once it has been stable
+/// for the debounce window; otherwise wait out the remaining time.
+fn flush_tray_icon(tray: &Option<TrayIcon>) {
+    let (push, reschedule) = {
         let mut t = TRAY_THROTTLE.lock_safe();
-        if t.last_state == Some(state) {
-            t.flush_scheduled = false; // settled on this state
-            return;
-        }
-        let now = Instant::now();
-        let too_soon = t
-            .last_push
-            .is_some_and(|p| now.duration_since(p) < TRAY_MIN_INTERVAL);
-        if too_soon {
-            // Mid-burst: skip this push but ensure a single trailing refresh
-            // re-applies the final state shortly (on the main thread).
-            if !t.flush_scheduled {
-                t.flush_scheduled = true;
-                if let Some(tx) = TRAY_TX.get() {
-                    let tx = tx.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(TRAY_MIN_INTERVAL);
-                        let _ = tx.send(Event::RefreshTrayIcon);
-                    });
+        match t.settle_at {
+            Some(dl) => {
+                let now = Instant::now();
+                if now >= dl {
+                    t.scheduled = false;
+                    let d = t.desired;
+                    if t.pushed != d {
+                        t.pushed = d;
+                        (d, None)
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (None, Some(dl - now)) // changed again mid-window → wait more
                 }
             }
-            return;
+            None => {
+                t.scheduled = false;
+                (None, None)
+            }
         }
-        t.last_state = Some(state);
-        t.last_push = Some(now);
-        t.flush_scheduled = false;
+    };
+    if let Some(state) = push {
+        set_tray_icon_now(tray, state);
     }
-    set_tray_icon_now(tray, state);
+    if let Some(wait) = reschedule {
+        schedule_tray_flush(wait);
+    }
 }
 
 fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
@@ -1770,21 +1606,23 @@ fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
 /// Stop capture, transcribe audio, and paste result.
 fn stop_and_transcribe(
     config: &Arc<Mutex<Config>>,
-    capture: &Arc<Mutex<Option<crate::audio::capture::AudioCapture>>>,
+    capture: &mut Option<crate::audio::capture::AudioCapture>,
 ) {
     let cfg = config.lock_safe().clone();
     if cfg.sound_feedback {
         crate::audio::playback::play_sound("stop");
     }
 
-    let audio = capture
-        .lock()
-        .unwrap()
-        .take()
-        .map(|c| c.stop())
-        .unwrap_or_default();
+    let cap = capture.take();
+    // Did the device drop out mid-recording (AirPods/Bluetooth)? Check before we
+    // consume the capture, so we can tell the user instead of failing silently.
+    let device_lost = cap.as_ref().is_some_and(|c| c.device_lost());
+    let audio = cap.map(|c| c.stop()).unwrap_or_default();
 
     if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
+        if device_lost {
+            crate::notify::app("Recording stopped — the microphone disconnected.");
+        }
         info!("Too short, skipping");
         return;
     }
@@ -1811,17 +1649,19 @@ fn stop_and_transcribe(
             info!(
                 "Pasting ({:.2}s): '{}'",
                 start.elapsed().as_secs_f64(),
-                if text.len() > 80 { &text[..80] } else { &text }
+                // char-based, not byte-based: `&text[..80]` panics if byte 80
+                // lands mid-codepoint (French accents, CJK — all in scope).
+                text.chars().take(80).collect::<String>()
             );
             if let Err(e) = crate::paste::paste_text(&text) {
                 tracing::error!("Paste failed: {e}");
             }
-            // No per-dictation notification (noise) — see Transcribed handler.
+            // No per-dictation notification (noise).
         }
         Ok(_) => info!("No speech detected"),
         Err(e) => {
             tracing::error!("Transcription: {e}");
-            crate::notify::send("Whisper Push", &format!("Error: {e}"));
+            crate::notify::app(&format!("Error: {e}"));
         }
     }
 }
@@ -1870,7 +1710,7 @@ fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
 /// user's correction. Runs on its own thread (the dialog blocks on input).
 fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
     let Some(last) = crate::dictionary::last_dictation() else {
-        crate::notify::send("Whisper Push", "No recent dictation to correct.");
+        crate::notify::app("No recent dictation to correct.");
         return;
     };
     let corrected = match osascript_input(
@@ -1905,14 +1745,12 @@ fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
             } else {
                 "Noted — nothing to learn (rewrite / everyday words ignored).".to_string()
             };
-            crate::notify::send("Whisper Push", &msg);
+            crate::notify::app(&msg);
             let _ = tx.send(Event::DictChanged);
         }
-        Correction::NoLast => crate::notify::send("Whisper Push", "Nothing to correct yet."),
-        Correction::NotReady => crate::notify::send("Whisper Push", "Dictionary is off."),
-        Correction::SaveError(e) => {
-            crate::notify::send("Whisper Push", &format!("Save failed: {e}"))
-        }
+        Correction::NoLast => crate::notify::app("Nothing to correct yet."),
+        Correction::NotReady => crate::notify::app("Dictionary is off."),
+        Correction::SaveError(e) => crate::notify::app(&format!("Save failed: {e}")),
     }
 }
 
@@ -1944,10 +1782,10 @@ fn add_word_dialog(tx: crossbeam_channel::Sender<Event>) {
     }
     match crate::dictionary::add_entry(&term, &variants, false, None) {
         Ok(()) => {
-            crate::notify::send("Whisper Push", &format!("Added \u{201c}{term}\u{201d}"));
+            crate::notify::app(&format!("Added \u{201c}{term}\u{201d}"));
             let _ = tx.send(Event::DictChanged);
         }
-        Err(e) => crate::notify::send("Whisper Push", &format!("Add failed: {e}")),
+        Err(e) => crate::notify::app(&format!("Add failed: {e}")),
     }
 }
 
@@ -1968,7 +1806,7 @@ fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
         Rejected(r) => format!("Activation failed: {r}"),
         Offline => "Couldn't reach the license server. Check your connection and retry.".into(),
     };
-    crate::notify::send("Whisper Push", &msg);
+    crate::notify::app(&msg);
     let _ = tx.send(Event::LicenseChanged);
 }
 
@@ -1987,7 +1825,7 @@ fn license_deactivate_dialog(tx: crossbeam_channel::Sender<Event>) {
             "Couldn't reach the server \u{2014} deactivate from your account page instead.".into()
         }
     };
-    crate::notify::send("Whisper Push", &msg);
+    crate::notify::app(&msg);
     let _ = tx.send(Event::LicenseChanged);
 }
 
@@ -2040,8 +1878,7 @@ fn osascript_input(message: &str, prefill: &str) -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn osascript_input(_message: &str, _prefill: &str) -> Option<String> {
-    crate::notify::send(
-        "Whisper Push",
+    crate::notify::app(
         "In-app dictionary editing is macOS-only for now — use `whisper-push dict`.",
     );
     None

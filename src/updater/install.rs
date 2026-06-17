@@ -29,6 +29,11 @@ fn download_zip(url: &str) -> Result<PathBuf> {
     let zip_path = tmp_dir.join("update.zip");
 
     let response = ureq::get(url)
+        .config()
+        // Generous ceiling for a large asset, but bounded — a stalled download
+        // must eventually fail (and re-enable the menu) rather than hang forever.
+        .timeout_global(Some(std::time::Duration::from_secs(600)))
+        .build()
         .header(
             "User-Agent",
             &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),

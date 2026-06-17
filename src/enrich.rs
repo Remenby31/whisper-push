@@ -27,12 +27,9 @@ pub fn maybe_suggest(term: &str, lang: &str) {
     std::thread::spawn(move || {
         if let Some(canonical) = suggest_canonical(&term, &lang) {
             tracing::info!("enrichment: '{term}' → canonical '{canonical}'");
-            crate::notify::send(
-                "Whisper Push",
-                &format!(
-                    "Spelling check: did you mean \u{201c}{canonical}\u{201d}? (edit in Dictionary)"
-                ),
-            );
+            crate::notify::app(&format!(
+                "Spelling check: did you mean \u{201c}{canonical}\u{201d}? (edit in Dictionary)"
+            ));
         }
     });
 }

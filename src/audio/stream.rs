@@ -1,5 +1,10 @@
 //! Streaming audio capture — feeds chunks to a consumer in real-time.
 //! Used for streaming transcription (Voxtral Realtime).
+//!
+//! Reserved: streaming dictation is disabled (blocks on the M4 Metal shader
+//! compile — see CLAUDE.md); the live path is batch capture in `capture.rs`.
+//! Kept for when streaming is re-enabled.
+#![allow(dead_code)]
 
 use crate::util::LockSafe;
 use cpal::traits::{DeviceTrait, StreamTrait};

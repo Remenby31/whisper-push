@@ -94,15 +94,15 @@ pub fn print_status() {
 }
 
 fn whisper_model_path(filename: &str) -> PathBuf {
-    crate::config::data_dir().join("models").join(filename)
+    crate::config::whisper_model_path(filename)
 }
 
 fn parakeet_model_dir() -> PathBuf {
-    crate::config::data_dir().join("models").join("parakeet")
+    crate::config::parakeet_dir()
 }
 
 fn voxtral_model_dir() -> PathBuf {
-    crate::config::data_dir().join("models").join("voxtral")
+    crate::config::voxtral_dir()
 }
 
 /// Derive the backend from a model name.

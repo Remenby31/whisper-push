@@ -146,6 +146,8 @@ mod inner {
     /// Streaming transcription API.
     /// Accumulates audio, re-encodes encoder each chunk (~50ms),
     /// persists decoder KV cache to only decode NEW positions (~5ms/token).
+    /// Reserved: disabled pending the M4 Metal shader-compile fix (see CLAUDE.md).
+    #[allow(dead_code)]
     pub mod streaming {
         use crate::util::LockSafe;
         use anyhow::Result;
@@ -260,12 +262,16 @@ mod inner {
     }
 }
 
+// Reserved: streaming dictation is disabled (blocks on M4 Metal shader compile —
+// see CLAUDE.md); batch mode is the live path. Kept for when that's fixed.
 #[cfg(feature = "voxtral")]
+#[allow(unused_imports)]
 pub use inner::streaming;
 #[cfg(feature = "voxtral")]
 pub use inner::{is_loaded, load_model, transcribe, unload_model};
 
 #[cfg(not(feature = "voxtral"))]
+#[allow(dead_code)] // reserved: streaming disabled (see above)
 pub mod streaming {
     pub struct StreamingSession;
     pub fn start() -> anyhow::Result<StreamingSession> {

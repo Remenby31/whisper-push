@@ -1,6 +1,6 @@
 [package]
 name = "whisper-push"
-version = "1.1.3"
+version = "1.2.0"
 edition = "2024"
 authors = ["Whisper Push contributors <hello@whisperpush.com>"]
 description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
@@ -19,7 +19,11 @@ members = ["crates/whisper-push-dict", "crates/whisper-push-acoustic"]
 resolver = "3"
 
 [features]
-default = ["voxtral", "parakeet", "metal"]
+# Cross-platform default — NO GPU backend here, so a plain `cargo build` works on
+# every OS out of the box. macOS auto-enables Metal via a target-specific
+# whisper-rs dependency (see [target.'cfg(target_os = "macos")'] below); Linux and
+# Windows opt into a GPU backend explicitly with `--features cuda` / `vulkan`.
+default = ["voxtral", "parakeet"]
 metal = ["whisper-rs/metal"]
 cuda = ["whisper-rs/cuda"]
 vulkan = ["whisper-rs/vulkan"]
@@ -68,6 +72,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Notifications
 notify-rust = "4"
 
+# Native dialogs (cross-platform first-launch help popup): NSAlert on macOS,
+# MessageBox on Windows, GTK on Linux. macOS/Windows use their native backends
+# (no extra features); Linux needs the `gtk3` backend for a *synchronous* dialog
+# (the default `xdg-portal` backend is async-only) — enabled per-target below so
+# `gtk-sys` is never pulled into the macOS/Windows builds.
+rfd = { version = "0.15", default-features = false }
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 
@@ -94,6 +105,12 @@ whisper-push-dict = { path = "crates/whisper-push-dict" }
 whisper-push-acoustic = { path = "crates/whisper-push-acoustic" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Metal is always the right whisper.cpp backend on Apple Silicon — enable it
+# automatically so a plain `cargo build` on macOS is GPU-accelerated, without
+# putting the macOS-only `metal` feature into the cross-platform `default` set
+# (which would break Linux/Windows builds). Cargo merges these features with the
+# base `whisper-rs` dependency above.
+whisper-rs = { version = "0.16", features = ["metal"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSNotification", "NSString", "NSThread", "NSDate", "NSRunLoop", "NSProcessInfo", "NSTimer", "NSGeometry", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = [
@@ -135,6 +152,10 @@ windows = { version = "0.61", features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
+# gtk3 backend gives rfd a synchronous MessageDialog on Linux (GTK is already a
+# build dep via tray-icon). default-features stays off so we don't also pull the
+# async-only xdg-portal stack.
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 
 [[bin]]
 name = "whisper-push-test"

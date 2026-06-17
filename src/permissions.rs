@@ -5,80 +5,92 @@
 /// the keyboard event tap is re-created with permissions. Runs in the background.
 pub fn guided_setup() {
     #[cfg(target_os = "macos")]
-    std::thread::spawn(|| {
-        use std::time::Duration;
-
-        let initial = check_all();
-        if initial.all_granted() {
-            crate::notify::send("Whisper Push", "All permissions already granted \u{2713}");
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Re-entry guard: the startup auto-prompt + repeated "Run Guided Setup…"
+        // clicks must not stack multiple concurrent polling threads (each opens
+        // Settings panes and races to restart the daemon).
+        static RUNNING: AtomicBool = AtomicBool::new(false);
+        if RUNNING.swap(true, Ordering::SeqCst) {
             return;
         }
+        std::thread::spawn(|| {
+            // Clear the guard on any exit path (the body has many early returns).
+            struct Done;
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    RUNNING.store(false, Ordering::SeqCst);
+                }
+            }
+            let _done = Done;
+            use std::time::Duration;
 
-        // ── Step 1: Microphone (one-tap system dialog) ──
-        if initial.microphone != PermState::Granted {
-            crate::notify::send(
-                "Whisper Push \u{2014} Setup (1/3)",
-                "Grant microphone access in the dialog.",
-            );
-            request_microphone();
-            // Mic prompt is a one-tap dialog; poll briefly.
-            if !poll_until(|| check_microphone() == PermState::Granted, 30) {
-                open_settings("Privacy_Microphone");
+            let initial = check_all();
+            if initial.all_granted() {
+                crate::notify::app("All permissions already granted \u{2713}");
+                return;
+            }
+
+            // ── Step 1: Microphone (one-tap system dialog) ──
+            if initial.microphone != PermState::Granted {
+                crate::notify::send(
+                    "Whisper Push \u{2014} Setup (1/3)",
+                    "Grant microphone access in the dialog.",
+                );
+                request_microphone();
+                // Mic prompt is a one-tap dialog; poll briefly.
                 if !poll_until(|| check_microphone() == PermState::Granted, 30) {
-                    crate::notify::send(
-                        "Whisper Push",
-                        "Microphone not granted. Open menu \u{2192} Permissions to retry.",
+                    open_settings("Privacy_Microphone");
+                    if !poll_until(|| check_microphone() == PermState::Granted, 30) {
+                        crate::notify::app(
+                            "Microphone not granted. Open menu \u{2192} Permissions to retry.",
+                        );
+                        return;
+                    }
+                }
+            }
+
+            // ── Step 2: Accessibility (manual toggle in Settings) ──
+            if check_accessibility() != PermState::Granted {
+                request_accessibility();
+                crate::notify::send(
+                    "Whisper Push \u{2014} Setup (2/3)",
+                    "Enable Whisper Push in Accessibility.",
+                );
+                open_settings("Privacy_Accessibility");
+                if !poll_until(|| check_accessibility() == PermState::Granted, 60) {
+                    crate::notify::app(
+                        "Accessibility not granted. Open menu \u{2192} Permissions to retry.",
                     );
                     return;
                 }
             }
-        }
 
-        // ── Step 2: Accessibility (manual toggle in Settings) ──
-        if check_accessibility() != PermState::Granted {
-            request_accessibility();
-            crate::notify::send(
-                "Whisper Push \u{2014} Setup (2/3)",
-                "Enable Whisper Push in Accessibility.",
-            );
-            open_settings("Privacy_Accessibility");
-            if !poll_until(|| check_accessibility() == PermState::Granted, 60) {
+            // ── Step 3: Input Monitoring (manual toggle in Settings) ──
+            // Called AFTER Accessibility — uses CGRequestListenEventAccess which
+            // is not suppressed by the earlier AXIsProcessTrustedWithOptions call
+            // (unlike IOHIDRequestAccess — Apple bug FB7381305).
+            if check_input_monitoring() != PermState::Granted {
+                request_input_monitoring();
                 crate::notify::send(
-                    "Whisper Push",
-                    "Accessibility not granted. Open menu \u{2192} Permissions to retry.",
+                    "Whisper Push \u{2014} Setup (3/3)",
+                    "Enable Whisper Push in Input Monitoring.",
                 );
-                return;
+                open_settings("Privacy_ListenEvent");
+                if !poll_until(|| check_input_monitoring() == PermState::Granted, 60) {
+                    crate::notify::app(
+                        "Input Monitoring not granted. Open menu \u{2192} Permissions to retry.",
+                    );
+                    return;
+                }
             }
-        }
 
-        // ── Step 3: Input Monitoring (manual toggle in Settings) ──
-        // Called AFTER Accessibility — uses CGRequestListenEventAccess which
-        // is not suppressed by the earlier AXIsProcessTrustedWithOptions call
-        // (unlike IOHIDRequestAccess — Apple bug FB7381305).
-        if check_input_monitoring() != PermState::Granted {
-            request_input_monitoring();
-            crate::notify::send(
-                "Whisper Push \u{2014} Setup (3/3)",
-                "Enable Whisper Push in Input Monitoring.",
-            );
-            open_settings("Privacy_ListenEvent");
-            if !poll_until(|| check_input_monitoring() == PermState::Granted, 60) {
-                crate::notify::send(
-                    "Whisper Push",
-                    "Input Monitoring not granted. Open menu \u{2192} Permissions to retry.",
-                );
-                return;
-            }
-        }
-
-        // ── All granted — restart to pick up permissions ──
-        crate::notify::send(
-            "Whisper Push",
-            "\u{2713} All set! Restarting to enable the hotkey\u{2026}",
-        );
-        std::thread::sleep(Duration::from_millis(1500));
-        restart_daemon();
-    });
+            // ── All granted — restart to pick up permissions ──
+            crate::notify::app("\u{2713} All set! Restarting to enable the hotkey\u{2026}");
+            std::thread::sleep(Duration::from_millis(1500));
+            restart_daemon();
+        });
+    }
 }
 
 /// Poll a condition every 3 seconds, up to `max_polls` times.
