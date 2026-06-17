@@ -166,6 +166,11 @@ jobs:
         run: |
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
+        # WiX Toolset was removed from the windows-latest runner image, so
+        # `cargo wix` can't find candle/light and fails. Don't block the release
+        # on it — ship the portable .zip below; the MSI is a nice-to-have.
+        # (To restore the installer, install WiX in CI before this step.)
+        continue-on-error: true
         run: cargo wix --no-build --nocapture --output dist/whisper-push-x64.msi
       - name: Package portable .zip
         shell: bash
@@ -199,6 +204,8 @@ jobs:
         run: |
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
+        # See windows-cpu note: WiX isn't on the runner; don't block the release.
+        continue-on-error: true
         run: cargo wix --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
       - name: Package portable .zip
         shell: bash
