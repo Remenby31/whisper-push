@@ -157,6 +157,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install WiX Toolset 3.14
+        # GitHub removed WiX from the runner images; cargo-wix needs candle/light
+        # on PATH. Fetch the WiX 3.14 binaries and add them.
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip -OutFile wix314.zip
+          Expand-Archive -Path wix314.zip -DestinationPath wix314 -Force
+          "$PWD\wix314" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
       - name: Build release (no GPU features)
@@ -166,10 +174,8 @@ jobs:
         run: |
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
-        # WiX Toolset was removed from the windows-latest runner image, so
-        # `cargo wix` can't find candle/light and fails. Don't block the release
-        # on it — ship the portable .zip below; the MSI is a nice-to-have.
-        # (To restore the installer, install WiX in CI before this step.)
+        # WiX is installed above; keep continue-on-error so a future WiX/toolchain
+        # break omits the .msi (portable .zip still ships) instead of blocking.
         continue-on-error: true
         run: cargo wix --no-build --nocapture --output dist/whisper-push-x64.msi
       - name: Package portable .zip
@@ -188,20 +194,23 @@ jobs:
 
   # ─── Windows CUDA — installer .msi + portable .zip ────────────────────────
   windows-cuda:
-    runs-on: windows-latest
+    # Pin to windows-2022: windows-latest now ships Visual Studio 18 (2026), whose
+    # generator ("Visual Studio 18 2026") + MSVC 14.51 aren't supported by CUDA
+    # 12.4's nvcc, so the whisper.cpp CUDA build can't configure. windows-2022 has
+    # VS 2022 — the combo that built successfully before the image bump.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: '12.4.0'
-      - name: Setup CMake 3.x
-        # The windows-latest image ships CMake 4.x, which breaks whisper.cpp's
-        # CUDA compiler detection (CMakeDetermineCompilerId fails). Pin 3.31 for
-        # this build only — linux-cuda and the CPU Windows build are unaffected.
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: '3.31.6'
+      - name: Install WiX Toolset 3.14
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip -OutFile wix314.zip
+          Expand-Archive -Path wix314.zip -DestinationPath wix314 -Force
+          "$PWD\wix314" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
       - name: Build release (CUDA)
