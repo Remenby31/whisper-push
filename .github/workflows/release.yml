@@ -180,10 +180,14 @@ jobs:
         run: |
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
-        # WiX is installed above; keep continue-on-error so a future WiX/toolchain
-        # break omits the .msi (portable .zip still ships) instead of blocking.
+        # `-p whisper-push` is required: the repo is a Cargo workspace, so cargo
+        # wix errors "Workspace detected" without it. Keep continue-on-error so a
+        # future toolchain break omits the .msi (portable .zip still ships).
+        shell: bash
         continue-on-error: true
-        run: cargo wix --no-build --nocapture --output dist/whisper-push-x64.msi
+        run: |
+          mkdir -p dist
+          cargo wix -p whisper-push --no-build --nocapture --output dist/whisper-push-x64.msi
       - name: Package portable .zip
         shell: bash
         run: |
@@ -233,9 +237,12 @@ jobs:
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         if: steps.build_cuda.outcome == 'success'
-        # See windows-cpu note: WiX isn't on the runner; don't block the release.
+        # See windows-cpu note: -p whisper-push (workspace) + continue-on-error.
+        shell: bash
         continue-on-error: true
-        run: cargo wix --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
+        run: |
+          mkdir -p dist
+          cargo wix -p whisper-push --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
       - name: Package portable .zip
         if: steps.build_cuda.outcome == 'success'
         shell: bash
@@ -268,5 +275,12 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          # Only real deliverables — not stray build logs (e.g. the CUDA
+          # installer log) that would otherwise leak in as release assets.
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
+            artifacts/**/*.deb
+            artifacts/**/*.tar.gz
+            artifacts/**/*.msi
           generate_release_notes: true
