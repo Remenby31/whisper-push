@@ -57,6 +57,12 @@ jobs:
           echo "$APPLE_API_KEY_BASE64" | base64 --decode \
             > ~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
 
+      # create-dmg builds the pixel-perfect drag-to-Applications DMG window.
+      # Without it, `make dmg` falls back to a bare image (no Applications
+      # drop-link) — i.e. the lost macOS drag-and-drop onboarding.
+      - name: Install create-dmg
+        run: brew install create-dmg
+
       # Determine signing identity (Developer ID if cert available, else ad-hoc)
       - name: Build + sign + DMG + ZIP
         env:

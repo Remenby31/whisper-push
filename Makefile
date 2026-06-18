@@ -122,7 +122,10 @@ dmg: bundle
 	else \
 		echo "✓ App signed with Developer ID (DMG path)"; \
 	fi
-	@# Package the DMG (drag-to-Applications layout via create-dmg).
+	@# Package the DMG with the pixel-perfect drag-to-Applications layout via
+	@# create-dmg (install it with `brew install create-dmg`). If it's missing or
+	@# fails, fall back to a plain image that STILL carries an Applications
+	@# drop-link, so users can always drag-to-install.
 	@mkdir -p build/dist
 	@rm -f "build/dist/Whisper-Push-macOS-arm64.dmg"
 	@if command -v create-dmg > /dev/null; then \
@@ -138,8 +141,16 @@ dmg: bundle
 			"build/dist/Whisper-Push-macOS-arm64.dmg" build/dmg-stage || true; \
 		rm -rf build/dmg-stage; \
 	else \
-		hdiutil create -volname "$(APP_NAME)" -srcfolder "$(APP_DIR)" -ov -format UDZO \
+		echo "⚠ create-dmg not found — run 'brew install create-dmg' for the styled DMG"; \
+	fi
+	@if [ ! -f "build/dist/Whisper-Push-macOS-arm64.dmg" ]; then \
+		echo "→ building drag-to-Applications fallback DMG (no styled background)"; \
+		rm -rf build/dmg-stage && mkdir -p build/dmg-stage; \
+		cp -R "$(APP_DIR)" build/dmg-stage/; \
+		ln -s /Applications build/dmg-stage/Applications; \
+		hdiutil create -volname "$(APP_NAME)" -srcfolder build/dmg-stage -ov -format UDZO \
 			"build/dist/Whisper-Push-macOS-arm64.dmg"; \
+		rm -rf build/dmg-stage; \
 	fi
 	@du -h "build/dist/Whisper-Push-macOS-arm64.dmg" | sed 's|^|  |'
 	@echo "✓ DMG created at build/dist/Whisper-Push-macOS-arm64.dmg"
