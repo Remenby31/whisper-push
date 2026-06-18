@@ -195,25 +195,41 @@ jobs:
       - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: '12.4.0'
+      - name: Setup CMake 3.x
+        # The windows-latest image ships CMake 4.x, which breaks whisper.cpp's
+        # CUDA compiler detection (CMakeDetermineCompilerId fails). Pin 3.31 for
+        # this build only — linux-cuda and the CPU Windows build are unaffected.
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.31.6'
       - name: Install cargo-wix
         run: cargo install cargo-wix --locked
       - name: Build release (CUDA)
+        id: build_cuda
+        # Never hard-fail the whole release on Windows CUDA toolchain churn: the
+        # job still succeeds (downstream steps are gated on this one's success),
+        # and the release simply omits the Windows-CUDA variant if it breaks.
+        continue-on-error: true
         run: cargo build --release --no-default-features --features cuda,voxtral,parakeet
       - name: Initialize wix template (if missing)
+        if: steps.build_cuda.outcome == 'success'
         shell: bash
         run: |
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
+        if: steps.build_cuda.outcome == 'success'
         # See windows-cpu note: WiX isn't on the runner; don't block the release.
         continue-on-error: true
         run: cargo wix --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
       - name: Package portable .zip
+        if: steps.build_cuda.outcome == 'success'
         shell: bash
         run: |
           mkdir -p dist/portable
           cp target/release/whisper-push.exe dist/portable/
           cd dist/portable && 7z a ../whisper-push-windows-x64-cuda.zip .
       - name: Upload artifacts
+        if: steps.build_cuda.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: whisper-push-windows-x64-cuda
