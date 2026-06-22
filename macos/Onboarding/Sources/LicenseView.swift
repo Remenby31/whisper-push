@@ -10,9 +10,9 @@ import AppKit
 struct LicenseView: View {
     @EnvironmentObject var state: OnboardingState
 
-    // Variant-locked, permanent checkout links (Lemon Squeezy). TEST-mode URLs.
-    private let checkoutAnnual = "https://whisperpush.lemonsqueezy.com/checkout/buy/3e169735-0c69-4169-a266-3ac64ea71cb0"
-    private let checkoutLifetime = "https://whisperpush.lemonsqueezy.com/checkout/buy/427cb9ac-4cd2-4581-b722-29a47aa4d732"
+    // Variant-locked, permanent checkout links (Lemon Squeezy). LIVE (prod) URLs.
+    private let checkoutAnnual = "https://whisperpush.lemonsqueezy.com/checkout/buy/3b9fd0f0-f299-4108-86eb-93c03e2eca23"
+    private let checkoutLifetime = "https://whisperpush.lemonsqueezy.com/checkout/buy/04ecf078-9a78-4daf-a5a5-edf77a019c07"
 
     private enum Plan { case annual, lifetime }
     private enum Mode: Equatable { case choose, checkout(String), activate }

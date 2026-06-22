@@ -14,9 +14,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // ─── Lemon Squeezy identity (store "whisperpush", one product, two variants) ─
 // Set LS_STORE_ID back to 0 to disable the ownership check (dev/testing).
 const LS_STORE_ID: u64 = 390985;
-const LS_PRODUCT_ID: u64 = 1123286;
-const LS_VARIANT_ANNUAL: u64 = 1758298; // subscription, 19,99 €/yr
-const LS_VARIANT_LIFETIME: u64 = 1758239; // single payment, 49,99 €
+const LS_PRODUCT_ID: u64 = 1123454;
+const LS_VARIANT_ANNUAL: u64 = 1758456; // subscription, 19,99 €/yr (live)
+const LS_VARIANT_LIFETIME: u64 = 1758455; // single payment, 49,99 € (live)
 
 // Checkout happens in the in-app modal (WKWebView in LicenseView.swift); the
 // checkout URLs live there. The daemon never opens an external browser.

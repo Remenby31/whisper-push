@@ -396,6 +396,30 @@ mod ax {
 
     type AXUIElementRef = *const c_void;
 
+    /// Hard ceiling for a single Accessibility read. Normal reads finish in a few
+    /// milliseconds; this bound only ever trips on an unresponsive (beachballing)
+    /// focused app. Generous enough never to drop a legitimately slow field.
+    const AX_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// Run an AX read on a scratch thread, returning `None` if it doesn't finish
+    /// within [`AX_TIMEOUT`]. `AXUIElementCopyAttributeValue` is a *synchronous IPC*
+    /// to the focused app's process — if that app is hung, the call blocks forever.
+    /// These readers run on the pipeline thread, so an unbounded block would wedge
+    /// all future dictation. The orphaned thread unblocks (and exits) on its own
+    /// once the app responds; its late result is dropped. The closure builds and
+    /// releases every CF ref internally and returns an owned `String`, so nothing
+    /// non-`Send` crosses the thread boundary.
+    fn with_timeout<F>(f: F) -> Option<String>
+    where
+        F: FnOnce() -> Option<String> + Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(AX_TIMEOUT).ok().flatten()
+    }
+
     #[link(name = "ApplicationServices", kind = "framework")]
     unsafe extern "C" {
         fn AXUIElementCreateSystemWide() -> AXUIElementRef;
@@ -447,13 +471,13 @@ mod ax {
         }
     }
 
-    /// Text of the focused field (`kAXValue`).
+    /// Text of the focused field (`kAXValue`). Timeout-guarded (see [`with_timeout`]).
     pub fn focused_text() -> Option<String> {
-        read_focused_attr("AXValue")
+        with_timeout(|| read_focused_attr("AXValue"))
     }
 
-    /// Currently selected text (`kAXSelectedText`).
+    /// Currently selected text (`kAXSelectedText`). Timeout-guarded.
     pub fn selected_text() -> Option<String> {
-        read_focused_attr("AXSelectedText")
+        with_timeout(|| read_focused_attr("AXSelectedText"))
     }
 }

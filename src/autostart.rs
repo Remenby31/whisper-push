@@ -52,6 +52,13 @@ mod macos {
     <true/>
     <key>ProcessType</key>
     <string>Interactive</string>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 </dict>
 </plist>"#,
             app_path.display()

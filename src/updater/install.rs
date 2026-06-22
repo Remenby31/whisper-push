@@ -207,6 +207,8 @@ fn install_and_relaunch(new_app: &Path) -> Result<()> {
             .spawn();
     }
 
-    // Exit current process
-    std::process::exit(0);
+    // Exit cleanly (skip C++ dtors → no ggml-metal teardown abort; the relaunch
+    // above brings up the new version). A clean code 0 also means the LaunchAgent's
+    // KeepAlive{SuccessfulExit:false} won't fight the handoff.
+    crate::util::exit_clean();
 }

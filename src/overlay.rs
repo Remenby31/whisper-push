@@ -163,7 +163,13 @@ mod macos {
             panel.setReleasedWhenClosed(false);
             panel.setOpaque(false);
             panel.setBackgroundColor(Some(&NSColor::clearColor()));
-            panel.setHasShadow(true);
+            // NO window shadow: the pill's contents are reshaped ~60×/s while
+            // recording, and a shadowed window recomputes `_setShadowParameters`
+            // (AX-contrast + CFPreferences lookups) on every reshape. That pegged
+            // the main thread so hard the event loop couldn't drain the
+            // stop-recording event → permanent 100% CPU / "Not Responding".
+            // The pill already has its own dark rounded background.
+            panel.setHasShadow(false);
             panel.setIgnoresMouseEvents(true);
             panel.setLevel(25); // NSStatusWindowLevel — floats above normal windows
             panel.setCollectionBehavior(
@@ -243,7 +249,12 @@ mod macos {
 
     fn ensure_timer(p: &mut Pill) {
         if p.timer.is_none() {
-            let block = block2::RcBlock::new(|_t: core::ptr::NonNull<NSTimer>| tick());
+            // `tick` runs through an objc2 block invoked by the main-thread
+            // CFRunLoop ~60×/s; a panic there would unwind across the Obj-C frame
+            // = UB → process abort. Contain it (a dropped frame is harmless).
+            let block = block2::RcBlock::new(|_t: core::ptr::NonNull<NSTimer>| {
+                let _ = std::panic::catch_unwind(tick);
+            });
             let t = unsafe {
                 NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / FPS, true, &block)
             };

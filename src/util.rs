@@ -20,3 +20,17 @@ impl<T> LockSafe<T> for Mutex<T> {
         self.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
+
+/// Exit the process immediately **without** running C/C++ static destructors.
+///
+/// whisper.cpp / ggml-metal aborts in a static destructor at normal exit
+/// (`GGML_ASSERT … ggml_abort` → "Abort trap: 6"); `process::exit` and returning
+/// from `main` both run those dtors. `_exit` skips them, giving a clean exit
+/// code 0. This matters now that the LaunchAgent uses
+/// `KeepAlive{SuccessfulExit:false}`: an *abnormal* abort on a user-requested
+/// Quit would otherwise make launchd resurrect the app instead of staying down.
+pub fn exit_clean() -> ! {
+    // SAFETY: `_exit` simply terminates the process; no Rust/C dtors or atexit
+    // handlers run. We accept losing any buffered (non-blocking) log lines.
+    unsafe { libc::_exit(0) }
+}
