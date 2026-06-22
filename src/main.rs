@@ -306,7 +306,15 @@ fn init_logging(debug: bool) {
     let log_dir = config::log_dir();
     let _ = std::fs::create_dir_all(&log_dir);
 
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "whisper-push.log");
+    // Cap retained rolled files at the appender level (belt-and-suspenders with
+    // the startup `cleanup_old_logs` sweep) so the log dir can't grow unbounded.
+    // Fall back to the simple daily appender if the builder can't initialize.
+    let file_appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("whisper-push.log")
+        .max_log_files(7)
+        .build(&log_dir)
+        .unwrap_or_else(|_| tracing_appender::rolling::daily(&log_dir, "whisper-push.log"));
 
     tracing_subscriber::registry()
         .with(filter)
@@ -320,7 +328,10 @@ fn init_logging(debug: bool) {
         .init();
 }
 
-/// Remove log files older than 7 days.
+/// Largest the launchd stderr capture may grow before it's rotated aside.
+const MAX_LAUNCHD_LOG: u64 = 5 * 1024 * 1024; // 5 MiB
+
+/// Remove rolled log files older than 7 days and cap the launchd stderr capture.
 fn cleanup_old_logs() {
     let log_dir = config::log_dir();
     let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
@@ -332,7 +343,14 @@ fn cleanup_old_logs() {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("log") {
+        // Rolled files are `whisper-push.log.YYYY-MM-DD` — the *date* is the
+        // extension, so the old `extension() == "log"` test matched nothing and
+        // never deleted anything. Match on the filename prefix instead.
+        let is_app_log = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("whisper-push.log"));
+        if is_app_log {
             if let Ok(meta) = path.metadata() {
                 if let Ok(modified) = meta.modified() {
                     if modified < cutoff {
@@ -340,6 +358,19 @@ fn cleanup_old_logs() {
                     }
                 }
             }
+        }
+    }
+
+    // The launchd stderr capture is a single, continuously-appended file the age
+    // sweep above can't catch (its mtime is always fresh). Rotate it aside when
+    // it gets large; the next launch starts a fresh one. Renaming is safe even
+    // while launchd holds the fd open — its writes follow the inode, not the path.
+    let launchd = log_dir.join("launchd-stderr.log");
+    if let Ok(meta) = launchd.metadata() {
+        if meta.len() > MAX_LAUNCHD_LOG {
+            let old = log_dir.join("launchd-stderr.log.old");
+            let _ = std::fs::remove_file(&old);
+            let _ = std::fs::rename(&launchd, &old);
         }
     }
 }

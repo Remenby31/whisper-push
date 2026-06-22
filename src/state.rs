@@ -89,12 +89,22 @@ impl AppState {
         let mut s = self.state.lock_safe();
         if *s != new_state {
             *s = new_state;
-            // Stamp when we entered Processing (0 otherwise) so the watchdog can
-            // detect a wedge — a lost Processing→Idle transition that would
-            // otherwise leave the app silently refusing dictations.
+            // Stamp when we entered Processing / Recording (0 otherwise) so the
+            // watchdog can detect a wedge: a lost Processing→Idle transition, or
+            // a dropped HotkeyUp that strands us in Recording with the mic open —
+            // both would otherwise leave the app silently refusing dictations.
+            let now = now_secs();
             PROCESSING_SINCE.store(
                 if new_state == State::Processing {
-                    now_secs()
+                    now
+                } else {
+                    0
+                },
+                Ordering::Relaxed,
+            );
+            RECORDING_SINCE.store(
+                if new_state == State::Recording {
+                    now
                 } else {
                     0
                 },
@@ -107,6 +117,8 @@ impl AppState {
 
 /// Unix-secs since the app entered `Processing` (0 = not processing).
 static PROCESSING_SINCE: AtomicU64 = AtomicU64::new(0);
+/// Unix-secs since the app entered `Recording` (0 = not recording).
+static RECORDING_SINCE: AtomicU64 = AtomicU64::new(0);
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -120,6 +132,16 @@ fn now_secs() -> u64 {
 /// value means the state machine wedged (see `tray`'s watchdog).
 pub fn processing_stuck_secs() -> Option<u64> {
     match PROCESSING_SINCE.load(Ordering::Relaxed) {
+        0 => None,
+        since => Some(now_secs().saturating_sub(since)),
+    }
+}
+
+/// How long (secs) the app has been in `Recording`, or `None` if it isn't. A very
+/// large value means a `HotkeyUp` was dropped (e.g. the CGEventTap died) and the
+/// mic is stuck open — the watchdog ends the recording so dictation can resume.
+pub fn recording_stuck_secs() -> Option<u64> {
+    match RECORDING_SINCE.load(Ordering::Relaxed) {
         0 => None,
         since => Some(now_secs().saturating_sub(since)),
     }

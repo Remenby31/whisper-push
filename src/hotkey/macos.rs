@@ -318,109 +318,116 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
             CGEventTapOptions::ListenOnly,
             vec![CGEventType::FlagsChanged, CGEventType::KeyDown],
             |_proxy, event_type, event| {
-                // macOS disables the tap after an internal timeout or on
-                // wake-from-sleep; re-enable it or the hotkey goes dead until
-                // the app is restarted (observed as "stops working after a
-                // while / after standby").
-                if matches!(
-                    event_type,
-                    CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
-                ) {
-                    let port = TAP_PORT.with(|p| p.get());
-                    if !port.is_null() {
-                        unsafe { CGEventTapEnable(port, true) };
-                        info!("hotkey tap was disabled by the system — re-enabled");
-                    }
-                    // The key-release that ended an in-flight hold may have been
-                    // dropped while the tap was off (classic clamshell sleep/wake).
-                    // If we still think the key is held, synthesize the release so
-                    // the pipeline stops recording instead of staying armed forever
-                    // (mic stuck open, next press ignored).
-                    if hold_active.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                        info!("HotkeyUp (synthesized on tap re-enable)");
-                        let _ = tx.send(Event::HotkeyUp);
-                    }
-                    return None;
-                }
-                let raw_type = match event_type {
-                    CGEventType::FlagsChanged => K_CG_EVENT_FLAGS_CHANGED,
-                    CGEventType::KeyDown => K_CG_EVENT_KEY_DOWN,
-                    _ => return None,
-                };
-                // Drop OS key auto-repeat: holding a non-modifier hotkey would
-                // otherwise fire a storm of KeyDown events (repeated toggles /
-                // start-sounds, icon flapping). Modifiers don't auto-repeat, so
-                // hold-mode FlagsChanged is unaffected.
-                if matches!(event_type, CGEventType::KeyDown)
-                    && event.get_integer_value_field(
-                        core_graphics::event::EventField::KEYBOARD_EVENT_AUTOREPEAT,
-                    ) != 0
-                {
-                    return None;
-                }
-                let kc = event.get_integer_value_field(
-                    core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
-                );
-                let flags = event.get_flags().bits();
-
-                // Capture mode intercepts everything.
-                if CAPTURING.load(Ordering::SeqCst) {
-                    if let Some((hk, m)) = try_capture(raw_type, kc, flags) {
-                        CAPTURING.store(false, Ordering::SeqCst);
-                        rebind(&hk, &m);
-                        hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
-                        if let Some(tx) = CAPTURE_TX.lock_safe().as_ref() {
-                            let _ = tx.send(Event::HotkeyCaptured(hk, m));
+                // A panic here would unwind across the CoreGraphics/CFRunLoop C
+                // frame that invoked us = UB → process abort. Contain it (this
+                // callback fires on every keypress); on panic, behave as a no-op.
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // macOS disables the tap after an internal timeout or on
+                    // wake-from-sleep; re-enable it or the hotkey goes dead until
+                    // the app is restarted (observed as "stops working after a
+                    // while / after standby").
+                    if matches!(
+                        event_type,
+                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+                    ) {
+                        let port = TAP_PORT.with(|p| p.get());
+                        if !port.is_null() {
+                            unsafe { CGEventTapEnable(port, true) };
+                            info!("hotkey tap was disabled by the system — re-enabled");
                         }
-                    }
-                    return None;
-                }
-
-                let cfg = match *MATCH_CFG.lock_safe() {
-                    Some(c) => c,
-                    None => return None,
-                };
-                let expected_flags = cfg.modifier_flags;
-
-                match raw_type {
-                    K_CG_EVENT_FLAGS_CHANGED if cfg.is_hold => {
-                        if let Some(expected_kc) = cfg.modifier_keycode {
-                            if kc != expected_kc {
-                                return None;
-                            }
-                        }
-                        let pressed =
-                            (flags & expected_flags) == expected_flags && expected_flags != 0;
-                        if pressed && !hold_active.load(std::sync::atomic::Ordering::Relaxed) {
-                            hold_active.store(true, std::sync::atomic::Ordering::Relaxed);
-                            info!("HotkeyDown");
-                            let _ = tx.send(Event::HotkeyDown);
-                        } else if !pressed && hold_active.load(std::sync::atomic::Ordering::Relaxed)
-                        {
-                            hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
-                            info!("HotkeyUp");
+                        // The key-release that ended an in-flight hold may have been
+                        // dropped while the tap was off (classic clamshell sleep/wake).
+                        // If we still think the key is held, synthesize the release so
+                        // the pipeline stops recording instead of staying armed forever
+                        // (mic stuck open, next press ignored).
+                        if hold_active.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            info!("HotkeyUp (synthesized on tap re-enable)");
                             let _ = tx.send(Event::HotkeyUp);
                         }
+                        return None;
                     }
-                    K_CG_EVENT_KEY_DOWN if cfg.is_hold => {
-                        // Another key pressed during hold — discard.
-                        if hold_active.load(std::sync::atomic::Ordering::Relaxed) {
-                            debug!("Key during hold — discard");
+                    let raw_type = match event_type {
+                        CGEventType::FlagsChanged => K_CG_EVENT_FLAGS_CHANGED,
+                        CGEventType::KeyDown => K_CG_EVENT_KEY_DOWN,
+                        _ => return None,
+                    };
+                    // Drop OS key auto-repeat: holding a non-modifier hotkey would
+                    // otherwise fire a storm of KeyDown events (repeated toggles /
+                    // start-sounds, icon flapping). Modifiers don't auto-repeat, so
+                    // hold-mode FlagsChanged is unaffected.
+                    if matches!(event_type, CGEventType::KeyDown)
+                        && event.get_integer_value_field(
+                            core_graphics::event::EventField::KEYBOARD_EVENT_AUTOREPEAT,
+                        ) != 0
+                    {
+                        return None;
+                    }
+                    let kc = event.get_integer_value_field(
+                        core_graphics::event::EventField::KEYBOARD_EVENT_KEYCODE,
+                    );
+                    let flags = event.get_flags().bits();
+
+                    // Capture mode intercepts everything.
+                    if CAPTURING.load(Ordering::SeqCst) {
+                        if let Some((hk, m)) = try_capture(raw_type, kc, flags) {
+                            CAPTURING.store(false, Ordering::SeqCst);
+                            rebind(&hk, &m);
                             hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
-                            let _ = tx.send(Event::HotkeyUp);
-                        }
-                    }
-                    K_CG_EVENT_KEY_DOWN => {
-                        if let Some(expected_kc) = cfg.key_code {
-                            if kc == expected_kc && (flags & expected_flags) == expected_flags {
-                                info!("Toggle hotkey");
-                                let _ = tx.send(Event::HotkeyToggle);
+                            if let Some(tx) = CAPTURE_TX.lock_safe().as_ref() {
+                                let _ = tx.send(Event::HotkeyCaptured(hk, m));
                             }
                         }
+                        return None;
                     }
-                    _ => {}
-                }
-                None // ListenOnly — don't modify events
+
+                    let cfg = match *MATCH_CFG.lock_safe() {
+                        Some(c) => c,
+                        None => return None,
+                    };
+                    let expected_flags = cfg.modifier_flags;
+
+                    match raw_type {
+                        K_CG_EVENT_FLAGS_CHANGED if cfg.is_hold => {
+                            if let Some(expected_kc) = cfg.modifier_keycode {
+                                if kc != expected_kc {
+                                    return None;
+                                }
+                            }
+                            let pressed =
+                                (flags & expected_flags) == expected_flags && expected_flags != 0;
+                            if pressed && !hold_active.load(std::sync::atomic::Ordering::Relaxed) {
+                                hold_active.store(true, std::sync::atomic::Ordering::Relaxed);
+                                info!("HotkeyDown");
+                                let _ = tx.send(Event::HotkeyDown);
+                            } else if !pressed
+                                && hold_active.load(std::sync::atomic::Ordering::Relaxed)
+                            {
+                                hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                                info!("HotkeyUp");
+                                let _ = tx.send(Event::HotkeyUp);
+                            }
+                        }
+                        K_CG_EVENT_KEY_DOWN if cfg.is_hold => {
+                            // Another key pressed during hold — discard.
+                            if hold_active.load(std::sync::atomic::Ordering::Relaxed) {
+                                debug!("Key during hold — discard");
+                                hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
+                                let _ = tx.send(Event::HotkeyUp);
+                            }
+                        }
+                        K_CG_EVENT_KEY_DOWN => {
+                            if let Some(expected_kc) = cfg.key_code {
+                                if kc == expected_kc && (flags & expected_flags) == expected_flags {
+                                    info!("Toggle hotkey");
+                                    let _ = tx.send(Event::HotkeyToggle);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    None // ListenOnly — don't modify events
+                }))
+                .unwrap_or(None)
             },
         );
         // Don't panic the hotkey thread on a transient failure (permission

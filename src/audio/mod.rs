@@ -44,7 +44,18 @@ pub fn find_input_device(name: &str) -> Result<cpal::Device> {
     } else {
         host.input_devices()?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .ok_or_else(|| anyhow::anyhow!("Device '{}' not found", name))
+            .or_else(|| {
+                // The pinned device is gone (unplugged headset, disconnected
+                // dock). Rather than refuse to record, fall back to the system
+                // default — dictation keeps working; the user can re-pick later.
+                tracing::warn!(
+                    "Input device '{name}' not found — falling back to the default device"
+                );
+                host.default_input_device()
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("Device '{}' not found and no default input device", name)
+            })
     }
 }
 

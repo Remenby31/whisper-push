@@ -153,7 +153,10 @@ pub fn load_model(model_name: &str) -> Result<()> {
     let mut ctx_params = whisper_rs::WhisperContextParameters::default();
     ctx_params.use_gpu(true);
     ctx_params.flash_attn(true);
-    let ctx = whisper_rs::WhisperContext::new_with_params(path.to_str().unwrap(), ctx_params)
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Model path is not valid UTF-8: {}", path.display()))?;
+    let ctx = whisper_rs::WhisperContext::new_with_params(path_str, ctx_params)
         .map_err(|e| anyhow::anyhow!("Failed to load model: {:?}", e))?;
 
     *MODEL.lock_safe() = Some(ctx);

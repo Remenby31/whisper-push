@@ -588,7 +588,7 @@ impl App {
 
             Event::MenuClicked(ref id) => {
                 if id == &mi.quit_id {
-                    std::process::exit(0);
+                    crate::util::exit_clean();
                 }
                 if id == &mi.uninstall_id {
                     // Free the server-side device slot before wiping local state.
@@ -601,7 +601,7 @@ impl App {
                     }
                     crate::autostart::disable();
                     crate::notify::app("Uninstalled. You can delete the app from Applications.");
-                    std::process::exit(0);
+                    crate::util::exit_clean();
                 }
                 if id == &mi.toggle_id {
                     // Recording lives entirely on the pipeline thread (the single
@@ -1147,6 +1147,8 @@ impl ApplicationHandler<UserEvent> for App {
             let pipeline_cfg = self.config.clone();
             let (ptx, prx) = crossbeam_channel::unbounded();
             self.pipeline_tx = Some(ptx.clone());
+            // Publish for the state watchdog (stuck-Recording recovery).
+            let _ = PIPELINE_TX.set(ptx.clone());
             // The pipeline keeps a sender to its own channel so it can re-queue an
             // event it must not drop (e.g. a model switch that lands during the
             // hold-delay gate).
@@ -1248,10 +1250,17 @@ const WATCHDOG_TICK: Duration = Duration::from_secs(10);
 /// (even a cold-start page-in) finishes in well under 10 s, so this only ever
 /// fires on a genuine wedge, never on a legitimately slow dictation.
 const WATCHDOG_MAX_PROCESSING: u64 = 30;
+/// End a recording that has lasted longer than this. No real push-to-talk hold
+/// runs for minutes; this only trips when a `HotkeyUp` was lost (e.g. the
+/// CGEventTap died) and the mic is stuck open. We end it via the *normal* stop
+/// path so whatever was captured is still transcribed and pasted.
+const WATCHDOG_MAX_RECORDING: u64 = 300;
 
-/// Recover from a wedged state machine: if the app is stuck in `Processing` with
-/// no transcription actually progressing, force it back to `Idle` so it can't
-/// silently refuse all further dictations.
+/// Recover from a wedged state machine:
+/// - stuck in `Processing` (a lost Processing→Idle transition) → force `Idle`,
+///   so the app can't silently refuse all further dictations;
+/// - stuck in `Recording` (a dropped `HotkeyUp` left the mic open) → inject a
+///   `HotkeyUp` into the pipeline, which stops + transcribes + returns to Idle.
 fn spawn_state_watchdog(tx: Sender<Event>) {
     std::thread::Builder::new()
         .name("state-watchdog".into())
@@ -1262,6 +1271,19 @@ fn spawn_state_watchdog(tx: Sender<Event>) {
                     if secs >= WATCHDOG_MAX_PROCESSING {
                         warn!("state watchdog: stuck in Processing for {secs}s — forcing Idle");
                         let _ = tx.send(Event::StateChanged(State::Idle));
+                    }
+                }
+                if let Some(secs) = crate::state::recording_stuck_secs() {
+                    if secs >= WATCHDOG_MAX_RECORDING {
+                        warn!(
+                            "state watchdog: stuck in Recording for {secs}s — \
+                             ending it (likely a dropped HotkeyUp)"
+                        );
+                        // Route through the pipeline so the mic actually closes and
+                        // the captured audio is transcribed, not just the UI reset.
+                        if let Some(ptx) = PIPELINE_TX.get() {
+                            let _ = ptx.send(Event::HotkeyUp);
+                        }
                     }
                 }
             }
@@ -1283,76 +1305,154 @@ fn pipeline_loop(
     let mut capture: Option<crate::audio::capture::AudioCapture> = None;
 
     loop {
-        match rx.recv() {
-            Ok(Event::HotkeyDown) => {
-                if !crate::license::gate() {
-                    continue;
-                }
-                if recording {
-                    continue;
-                }
-                let cfg = config.lock_safe();
-                let device = cfg.input_device.clone();
-                let delay = cfg.hold_delay;
-                let sound_feedback = cfg.sound_feedback;
-                drop(cfg);
+        // recv() is the one place the loop ends (channel closed at shutdown).
+        let event = match rx.recv() {
+            Ok(e) => e,
+            Err(_) => break,
+        };
+        // Contain panics per-event. A fault handling one event — a bad audio
+        // device, a model load failure, a transcription crash — must not tear
+        // down this thread: it is the *only* pipeline worker, so its death would
+        // stop all dictation silently with no recovery short of an app restart.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_pipeline_event(
+                event,
+                &rx,
+                &config,
+                &ui_tx,
+                &self_tx,
+                &mut recording,
+                &mut capture,
+            )
+        }))
+        .is_err()
+        {
+            tracing::error!("Pipeline event handler panicked — recovering to idle");
+            // Reset to a known-good state so the next hotkey works again.
+            recording = false;
+            capture = None;
+            let _ = ui_tx.send(Event::StateChanged(State::Idle));
+        }
+    }
+}
 
-                // Immediate audio acknowledgement — a 70 ms blip the moment the
-                // key is pressed, before hold_delay. The user gets a clear cue
-                // that the key was heard; hold_delay still gates recording.
-                if sound_feedback {
-                    crate::audio::playback::play_sound("start");
-                }
+/// Handle one pipeline event. Split out of `pipeline_loop` so each event runs
+/// inside a `catch_unwind` at the call site — a panic here is contained and the
+/// loop resets to idle rather than the worker thread dying.
+fn handle_pipeline_event(
+    event: Event,
+    rx: &Receiver<Event>,
+    config: &Arc<Mutex<Config>>,
+    ui_tx: &Sender<Event>,
+    self_tx: &Sender<Event>,
+    recording: &mut bool,
+    capture: &mut Option<crate::audio::capture::AudioCapture>,
+) {
+    match event {
+        Event::HotkeyDown => {
+            if !crate::license::gate() {
+                return;
+            }
+            if *recording {
+                return;
+            }
+            let cfg = config.lock_safe();
+            let device = cfg.input_device.clone();
+            let delay = cfg.hold_delay;
+            let sound_feedback = cfg.sound_feedback;
+            drop(cfg);
 
-                // Batch mode (Whisper, Parakeet) — do NOT pre-roll the mic.
-                // Wait for hold_delay synchronously while peeking for an early
-                // HotkeyUp; the microphone only opens once a genuine hold is
-                // confirmed. Privacy: with the previous pre-roll, every Ctrl
-                // tap (e.g. Ctrl+C) briefly opened the mic, which made the
-                // macOS "mic in use" indicator flicker / stay lit.
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs_f64(delay);
-                let mut cancelled = false;
-                while let Some(remaining) =
-                    deadline.checked_duration_since(std::time::Instant::now())
-                {
-                    if remaining.is_zero() {
+            // Immediate audio acknowledgement — a 70 ms blip the moment the
+            // key is pressed, before hold_delay. The user gets a clear cue
+            // that the key was heard; hold_delay still gates recording.
+            if sound_feedback {
+                crate::audio::playback::play_sound("start");
+            }
+
+            // Batch mode (Whisper, Parakeet) — do NOT pre-roll the mic.
+            // Wait for hold_delay synchronously while peeking for an early
+            // HotkeyUp; the microphone only opens once a genuine hold is
+            // confirmed. Privacy: with the previous pre-roll, every Ctrl
+            // tap (e.g. Ctrl+C) briefly opened the mic, which made the
+            // macOS "mic in use" indicator flicker / stay lit.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(delay);
+            let mut cancelled = false;
+            while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+                if remaining.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(remaining) {
+                    Ok(Event::HotkeyUp) => {
+                        cancelled = true;
                         break;
                     }
-                    match rx.recv_timeout(remaining) {
-                        Ok(Event::HotkeyUp) => {
-                            cancelled = true;
-                            break;
-                        }
-                        // A model switch must not be silently dropped by the gate.
-                        // Re-queue it and cancel this (not-yet-started) recording —
-                        // safe because the mic isn't open yet, so LoadModel is then
-                        // processed cleanly with nothing recording.
-                        Ok(Event::LoadModel(m)) => {
-                            let _ = self_tx.send(Event::LoadModel(m));
-                            cancelled = true;
-                            break;
-                        }
-                        Ok(_) => {} // ignore a duplicate HotkeyDown/Toggle here
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
-                        Err(_) => {
-                            cancelled = true;
-                            break;
-                        }
+                    // A model switch must not be silently dropped by the gate.
+                    // Re-queue it and cancel this (not-yet-started) recording —
+                    // safe because the mic isn't open yet, so LoadModel is then
+                    // processed cleanly with nothing recording.
+                    Ok(Event::LoadModel(m)) => {
+                        let _ = self_tx.send(Event::LoadModel(m));
+                        cancelled = true;
+                        break;
+                    }
+                    Ok(_) => {} // ignore a duplicate HotkeyDown/Toggle here
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
+                    Err(_) => {
+                        cancelled = true;
+                        break;
                     }
                 }
-                if cancelled {
-                    debug!("Quick tap — mic never opened");
-                    continue;
+            }
+            if cancelled {
+                debug!("Quick tap — mic never opened");
+                return;
+            }
+            match crate::audio::capture::AudioCapture::start(&device) {
+                Ok(cap) => {
+                    *capture = Some(cap);
+                    *recording = true;
+                    // Tell the UI thread so the menu-bar icon turns citron —
+                    // without this the icon only updated on menu-driven recording.
+                    let _ = ui_tx.send(Event::StateChanged(State::Recording));
+                    info!("Recording…");
                 }
+                Err(e) => {
+                    warn!("Capture failed: {e}");
+                    crate::notify::app(
+                        "Couldn't start recording — check your microphone is connected.",
+                    );
+                }
+            }
+        }
+
+        Event::HotkeyUp => {
+            // A quick-tap HotkeyUp is consumed by the hold_delay gate in
+            // the HotkeyDown arm; if we receive one here it means hold was
+            // confirmed and the mic is open.
+            if !*recording {
+                return;
+            }
+            *recording = false;
+            let _ = ui_tx.send(Event::StateChanged(State::Processing));
+            stop_and_transcribe(config, capture);
+            let _ = ui_tx.send(Event::StateChanged(State::Idle));
+        }
+
+        Event::HotkeyToggle => {
+            if !*recording {
+                if !crate::license::gate() {
+                    return;
+                }
+                let device = config.lock_safe().input_device.clone();
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
-                        capture = Some(cap);
-                        recording = true;
-                        // Tell the UI thread so the menu-bar icon turns citron —
-                        // without this the icon only updated on menu-driven recording.
+                        *capture = Some(cap);
+                        *recording = true;
                         let _ = ui_tx.send(Event::StateChanged(State::Recording));
-                        info!("Recording…");
+                        if config.lock_safe().sound_feedback {
+                            crate::audio::playback::play_sound("start");
+                        }
+                        info!("Recording (toggle)...");
                     }
                     Err(e) => {
                         warn!("Capture failed: {e}");
@@ -1361,107 +1461,67 @@ fn pipeline_loop(
                         );
                     }
                 }
-            }
-
-            Ok(Event::HotkeyUp) => {
-                // A quick-tap HotkeyUp is consumed by the hold_delay gate in
-                // the HotkeyDown arm; if we receive one here it means hold was
-                // confirmed and the mic is open.
-                if !recording {
-                    continue;
-                }
-                recording = false;
+            } else {
+                *recording = false;
                 let _ = ui_tx.send(Event::StateChanged(State::Processing));
-                stop_and_transcribe(&config, &mut capture);
+                stop_and_transcribe(config, capture);
                 let _ = ui_tx.send(Event::StateChanged(State::Idle));
             }
-
-            Ok(Event::HotkeyToggle) => {
-                if !recording {
-                    if !crate::license::gate() {
-                        continue;
-                    }
-                    let device = config.lock_safe().input_device.clone();
-                    match crate::audio::capture::AudioCapture::start(&device) {
-                        Ok(cap) => {
-                            capture = Some(cap);
-                            recording = true;
-                            let _ = ui_tx.send(Event::StateChanged(State::Recording));
-                            if config.lock_safe().sound_feedback {
-                                crate::audio::playback::play_sound("start");
-                            }
-                            info!("Recording (toggle)...");
-                        }
-                        Err(e) => {
-                            warn!("Capture failed: {e}");
-                            crate::notify::app(
-                                "Couldn't start recording — check your microphone is connected.",
-                            );
-                        }
-                    }
-                } else {
-                    recording = false;
-                    let _ = ui_tx.send(Event::StateChanged(State::Processing));
-                    stop_and_transcribe(&config, &mut capture);
-                    let _ = ui_tx.send(Event::StateChanged(State::Idle));
-                }
-            }
-
-            Ok(Event::LoadModel(model_name)) => {
-                let start = std::time::Instant::now();
-                info!("Loading model '{model_name}' on pipeline thread...");
-
-                // Tell the UI we're loading (icon changes, hotkeys ignored)
-                let _ = ui_tx.send(Event::StateChanged(State::Loading));
-
-                // Unload all backends
-                crate::transcribe::unload_model();
-                crate::transcribe::parakeet::unload_model();
-                crate::transcribe::voxtral_local::unload_model();
-
-                let backend = crate::model_manager::backend_for_model(&model_name);
-
-                // Check if this specific model needs downloading and notify user.
-                if let Some(info) = crate::model_manager::find_model(&model_name) {
-                    if !info.is_downloaded {
-                        crate::notify::app(&format!(
-                            "Downloading {} (~{}MB)... This may take a few minutes.",
-                            info.label, info.size_mb
-                        ));
-                    }
-                }
-
-                let load_result = match backend {
-                    "voxtral-local" => {
-                        let dir = crate::config::voxtral_dir();
-                        crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
-                    }
-                    "parakeet" => crate::transcribe::parakeet::load_model(&model_name),
-                    _ => crate::transcribe::load_model(&model_name),
-                };
-
-                let elapsed = start.elapsed();
-                match load_result {
-                    Ok(()) => {
-                        info!("{backend} model loaded ({:.1}s)", elapsed.as_secs_f64());
-                        crate::notify::app(&format!(
-                            "{backend} ready! ({:.0}s)",
-                            elapsed.as_secs_f64()
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::error!("{backend} load failed: {e}");
-                        crate::notify::app(&format!("Failed to load {backend}: {e}"));
-                    }
-                }
-
-                // Back to idle — hotkeys work again
-                let _ = ui_tx.send(Event::StateChanged(State::Idle));
-            }
-
-            Ok(_) => {}
-            Err(_) => break,
         }
+
+        Event::LoadModel(model_name) => {
+            let start = std::time::Instant::now();
+            info!("Loading model '{model_name}' on pipeline thread...");
+
+            // Tell the UI we're loading (icon changes, hotkeys ignored)
+            let _ = ui_tx.send(Event::StateChanged(State::Loading));
+
+            // Unload all backends
+            crate::transcribe::unload_model();
+            crate::transcribe::parakeet::unload_model();
+            crate::transcribe::voxtral_local::unload_model();
+
+            let backend = crate::model_manager::backend_for_model(&model_name);
+
+            // Check if this specific model needs downloading and notify user.
+            if let Some(info) = crate::model_manager::find_model(&model_name) {
+                if !info.is_downloaded {
+                    crate::notify::app(&format!(
+                        "Downloading {} (~{}MB)... This may take a few minutes.",
+                        info.label, info.size_mb
+                    ));
+                }
+            }
+
+            let load_result = match backend {
+                "voxtral-local" => {
+                    let dir = crate::config::voxtral_dir();
+                    crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
+                }
+                "parakeet" => crate::transcribe::parakeet::load_model(&model_name),
+                _ => crate::transcribe::load_model(&model_name),
+            };
+
+            let elapsed = start.elapsed();
+            match load_result {
+                Ok(()) => {
+                    info!("{backend} model loaded ({:.1}s)", elapsed.as_secs_f64());
+                    crate::notify::app(&format!(
+                        "{backend} ready! ({:.0}s)",
+                        elapsed.as_secs_f64()
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!("{backend} load failed: {e}");
+                    crate::notify::app(&format!("Failed to load {backend}: {e}"));
+                }
+            }
+
+            // Back to idle — hotkeys work again
+            let _ = ui_tx.send(Event::StateChanged(State::Idle));
+        }
+
+        _ => {}
     }
 }
 
@@ -1490,6 +1550,12 @@ static TRAY_THROTTLE: Mutex<TrayThrottle> = Mutex::new(TrayThrottle {
 /// Event sender used to fire the debounced flush on the main thread (set once in
 /// `run`). The push itself always happens on the main thread.
 static TRAY_TX: OnceLock<Sender<Event>> = OnceLock::new();
+
+/// Sender into the pipeline thread's own channel (set once when the pipeline is
+/// created). Lets the state watchdog inject a `HotkeyUp` to end a recording that
+/// got stranded by a dropped key-up — the watchdog itself is spawned before the
+/// pipeline exists, so it can't be handed the sender directly.
+static PIPELINE_TX: OnceLock<Sender<Event>> = OnceLock::new();
 
 fn schedule_tray_flush(after: Duration) {
     if let Some(tx) = TRAY_TX.get() {
