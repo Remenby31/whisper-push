@@ -4,7 +4,6 @@ use anyhow::Result;
 use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Application states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +41,15 @@ pub enum Event {
     ModelReady,
     /// State changed (for tray icon update)
     StateChanged(State),
+    /// Show the "listening" overlay pill *now* — sent from the pipeline thread on
+    /// key-down (before the hold-delay gate / mic open) so the pill appears with
+    /// the start sound instead of lagging behind `StateChanged(Recording)`. The
+    /// tray icon stays driven by `StateChanged`. macOS-only effect (no-op pill
+    /// elsewhere).
+    ShowOverlay,
+    /// Hide the overlay pill — sent on the early-exit paths (quick-tap cancel,
+    /// model-switch re-queue, mic-open failure) so a shown pill never sticks.
+    HideOverlay,
     /// Menu item clicked (menu item id string)
     MenuClicked(String),
     /// Prompt for missing permissions (after event loop is running)
@@ -121,10 +129,7 @@ static PROCESSING_SINCE: AtomicU64 = AtomicU64::new(0);
 static RECORDING_SINCE: AtomicU64 = AtomicU64::new(0);
 
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::util::now_secs()
 }
 
 /// How long (secs) the app has been stuck in `Processing`, or `None` if it isn't

@@ -111,11 +111,7 @@ pub fn spawn_check(tx: Sender<Event>, check_updates: bool) {
 
             // Check rate limit cache
             if let Some(cached) = read_cache() {
-                let elapsed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    .saturating_sub(cached.checked_at);
+                let elapsed = crate::util::now_secs().saturating_sub(cached.checked_at);
                 if elapsed < CHECK_INTERVAL_SECS {
                     // Use cached result if still fresh
                     if let Some((version, url)) = cached.update {
@@ -164,10 +160,7 @@ fn read_cache() -> Option<UpdateCache> {
 }
 
 fn write_cache(version: &str, url: Option<&str>) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = crate::util::now_secs();
     let cache = UpdateCache {
         checked_at: now,
         update: url.map(|u| (version.to_string(), u.to_string())),

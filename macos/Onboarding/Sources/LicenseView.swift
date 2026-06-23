@@ -14,6 +14,12 @@ struct LicenseView: View {
     private let checkoutAnnual = "https://whisperpush.lemonsqueezy.com/checkout/buy/3b9fd0f0-f299-4108-86eb-93c03e2eca23"
     private let checkoutLifetime = "https://whisperpush.lemonsqueezy.com/checkout/buy/04ecf078-9a78-4daf-a5a5-edf77a019c07"
 
+    // Strip the embedded checkout down to just the payment form. `embed=1` drops
+    // the LS site chrome; `media/logo/desc/discount=0` remove the product image,
+    // store logo, description and discount field — the block you used to scroll
+    // past before reaching the card fields. (Lemon Squeezy checkout URL options.)
+    private let checkoutOptions = "embed=1&media=0&logo=0&desc=0&discount=0"
+
     private enum Plan { case annual, lifetime }
     private enum Mode: Equatable { case choose, checkout(String), activate }
 
@@ -35,6 +41,16 @@ struct LicenseView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.brandCream)
+        // Grow the window only while the payment form is showing, so it fits
+        // with no scroll; every other mode (plans, activate) stays compact.
+        .onChange(of: mode) { _, newMode in
+            if case .checkout = newMode {
+                state.expandedForCheckout = true
+            } else {
+                state.expandedForCheckout = false
+            }
+        }
+        .onDisappear { state.expandedForCheckout = false }
     }
 
     // MARK: Paywall
@@ -130,9 +146,9 @@ struct LicenseView: View {
             }
             .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
 
-            // embed=1 strips the Lemon Squeezy header/footer for a clean in-app
-            // look. We poll the DOM for the key (no Lemon.js needed).
-            CheckoutView(url: URL(string: "\(url)?embed=1")!) { foundKey, foundEmail, success in
+            // Minimal embedded checkout (see `checkoutOptions`). We poll the DOM
+            // for the key (no Lemon.js needed).
+            CheckoutView(url: URL(string: "\(url)?\(checkoutOptions)")!) { foundKey, foundEmail, success in
                 if let foundKey { key = foundKey }
                 if let foundEmail, email.isEmpty { email = foundEmail }
                 let mail = foundEmail ?? (email.isEmpty ? nil : email)

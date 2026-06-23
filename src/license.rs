@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 // ─── Lemon Squeezy identity (store "whisperpush", one product, two variants) ─
 // Set LS_STORE_ID back to 0 to disable the ownership check (dev/testing).
@@ -648,10 +648,7 @@ pub fn license_path() -> std::path::PathBuf {
 }
 
 fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::util::now_secs()
 }
 
 fn belongs_to_us(store_id: u64, product_id: u64) -> bool {

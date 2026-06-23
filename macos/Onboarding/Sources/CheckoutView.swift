@@ -15,6 +15,17 @@ struct CheckoutView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.userContentController.add(context.coordinator, name: "lemon")
+        // Belt-and-suspenders to the URL options: zero the top margin/padding LS
+        // reserves so the form sits flush at the top — no dead space to scroll
+        // past. CSS-only and scoped to the page root, so it can't break the form.
+        let trimTop = """
+        var s = document.createElement('style');
+        s.textContent = 'html,body{margin:0 !important;padding-top:0 !important;}';
+        document.documentElement.appendChild(s);
+        """
+        cfg.userContentController.addUserScript(
+            WKUserScript(source: trimTop, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        )
         let web = WKWebView(frame: .zero, configuration: cfg)
         web.navigationDelegate = context.coordinator
         context.coordinator.web = web

@@ -67,6 +67,13 @@ fn device_title(label: &str, value: &str) -> String {
     }
 }
 
+// Built-in hotkey presets, per platform. The toggle entries are key *combos*
+// (`cmd+shift+space`), which only the macOS listener parses today — the Linux
+// (evdev) and Windows (WH_KEYBOARD_LL) parsers accept a single token, so a combo
+// preset there would make `start_listener` fail and silently kill dictation.
+// Until the non-macOS parsers learn combos (#6 full), those platforms get
+// single-key presets only.
+#[cfg(target_os = "macos")]
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Hold \u{2014} Control", "ctrl", "hold"),
     ("Hold \u{2014} Right Control", "rctrl", "hold"),
@@ -82,6 +89,13 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
         "ctrl+shift+space",
         "toggle",
     ),
+];
+#[cfg(not(target_os = "macos"))]
+const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
+    ("Hold \u{2014} Control", "ctrl", "hold"),
+    ("Hold \u{2014} Right Control", "rctrl", "hold"),
+    ("Hold \u{2014} Right Alt", "ralt", "hold"),
+    ("Hold \u{2014} Right Super", "rcmd", "hold"),
 ];
 
 /// User events forwarded into winit's event loop.
@@ -218,10 +232,18 @@ impl App {
             let _ = hotkey_submenu.append(&item);
             hotkey_items.push((item, hotkey.to_string(), mode.to_string()));
         }
-        let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
-        let custom_hotkey_item = MenuItem::new("Set Custom Hotkey\u{2026}", true, None);
-        let _ = hotkey_submenu.append(&custom_hotkey_item);
-        let custom_hotkey_id = custom_hotkey_item.id().0.clone();
+        // "Set Custom Hotkey…" relies on live key-combo capture, which today only
+        // exists on macOS. Offer it there; elsewhere the presets cover it and the
+        // item would be a dead end (no HotkeyCaptured ever arrives) — so hide it.
+        #[cfg(target_os = "macos")]
+        let custom_hotkey_id = {
+            let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
+            let custom_hotkey_item = MenuItem::new("Set Custom Hotkey\u{2026}", true, None);
+            let _ = hotkey_submenu.append(&custom_hotkey_item);
+            custom_hotkey_item.id().0.clone()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let custom_hotkey_id = String::new();
 
         // Permissions (computed once here; reused for the Permissions section).
         let perms = crate::permissions::check_all();
@@ -627,9 +649,7 @@ impl App {
                             Ok(cap) => {
                                 std::thread::sleep(std::time::Duration::from_secs(3));
                                 let audio = cap.stop();
-                                let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>()
-                                    / audio.len().max(1) as f32)
-                                    .sqrt();
+                                let rms = crate::util::rms(&audio);
                                 info!(
                                     "=== TEST: Captured {:.1}s, RMS={:.4} ===",
                                     audio.len() as f32 / crate::audio::SAMPLE_RATE as f32,
@@ -647,11 +667,12 @@ impl App {
                                     return;
                                 }
 
-                                let bk = crate::model_manager::backend_for_model(&cfg.model);
-                                info!("=== TEST: Transcribing with '{}' ===", bk);
-                                crate::notify::app(&format!("Transcribing with {}...", bk));
-
                                 let backend = crate::model_manager::resolve_backend(&cfg.model);
+                                info!("=== TEST: Transcribing with '{}' ===", backend.name());
+                                crate::notify::app(&format!(
+                                    "Transcribing with {}...",
+                                    backend.name()
+                                ));
 
                                 let start = std::time::Instant::now();
                                 match crate::transcribe::transcribe_with_backend(
@@ -859,8 +880,16 @@ impl App {
                         let disp = format_hotkey_display(hotkey, mode);
                         mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                         mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
-                        crate::hotkey::rebind(hotkey, mode); // live — no restart
+                        crate::hotkey::rebind(hotkey, mode); // live on macOS
+                        // The live rebind only takes effect immediately on macOS;
+                        // the Linux/Windows listeners read their key once at start,
+                        // so be honest that a restart is needed there (#3).
+                        #[cfg(target_os = "macos")]
                         crate::notify::app(&format!("Hotkey set to {disp}"));
+                        #[cfg(not(target_os = "macos"))]
+                        crate::notify::app(&format!(
+                            "Hotkey saved ({disp}) \u{2014} restart Whisper Push to apply."
+                        ));
                         return;
                     }
                 }
@@ -876,6 +905,9 @@ impl App {
                         let mut c = self.config.lock_safe();
                         c.input_device = name.clone();
                         let _ = c.save();
+                        // An explicit pick overrides any silent auto-fallback.
+                        crate::audio::set_input_override("");
+                        crate::audio::clear_dead_mics();
                         for (item, n) in &mi.input_device_items {
                             item.set_checked(n == name);
                         }
@@ -944,6 +976,16 @@ impl App {
                 mi.toggle_item.set_text("Recording\u{2026}");
                 set_tray_icon(&self.tray, State::Recording);
                 crate::overlay::set_state(crate::overlay::OverlayState::Recording);
+            }
+
+            // Pill-only events (the tray icon stays on StateChanged). ShowOverlay
+            // fires on key-down so the pill appears with the start sound, ahead of
+            // the hold-delay gate + mic open; HideOverlay covers the early exits.
+            Event::ShowOverlay => {
+                crate::overlay::set_state(crate::overlay::OverlayState::Recording);
+            }
+            Event::HideOverlay => {
+                crate::overlay::set_state(crate::overlay::OverlayState::Idle);
             }
 
             Event::HotkeyCaptured(hotkey, mode) => {
@@ -1130,14 +1172,8 @@ impl ApplicationHandler<UserEvent> for App {
             self.create_tray();
             let startup_model = self.state.config.model.clone();
 
-            // Wake the macOS run loop so the icon appears immediately
-            #[cfg(target_os = "macos")]
-            {
-                // CFRunLoop API
-                use objc2_core_foundation::CFRunLoop;
-                let rl = CFRunLoop::main().unwrap();
-                rl.wake_up();
-            }
+            // Wake the macOS run loop so the icon appears immediately.
+            wake_main();
 
             // Start hotkey listener + autonomous pipeline thread.
             // The pipeline runs entirely in background threads — it never
@@ -1153,7 +1189,15 @@ impl ApplicationHandler<UserEvent> for App {
             // event it must not drop (e.g. a model switch that lands during the
             // hold-delay gate).
             let self_tx = ptx.clone();
-            let _ = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx);
+            // A failed listener (unparseable hotkey, missing 'input' group on
+            // Linux, hook install error) means dictation is dead — don't swallow
+            // it. Tell the user instead of looking silently broken.
+            if let Err(e) = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx) {
+                warn!("Hotkey listener failed to start: {e}");
+                crate::notify::app(&format!(
+                    "Couldn't start the {hotkey_cfg} hotkey ({e}). Pick another in the menu."
+                ));
+            }
 
             // Pipeline thread: hotkey events + model load → capture → transcribe → paste
             let ui_tx = self.state.tx.clone();
@@ -1336,6 +1380,28 @@ fn pipeline_loop(
     }
 }
 
+/// Wake the macOS main run loop so a UI event sent from a worker thread drains
+/// now, instead of after the ~500 ms `WaitUntil` tick (the crossbeam channel
+/// doesn't itself wake winit). No-op off macOS. A bare `wake_up` creates no winit
+/// UserEvent, so it does NOT trip the Tahoe menu-close bug — do not reintroduce
+/// `EventLoopProxy` for this.
+fn wake_main() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_core_foundation::CFRunLoop;
+        if let Some(rl) = CFRunLoop::main() {
+            rl.wake_up();
+        }
+    }
+}
+
+/// Send a UI event from the pipeline thread and wake the main loop so the icon /
+/// overlay pill react immediately rather than lagging the WaitUntil tick.
+fn notify_ui(ui_tx: &Sender<Event>, ev: Event) {
+    let _ = ui_tx.send(ev);
+    wake_main();
+}
+
 /// Handle one pipeline event. Split out of `pipeline_loop` so each event runs
 /// inside a `catch_unwind` at the call site — a panic here is contained and the
 /// loop resets to idle rather than the worker thread dying.
@@ -1357,9 +1423,10 @@ fn handle_pipeline_event(
                 return;
             }
             let cfg = config.lock_safe();
-            let device = cfg.input_device.clone();
+            let device = crate::audio::effective_input_device(&cfg.input_device);
             let delay = cfg.hold_delay;
             let sound_feedback = cfg.sound_feedback;
+            let language = cfg.language.clone();
             drop(cfg);
 
             // Immediate audio acknowledgement — a 70 ms blip the moment the
@@ -1407,17 +1474,29 @@ fn handle_pipeline_event(
                 debug!("Quick tap — mic never opened");
                 return;
             }
+            // Hold confirmed — show the listening pill now, *before* the
+            // synchronous mic open (50–200 ms), so it appears the instant
+            // recording begins instead of lagging it ~500 ms behind the poll.
+            // Showing it only here (not on key-down) means a quick tap / Ctrl-
+            // click never flashes the pill. Hidden again if the mic fails to open.
+            notify_ui(ui_tx, Event::ShowOverlay);
             match crate::audio::capture::AudioCapture::start(&device) {
                 Ok(cap) => {
                     *capture = Some(cap);
                     *recording = true;
                     // Tell the UI thread so the menu-bar icon turns citron —
                     // without this the icon only updated on menu-driven recording.
-                    let _ = ui_tx.send(Event::StateChanged(State::Recording));
+                    notify_ui(ui_tx, Event::StateChanged(State::Recording));
+                    // Harvest on-screen names off the pipeline thread so the AX
+                    // reads can't add latency between key-up and transcription
+                    // (#7). Runs during the recording; consumed at transcribe end.
+                    let lang = language.clone();
+                    std::thread::spawn(move || crate::dictionary::update_session_context(&lang));
                     info!("Recording…");
                 }
                 Err(e) => {
                     warn!("Capture failed: {e}");
+                    notify_ui(ui_tx, Event::HideOverlay);
                     crate::notify::app(
                         "Couldn't start recording — check your microphone is connected.",
                     );
@@ -1433,9 +1512,9 @@ fn handle_pipeline_event(
                 return;
             }
             *recording = false;
-            let _ = ui_tx.send(Event::StateChanged(State::Processing));
+            notify_ui(ui_tx, Event::StateChanged(State::Processing));
             stop_and_transcribe(config, capture);
-            let _ = ui_tx.send(Event::StateChanged(State::Idle));
+            notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
 
         Event::HotkeyToggle => {
@@ -1443,19 +1522,30 @@ fn handle_pipeline_event(
                 if !crate::license::gate() {
                     return;
                 }
-                let device = config.lock_safe().input_device.clone();
+                let (configured, language) = {
+                    let c = config.lock_safe();
+                    (c.input_device.clone(), c.language.clone())
+                };
+                let device = crate::audio::effective_input_device(&configured);
+                // Pill up before the (synchronous) mic open, like the hold path.
+                notify_ui(ui_tx, Event::ShowOverlay);
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
                         *capture = Some(cap);
                         *recording = true;
-                        let _ = ui_tx.send(Event::StateChanged(State::Recording));
+                        notify_ui(ui_tx, Event::StateChanged(State::Recording));
                         if config.lock_safe().sound_feedback {
                             crate::audio::playback::play_sound("start");
                         }
+                        // Harvest on-screen names off-thread (#7), as in hold mode.
+                        std::thread::spawn(move || {
+                            crate::dictionary::update_session_context(&language)
+                        });
                         info!("Recording (toggle)...");
                     }
                     Err(e) => {
                         warn!("Capture failed: {e}");
+                        notify_ui(ui_tx, Event::HideOverlay);
                         crate::notify::app(
                             "Couldn't start recording — check your microphone is connected.",
                         );
@@ -1463,9 +1553,9 @@ fn handle_pipeline_event(
                 }
             } else {
                 *recording = false;
-                let _ = ui_tx.send(Event::StateChanged(State::Processing));
+                notify_ui(ui_tx, Event::StateChanged(State::Processing));
                 stop_and_transcribe(config, capture);
-                let _ = ui_tx.send(Event::StateChanged(State::Idle));
+                notify_ui(ui_tx, Event::StateChanged(State::Idle));
             }
         }
 
@@ -1474,14 +1564,14 @@ fn handle_pipeline_event(
             info!("Loading model '{model_name}' on pipeline thread...");
 
             // Tell the UI we're loading (icon changes, hotkeys ignored)
-            let _ = ui_tx.send(Event::StateChanged(State::Loading));
+            notify_ui(ui_tx, Event::StateChanged(State::Loading));
 
             // Unload all backends
             crate::transcribe::unload_model();
             crate::transcribe::parakeet::unload_model();
             crate::transcribe::voxtral_local::unload_model();
 
-            let backend = crate::model_manager::backend_for_model(&model_name);
+            let backend = crate::model_manager::resolve_backend(&model_name);
 
             // Check if this specific model needs downloading and notify user.
             if let Some(info) = crate::model_manager::find_model(&model_name) {
@@ -1493,32 +1583,35 @@ fn handle_pipeline_event(
                 }
             }
 
+            // One dispatch table — the Backend enum, via `ensure_loaded` — so a
+            // new backend is handled in a single place (the CLI uses the same
+            // path). Voxtral is the lone exception: loaded eagerly here to
+            // pre-warm on switch (ensure_loaded leaves it lazy), and it MUST load
+            // on this pipeline thread (WGPU/Metal thread-affinity), which is where
+            // we already are.
             let load_result = match backend {
-                "voxtral-local" => {
+                crate::transcribe::Backend::VoxtralLocal => {
                     let dir = crate::config::voxtral_dir();
                     crate::transcribe::voxtral_local::load_model(dir.to_str().unwrap_or(""))
                 }
-                "parakeet" => crate::transcribe::parakeet::load_model(&model_name),
-                _ => crate::transcribe::load_model(&model_name),
+                ref b => crate::transcribe::ensure_loaded(b, &model_name),
             };
 
             let elapsed = start.elapsed();
+            let name = backend.name();
             match load_result {
                 Ok(()) => {
-                    info!("{backend} model loaded ({:.1}s)", elapsed.as_secs_f64());
-                    crate::notify::app(&format!(
-                        "{backend} ready! ({:.0}s)",
-                        elapsed.as_secs_f64()
-                    ));
+                    info!("{name} model loaded ({:.1}s)", elapsed.as_secs_f64());
+                    crate::notify::app(&format!("{name} ready! ({:.0}s)", elapsed.as_secs_f64()));
                 }
                 Err(e) => {
-                    tracing::error!("{backend} load failed: {e}");
-                    crate::notify::app(&format!("Failed to load {backend}: {e}"));
+                    tracing::error!("{name} load failed: {e}");
+                    crate::notify::app(&format!("Failed to load {name}: {e}"));
                 }
             }
 
             // Back to idle — hotkeys work again
-            let _ = ui_tx.send(Event::StateChanged(State::Idle));
+            notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
 
         _ => {}
@@ -1683,6 +1776,7 @@ fn stop_and_transcribe(
     // Did the device drop out mid-recording (AirPods/Bluetooth)? Check before we
     // consume the capture, so we can tell the user instead of failing silently.
     let device_lost = cap.as_ref().is_some_and(|c| c.device_lost());
+    let used_device = cap.as_ref().map(|c| c.device_name().to_string());
     let audio = cap.map(|c| c.stop()).unwrap_or_default();
 
     if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
@@ -1693,18 +1787,44 @@ fn stop_and_transcribe(
         return;
     }
 
-    let rms: f32 = (audio.iter().map(|s| s * s).sum::<f32>() / audio.len() as f32).sqrt();
+    // Auto-fallback: enough audio was captured but it's flatline silence — the
+    // signature of a connected-but-not-working mic (AirPods whose mic link never
+    // opened, a muted USB interface), not a quiet room, which always has some
+    // ambient peak. We can't recover this utterance, but switch the live input
+    // to a known-good mic (built-in if the lid's open, else any other) so the
+    // next press just works.
+    let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    if peak < crate::audio::DEAD_MIC_PEAK {
+        if let Some(dead) = used_device {
+            if let Some(next) = crate::audio::next_working_mic(&dead) {
+                crate::audio::set_input_override(&next);
+                warn!("No signal from '{dead}' (peak={peak:.6}) — switching input to '{next}'");
+                crate::notify::app(&format!(
+                    "No sound from {dead} — switched to {next}. Press your shortcut again."
+                ));
+                return;
+            }
+        }
+        // Every input is silent → systemic (likely Microphone permission). Fall
+        // through; the empty transcription is harmless and the log shows why.
+    } else {
+        // Good signal — forget any earlier dead-mic memory so devices that
+        // recover become eligible again.
+        crate::audio::clear_dead_mics();
+    }
+
+    let rms = crate::util::rms(&audio);
     let backend = crate::model_manager::resolve_backend(&cfg.model);
     info!(
-        "Processing {:.1}s of audio with backend '{:?}' (RMS={:.4})...",
+        "Processing {:.1}s of audio with backend '{}' (RMS={:.4})...",
         audio.len() as f32 / crate::audio::SAMPLE_RATE as f32,
-        backend,
+        backend.name(),
         rms
     );
 
-    // Semantic layer: harvest names from the current screen/clipboard so the
-    // dictation can recognize them even if never explicitly taught.
-    crate::dictionary::update_session_context(&cfg.language);
+    // (The session-context harvest — focused field / selection / clipboard — now
+    // runs on a detached thread at record-start, so its AX reads never sit
+    // between key-up and transcription. See the HotkeyDown / HotkeyToggle arms.)
 
     let start = std::time::Instant::now();
     // Panics are already caught inside transcribe_with_backend (the choke point)
@@ -1901,8 +2021,8 @@ fn osascript_confirm(message: &str, confirm_btn: &str) -> bool {
     let script = format!(
         "display dialog \"{}\" with title \"Whisper Push\" buttons {{\"Cancel\", \"{}\"}} \
          default button \"Cancel\" cancel button \"Cancel\"",
-        applescript_escape(message),
-        applescript_escape(confirm_btn),
+        crate::notify::applescript_escape(message),
+        crate::notify::applescript_escape(confirm_btn),
     );
     std::process::Command::new("osascript")
         .arg("-e")
@@ -1924,8 +2044,8 @@ fn osascript_input(message: &str, prefill: &str) -> Option<String> {
         "display dialog \"{}\" default answer \"{}\" with title \"Whisper Push\" \
          buttons {{\"Cancel\", \"Save\"}} default button \"Save\" cancel button \"Cancel\"\n\
          text returned of result",
-        applescript_escape(message),
-        applescript_escape(prefill)
+        crate::notify::applescript_escape(message),
+        crate::notify::applescript_escape(prefill)
     );
     let out = std::process::Command::new("osascript")
         .arg("-e")
@@ -1948,21 +2068,6 @@ fn osascript_input(_message: &str, _prefill: &str) -> Option<String> {
         "In-app dictionary editing is macOS-only for now — use `whisper-push dict`.",
     );
     None
-}
-
-/// Escape a string for embedding inside an AppleScript double-quoted literal.
-#[cfg(target_os = "macos")]
-fn applescript_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' | '\r' => out.push(' '),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 pub fn format_hotkey_display(hotkey: &str, mode: &str) -> String {

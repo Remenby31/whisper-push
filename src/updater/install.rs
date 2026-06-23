@@ -1,26 +1,62 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use tracing::{info, warn};
 
-/// Download the update ZIP, extract, verify, and install.
+/// Download the update, verify the signature, and install in place.
+///
+/// In-place auto-update is implemented for the macOS `.app` bundle only. The
+/// Linux/Windows release assets (`.tar.gz` / `.zip`), install layout, and
+/// in-use-binary replacement rules all differ, and a half-built non-macOS path
+/// would download hundreds of MB only to fail at extraction. Until a real
+/// per-OS installer lands, those platforms open the releases page instead.
 pub fn download_and_install(url: &str) -> Result<()> {
-    info!("Downloading update from {url}");
-    let zip_path = download_zip(url)?;
-
-    info!("Extracting update...");
-    let app_path = extract_zip(&zip_path)?;
-
     #[cfg(target_os = "macos")]
     {
+        info!("Downloading update from {url}");
+        let zip_path = download_zip(url)?;
+
+        info!("Extracting update...");
+        let app_path = extract_zip(&zip_path)?;
+
         info!("Verifying code signature...");
         verify_codesign(&app_path)?;
+
+        info!("Installing update...");
+        install_and_relaunch(&app_path)
     }
 
-    info!("Installing update...");
-    install_and_relaunch(&app_path)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = url; // the macOS asset URL isn't consumable by a non-macOS installer
+        let releases = format!(
+            "https://github.com/{}/releases/latest",
+            super::GITHUB_REPO
+        );
+        open_url(&releases);
+        anyhow::bail!(
+            "Auto-update isn't available on this platform yet — opened the latest \
+             release on GitHub so you can download it manually."
+        )
+    }
+}
+
+/// Open a URL in the user's default browser (Linux/Windows manual-update path).
+#[cfg(not(target_os = "macos"))]
+fn open_url(url: &str) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
 }
 
 /// Download the ZIP to a temp directory.
+#[cfg(target_os = "macos")]
 fn download_zip(url: &str) -> Result<PathBuf> {
     let tmp_dir = std::env::temp_dir().join("whisper-push-update");
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -49,40 +85,22 @@ fn download_zip(url: &str) -> Result<PathBuf> {
     Ok(zip_path)
 }
 
-/// Extract the ZIP using ditto (macOS) or system unzip.
+/// Extract the ZIP using ditto and return the `.app` bundle inside.
+#[cfg(target_os = "macos")]
 fn extract_zip(zip_path: &Path) -> Result<PathBuf> {
     let extract_dir = zip_path.parent().unwrap().join("extracted");
     std::fs::create_dir_all(&extract_dir)?;
 
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("ditto")
-            .args([
-                "-xk",
-                &zip_path.to_string_lossy(),
-                &extract_dir.to_string_lossy(),
-            ])
-            .status()
-            .context("running ditto")?;
-        if !status.success() {
-            anyhow::bail!("ditto extraction failed (exit code {:?})", status.code());
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let status = std::process::Command::new("unzip")
-            .args([
-                "-o",
-                &zip_path.to_string_lossy(),
-                "-d",
-                &extract_dir.to_string_lossy(),
-            ])
-            .status()
-            .context("running unzip")?;
-        if !status.success() {
-            anyhow::bail!("unzip failed (exit code {:?})", status.code());
-        }
+    let status = std::process::Command::new("ditto")
+        .args([
+            "-xk",
+            &zip_path.to_string_lossy(),
+            &extract_dir.to_string_lossy(),
+        ])
+        .status()
+        .context("running ditto")?;
+    if !status.success() {
+        anyhow::bail!("ditto extraction failed (exit code {:?})", status.code());
     }
 
     // Find the .app bundle inside extracted dir
@@ -90,6 +108,7 @@ fn extract_zip(zip_path: &Path) -> Result<PathBuf> {
 }
 
 /// Recursively find a .app bundle in a directory.
+#[cfg(target_os = "macos")]
 fn find_app_bundle(dir: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -139,6 +158,7 @@ fn verify_codesign(app_path: &Path) -> Result<()> {
 }
 
 /// Atomic swap: backup current app, copy new one, relaunch.
+#[cfg(target_os = "macos")]
 fn install_and_relaunch(new_app: &Path) -> Result<()> {
     let installed = PathBuf::from("/Applications/Whisper Push.app");
     let backup = PathBuf::from("/Applications/Whisper Push.app.old");
@@ -156,56 +176,26 @@ fn install_and_relaunch(new_app: &Path) -> Result<()> {
     std::fs::rename(&installed, &backup).context("backing up current app")?;
 
     // Step 2: Copy new app to /Applications
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("ditto")
-            .arg(new_app)
-            .arg(&installed)
-            .status()
-            .context("copying new app")?;
-        if !status.success() {
-            // Rollback: restore backup
-            warn!("Copy failed, rolling back...");
-            let _ = std::fs::rename(&backup, &installed);
-            anyhow::bail!("Failed to copy new app to /Applications");
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        // On non-macOS, cp -r
-        let status = std::process::Command::new("cp")
-            .args(["-r"])
-            .arg(new_app)
-            .arg(&installed)
-            .status()
-            .context("copying new app")?;
-        if !status.success() {
-            warn!("Copy failed, rolling back...");
-            let _ = std::fs::rename(&backup, &installed);
-            anyhow::bail!("Failed to copy new app");
-        }
+    let status = std::process::Command::new("ditto")
+        .arg(new_app)
+        .arg(&installed)
+        .status()
+        .context("copying new app")?;
+    if !status.success() {
+        // Rollback: restore backup
+        warn!("Copy failed, rolling back...");
+        let _ = std::fs::rename(&backup, &installed);
+        anyhow::bail!("Failed to copy new app to /Applications");
     }
 
     info!("Update installed to /Applications/Whisper Push.app");
 
     // Step 3: Relaunch the new version with --post-update flag
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg(&installed)
-            .arg("--args")
-            .arg("--post-update")
-            .spawn();
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let binary = installed.join("whisper-push");
-        let _ = std::process::Command::new(binary)
-            .arg("--post-update")
-            .spawn();
-    }
+    let _ = std::process::Command::new("open")
+        .arg(&installed)
+        .arg("--args")
+        .arg("--post-update")
+        .spawn();
 
     // Exit cleanly (skip C++ dtors → no ggml-metal teardown abort; the relaunch
     // above brings up the new version). A clean code 0 also means the LaunchAgent's

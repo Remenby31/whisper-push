@@ -10,10 +10,27 @@ import AppKit
 final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        bringToFront()
+        // The daemon that launches us is a menu-bar accessory, and a directly
+        // exec'd binary can lose the activation race — the payment window then
+        // opens *behind* whatever app is frontmost and looks like it never
+        // opened. Re-assert once the run loop settles so it's reliably on top.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.bringToFront()
+        }
+    }
+
+    /// Force the wizard window frontmost and key. `orderFrontRegardless()` is the
+    /// key call: it raises the window above other apps' windows even when macOS
+    /// denied activation (common for a process spawned by a background agent).
+    private func bringToFront() {
         NSApp.activate(ignoringOtherApps: true)
-        // Bring the first window to the front (WindowGroup creates it before
-        // this delegate fires, so it's already in NSApp.windows).
-        NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        // WindowGroup creates the window before the delegate fires, so it's
+        // already in NSApp.windows.
+        if let window = NSApp.windows.first {
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
     }
 }
 
@@ -21,6 +38,12 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
 struct OnboardingApp: App {
     @NSApplicationDelegateAdaptor(OnboardingAppDelegate.self) private var appDelegate
     @StateObject private var state = OnboardingState()
+
+    // The wizard is a compact 440 pt tall everywhere except the checkout, where
+    // the payment form is taller — grow the window there so it fits with no
+    // scroll (`.windowResizability(.contentSize)` makes the window follow this).
+    private let baseHeight: CGFloat = 440
+    private let checkoutHeight: CGFloat = 620
 
     var body: some Scene {
         WindowGroup {
@@ -40,7 +63,7 @@ struct OnboardingApp: App {
                     .opacity(0)
             }
             .environmentObject(state)
-            .frame(width: 520, height: 440)
+            .frame(width: 520, height: state.expandedForCheckout ? checkoutHeight : baseHeight)
             .fixedSize()
             // The wizard is designed for a light, branded surface (racing-green
             // text on light). Pin a light appearance so dark-mode Macs don't get
