@@ -1,5 +1,20 @@
 use anyhow::Result;
+use std::time::Duration;
 use tracing::{info, warn};
+
+// These delays sit on the critical path of *every* dictation (between text
+// ready and the user seeing it pasted), so they're tuned as low as still-
+// reliable. Trimmed from the original 50/150/100 (≈300 ms) → ≈180 ms.
+/// After putting our text on the clipboard, before firing Cmd/Ctrl+V — lets the
+/// pasteboard propagate. The OS clipboard is ready within a frame; 50 ms was
+/// mostly dead latency.
+const CLIPBOARD_SETTLE: Duration = Duration::from_millis(20);
+/// After firing paste, before touching the clipboard again — lets the target app
+/// consume the paste.
+const PASTE_CONSUME: Duration = Duration::from_millis(120);
+/// A final beat before writing the user's original clipboard back, so the restore
+/// can't race the paste the app just read.
+const RESTORE_SETTLE: Duration = Duration::from_millis(40);
 
 /// Paste text at the cursor position.
 /// Saves clipboard → sets text → simulates Cmd/Ctrl+V → restores clipboard.
@@ -21,7 +36,7 @@ pub fn paste_text(text: &str) -> Result<()> {
     clipboard.set_text(text)?;
 
     // Small delay for clipboard to be ready
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(CLIPBOARD_SETTLE);
 
     // Simulate paste keystroke. Capture the result instead of `?`-ing it so we
     // ALWAYS restore the user's clipboard below — otherwise a failed keystroke
@@ -29,12 +44,12 @@ pub fn paste_text(text: &str) -> Result<()> {
     let paste_result = simulate_paste();
 
     // Wait for the paste to be consumed
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    std::thread::sleep(PASTE_CONSUME);
 
     // Restore previous clipboard
     if let Some(old) = saved {
         // Brief delay before restoring
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(RESTORE_SETTLE);
         if let Err(e) = clipboard.set_text(&old) {
             warn!("Could not restore clipboard: {e}");
         }

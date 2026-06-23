@@ -187,13 +187,33 @@ mod action_delegate {
     }
 }
 
+/// Escape a string for embedding inside an AppleScript double-quoted literal.
+/// Backslash and quote are escaped (an un-escaped `\` — e.g. in a dictated
+/// Windows path or model output — makes the whole script malformed, so the
+/// notification silently fails to show); newlines collapse to a space. Single
+/// source for every `osascript -e "display …"` call site (tray prompts, this
+/// fallback, the panic hook).
+#[cfg(target_os = "macos")]
+pub(crate) fn applescript_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' | '\r' => out.push(' '),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// Fallback: osascript notification (shows Script Editor icon).
 #[cfg(target_os = "macos")]
 fn osascript_notify(title: &str, body: &str) {
     let script = format!(
         r#"display notification "{}" with title "{}""#,
-        body.replace('"', r#"\""#).replace('\n', " "),
-        title.replace('"', r#"\""#),
+        applescript_escape(body),
+        applescript_escape(title),
     );
     if let Err(e) = std::process::Command::new("osascript")
         .arg("-e")

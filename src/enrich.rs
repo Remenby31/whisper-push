@@ -41,7 +41,7 @@ fn suggest_canonical(term: &str, lang: &str) -> Option<String> {
     let lang = if lang == "fr" { "fr" } else { "en" };
     let url = format!(
         "https://{lang}.wikipedia.org/w/api.php?action=opensearch&limit=1&namespace=0&format=json&search={}",
-        percent_encode(term)
+        crate::util::percent_encode(term)
     );
     let body = ureq::get(&url)
         .config()
@@ -82,18 +82,4 @@ fn levenshtein(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b.len()]
-}
-
-/// Minimal percent-encoding for the query string.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }

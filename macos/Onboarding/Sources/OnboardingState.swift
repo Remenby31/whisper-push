@@ -43,6 +43,11 @@ class OnboardingState: ObservableObject {
     @Published var selectedModels: Set<String> = []
     @Published var autoStart = true
 
+    /// The embedded payment form needs more vertical room than the rest of the
+    /// wizard; LicenseView raises this while the checkout is showing so the whole
+    /// form fits without scrolling. Drives the window height in OnboardingApp.
+    @Published var expandedForCheckout = false
+
     var primaryModel: String {
         let recommended = modelNameForBackend(recommendedBackend)
         if selectedModels.contains(recommended) {

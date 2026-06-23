@@ -165,8 +165,7 @@ mod inner {
     fn download_model(dest: &PathBuf, int8: bool) -> Result<()> {
         std::fs::create_dir_all(dest)?;
 
-        let api = hf_hub::api::sync::Api::new()?;
-        let repo = api.model("istupakov/parakeet-tdt-0.6b-v3-onnx".to_string());
+        const REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
 
         // (source file on HF, name we save it under)
         let files: &[(&str, &str)] = if int8 {
@@ -185,9 +184,26 @@ mod inner {
         };
         for (src_name, dst_name) in files {
             info!("Downloading {src_name}...");
-            let src = repo
-                .get(src_name)
-                .with_context(|| format!("Failed to download {src_name}"))?;
+            // Bound each blocking fetch (hf-hub has no request deadline) so a
+            // dead socket can't wedge the pipeline thread forever — see
+            // crate::util::run_with_timeout. The orphaned thread exits on its
+            // own; a partially-fetched file just isn't copied.
+            let src_owned = src_name.to_string();
+            let src = crate::util::run_with_timeout(
+                crate::transcribe::DOWNLOAD_TIMEOUT,
+                move || -> Result<PathBuf> {
+                    let api = hf_hub::api::sync::Api::new()?;
+                    api.model(REPO.to_string())
+                        .get(&src_owned)
+                        .with_context(|| format!("Failed to download {src_owned}"))
+                },
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Download of {src_name} timed out after {}s",
+                    crate::transcribe::DOWNLOAD_TIMEOUT.as_secs()
+                )
+            })??;
             std::fs::copy(&src, dest.join(dst_name))
                 .with_context(|| format!("Failed to copy {src_name}"))?;
         }

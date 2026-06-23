@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tracing::info;
 
 /// Available transcription backends.
@@ -18,6 +18,19 @@ pub enum Backend {
     WhisperLocal(String), // model filename
     /// Local Voxtral Mini 4B Realtime (Burn + WGPU, Q4 GGUF)
     VoxtralLocal,
+}
+
+impl Backend {
+    /// Stable, human-facing name for logs and toasts — one label per backend, so
+    /// the same backend never appears two different ways (was `{:?}` Debug in some
+    /// places, a lowercase id string in others).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Backend::Parakeet => "Parakeet",
+            Backend::WhisperLocal(_) => "Whisper",
+            Backend::VoxtralLocal => "Voxtral",
+        }
+    }
 }
 
 static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
@@ -42,12 +55,10 @@ const KEEP_WARM_INTERVAL: Duration = Duration::from_secs(90);
 /// forward pass (touching every weight) on any backend.
 pub(crate) const WARM_SAMPLES: usize = 16_000;
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
+/// Upper bound on a model download. Generous — a ~1.5 GB Whisper / 2.3 GB
+/// Parakeet pull over a slow link must not be aborted — but finite, so a
+/// dead socket eventually surfaces as an error instead of a permanent wedge.
+pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Cumulative (major, minor) page faults for this process. Major faults are the
 /// ones that hit disk (the model's mmapped weights being read back in after the
@@ -75,13 +86,13 @@ const PAGE_BYTES: i64 = 16_384;
 /// Record that a real dictation just happened (opens/extends the keep-warm
 /// window). Called from the transcription choke point.
 fn mark_activity() {
-    LAST_ACTIVITY.store(now_secs(), Ordering::Relaxed);
+    LAST_ACTIVITY.store(crate::util::now_secs(), Ordering::Relaxed);
 }
 
 /// True while we're within the keep-warm window after the last dictation.
 fn keep_warm_due() -> bool {
     let last = LAST_ACTIVITY.load(Ordering::Relaxed);
-    last != 0 && now_secs().saturating_sub(last) < KEEP_WARM_WINDOW.as_secs()
+    last != 0 && crate::util::now_secs().saturating_sub(last) < KEEP_WARM_WINDOW.as_secs()
 }
 
 /// Whisper keep-warm: a tiny inference on silence to keep the weights resident.
@@ -356,9 +367,24 @@ fn download_model(model_name: &str, dest: &PathBuf) -> Result<()> {
 
     info!("Downloading {filename} from {repo}...");
 
-    let api = hf_hub::api::sync::Api::new()?;
-    let repo = api.model(repo.to_string());
-    let path = repo.get(filename)?;
+    // hf-hub's blocking client has no request deadline of its own, so a
+    // dead/half-open TCP socket would block here forever — and this runs on the
+    // single pipeline thread, wedging every future hotkey. Bound it: on timeout
+    // we return Err so the caller (LoadModel) restores Idle + the hotkeys. The
+    // orphaned download thread is harmless — the temp→dest copy only runs on a
+    // value we actually receive in time.
+    let repo = repo.to_string();
+    let filename = filename.to_string();
+    let path = crate::util::run_with_timeout(DOWNLOAD_TIMEOUT, move || -> Result<PathBuf> {
+        let api = hf_hub::api::sync::Api::new()?;
+        Ok(api.model(repo).get(&filename)?)
+    })
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Model download timed out after {}s",
+            DOWNLOAD_TIMEOUT.as_secs()
+        )
+    })??;
 
     // Copy to our model directory
     std::fs::copy(&path, dest)?;

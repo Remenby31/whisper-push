@@ -85,19 +85,7 @@ pub fn system_info() -> String {
 
 /// URL-encode a string (percent-encoding for query parameters).
 pub fn url_encode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                result.push(b as char);
-            }
-            _ => {
-                result.push('%');
-                result.push_str(&format!("{b:02X}"));
-            }
-        }
-    }
-    result
+    crate::util::percent_encode(s)
 }
 
 /// Build a pre-filled GitHub Issue URL.
@@ -198,10 +186,7 @@ pub fn install_panic_hook() {
         let log_dir = config::log_dir();
         if std::fs::create_dir_all(&log_dir).is_ok() {
             let crash_path = log_dir.join("crash.log");
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now = crate::util::now_secs();
             let entry = format!("[{now}] PANIC at {location}: {payload}\n");
             let _ = std::fs::OpenOptions::new()
                 .create(true)
@@ -213,8 +198,7 @@ pub fn install_panic_hook() {
         // Show notification via osascript (best effort, works even if app is broken)
         #[cfg(target_os = "macos")]
         {
-            let msg = format!("Crashed: {payload}");
-            let safe_msg = msg.replace('"', "'").replace('\n', " ");
+            let safe_msg = crate::notify::applescript_escape(&format!("Crashed: {payload}"));
             let script =
                 format!(r#"display notification "{safe_msg}" with title "Whisper Push Crashed""#);
             let _ = std::process::Command::new("osascript")
