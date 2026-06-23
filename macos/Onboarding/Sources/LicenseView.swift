@@ -11,7 +11,8 @@ struct LicenseView: View {
     @EnvironmentObject var state: OnboardingState
 
     // Variant-locked, permanent checkout links (Lemon Squeezy). LIVE (prod) URLs.
-    private let checkoutAnnual = "https://whisperpush.lemonsqueezy.com/checkout/buy/3b9fd0f0-f299-4108-86eb-93c03e2eca23"
+    // Two separate products now: Monthly (€4.99/mo) and Lifetime (€49.99 one-time).
+    private let checkoutMonthly = "https://whisperpush.lemonsqueezy.com/checkout/buy/2baac143-5393-465e-8d0c-66ee9bd12ab3"
     private let checkoutLifetime = "https://whisperpush.lemonsqueezy.com/checkout/buy/04ecf078-9a78-4daf-a5a5-edf77a019c07"
 
     // Strip the embedded checkout down to just the payment form. `embed=1` drops
@@ -20,11 +21,11 @@ struct LicenseView: View {
     // past before reaching the card fields. (Lemon Squeezy checkout URL options.)
     private let checkoutOptions = "embed=1&media=0&logo=0&desc=0&discount=0"
 
-    private enum Plan { case annual, lifetime }
+    private enum Plan { case monthly, lifetime }
     private enum Mode: Equatable { case choose, checkout(String), activate }
 
     @State private var mode: Mode = .choose
-    @State private var plan: Plan = .annual
+    @State private var plan: Plan = .monthly
     @State private var key = ""
     @State private var email = ""
     @State private var busy = false
@@ -70,13 +71,13 @@ struct LicenseView: View {
                 .padding(.top, 6)
 
             HStack(spacing: 12) {
-                planCard(.annual, title: "Annual", price: "19,99 €", period: "per year", badge: "Most popular")
+                planCard(.monthly, title: "Monthly", price: "4,99 €", period: "per month", badge: "Flexible")
                 planCard(.lifetime, title: "Lifetime", price: "49,99 €", period: "one-time", badge: "Best value")
             }
             .frame(maxWidth: 380)
             .padding(.top, 18)
 
-            Button { mode = .checkout(plan == .annual ? checkoutAnnual : checkoutLifetime) } label: {
+            Button { mode = .checkout(plan == .monthly ? checkoutMonthly : checkoutLifetime) } label: {
                 Text("Continue")
             }
             .buttonStyle(BrandPrimaryButtonStyle(enabled: true))

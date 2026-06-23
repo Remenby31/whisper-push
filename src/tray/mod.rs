@@ -122,19 +122,16 @@ struct App {
 
 struct MenuItems {
     status_item: MenuItem,
-    toggle_item: MenuItem,
     #[allow(dead_code)]
     notifications_item: CheckMenuItem,
     #[allow(dead_code)]
     sound_item: CheckMenuItem,
     #[allow(dead_code)]
     debug_item: CheckMenuItem,
-    toggle_id: String,
     quit_id: String,
     notif_id: String,
     sound_id: String,
     debug_id: String,
-    test_id: String,
     uninstall_id: String,
     update_item: MenuItem,
     update_id: String,
@@ -174,6 +171,19 @@ struct MenuItems {
     /// One (item, term) per listed word; rebuilt on every dictionary change.
     /// A placeholder/"more" line has an empty term.
     dict_entry_items: Vec<(MenuItem, String)>,
+    // Templates (voice snippets — say the trigger, paste the content)
+    templates_submenu: Submenu,
+    template_add_id: String,
+    template_open_id: String,
+    template_reload_id: String,
+    /// One disabled label per template trigger; rebuilt on change.
+    template_items: Vec<(MenuItem, String)>,
+    // History (recent dictations — click an entry to copy it)
+    history_submenu: Submenu,
+    history_open_id: String,
+    history_clear_id: String,
+    /// One (item, full text) per recent run; rebuilt on change.
+    history_entry_items: Vec<(MenuItem, String)>,
     // License (Lemon Squeezy)
     license_submenu: Submenu,
     license_status_item: MenuItem,
@@ -207,15 +217,6 @@ impl App {
             "Whisper Push \u{2014} \u{231b} Loading model\u{2026}".into()
         };
         let status_item = MenuItem::new(&status_text, false, None);
-        let toggle_item = MenuItem::new(
-            if is_ready {
-                "Start Recording"
-            } else {
-                "\u{231b} Loading model\u{2026} (unavailable)"
-            },
-            is_ready,
-            None,
-        );
 
         // Hotkey submenu (titled with the current binding)
         let hotkey_submenu = Submenu::new(
@@ -317,7 +318,6 @@ impl App {
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
         let debug_item = CheckMenuItem::new("Debug Logging", true, cfg.debug, None);
-        let test_item = MenuItem::new("Test (record 3s + transcribe)", true, None);
         let update_item = MenuItem::new("Check for Updates\u{2026}", true, None);
         let report_item = MenuItem::new("Report a Problem\u{2026}", true, None);
         let uninstall_item = MenuItem::new("Uninstall...", true, None);
@@ -406,6 +406,48 @@ impl App {
         let license_subscription_id = license_subscription_item.id().0.clone();
         let license_deactivate_id = license_deactivate_item.id().0.clone();
 
+        // Templates submenu (voice snippets). Triggers are disabled labels; the
+        // live actions are Add / Open. The trigger list refreshes on change.
+        let templates_submenu =
+            Submenu::new(&format!("Templates ({})", crate::templates::count()), true);
+        let template_add_item = MenuItem::new("Add Template\u{2026}", true, None);
+        let template_open_item = MenuItem::new("Open templates.toml\u{2026}", true, None);
+        let template_reload_item = MenuItem::new("Reload from Disk", true, None);
+        let _ = templates_submenu.append(&template_add_item);
+        let _ = templates_submenu.append(&template_open_item);
+        let _ = templates_submenu.append(&template_reload_item);
+        let _ = templates_submenu.append(&PredefinedMenuItem::separator());
+        let _ = templates_submenu.append(&MenuItem::new(
+            "Your templates (click to edit/delete):",
+            false,
+            None,
+        ));
+        let template_items = populate_template_items(&templates_submenu);
+        let template_add_id = template_add_item.id().0.clone();
+        let template_open_id = template_open_item.id().0.clone();
+        let template_reload_id = template_reload_item.id().0.clone();
+
+        // History submenu (recent dictations). Clicking an entry copies it.
+        let history_submenu = Submenu::new("History", true);
+        let history_open_item = MenuItem::new("Open history.txt\u{2026}", true, None);
+        let history_clear_item = MenuItem::new("Clear History", true, None);
+        let _ = history_submenu.append(&history_open_item);
+        let _ = history_submenu.append(&history_clear_item);
+        let _ = history_submenu.append(&PredefinedMenuItem::separator());
+        let _ = history_submenu.append(&MenuItem::new("Recent (click to copy):", false, None));
+        let history_entry_items = populate_history_entries(&history_submenu);
+        let history_open_id = history_open_item.id().0.clone();
+        let history_clear_id = history_clear_item.id().0.clone();
+
+        // Settings submenu — low-frequency toggles + uninstall (moved off the
+        // top level to keep the menu uncluttered).
+        let settings_submenu = Submenu::new("Settings", true);
+        let _ = settings_submenu.append(&notifications_item);
+        let _ = settings_submenu.append(&sound_item);
+        let _ = settings_submenu.append(&debug_item);
+        let _ = settings_submenu.append(&PredefinedMenuItem::separator());
+        let _ = settings_submenu.append(&uninstall_item);
+
         // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
 
@@ -421,34 +463,29 @@ impl App {
         } else {
             None
         };
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&toggle_item);
+        // Permissions submenu — only shown when something is actually missing
+        // (when everything's granted it's just noise).
+        if !perms.all_granted() {
+            let _ = menu.append(&PredefinedMenuItem::separator());
+            let _ = menu.append(&perms_submenu);
+        }
 
-        // Permissions submenu (always available; titled ✓ or ⚠).
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&perms_submenu);
-
         let _ = menu.append(&PredefinedMenuItem::separator());
 
-        // Settings (dropdowns to keep the menu compact)
+        // Feature dropdowns (kept compact).
         let _ = menu.append(&hotkey_submenu);
         let _ = menu.append(&backend_submenu);
         let _ = menu.append(&input_submenu);
         let _ = menu.append(&output_submenu);
         let _ = menu.append(&dict_submenu);
+        let _ = menu.append(&templates_submenu);
+        let _ = menu.append(&history_submenu);
         let _ = menu.append(&license_submenu);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
-
-        let _ = menu.append(&notifications_item);
-        let _ = menu.append(&sound_item);
-
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&test_item);
+        let _ = menu.append(&settings_submenu);
         let _ = menu.append(&update_item);
         let _ = menu.append(&report_item);
-        let _ = menu.append(&PredefinedMenuItem::separator());
-        let _ = menu.append(&uninstall_item);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
 
@@ -467,8 +504,6 @@ impl App {
             .collect();
 
         self.menu_items = Some(MenuItems {
-            toggle_id: toggle_item.id().0.clone(),
-            test_id: test_item.id().0.clone(),
             update_id: update_item.id().0.clone(),
             report_id: report_item.id().0.clone(),
             uninstall_id: uninstall_item.id().0.clone(),
@@ -502,7 +537,6 @@ impl App {
             license_subscription_id,
             license_deactivate_id,
             status_item,
-            toggle_item,
             notifications_item,
             sound_item,
             debug_item,
@@ -516,6 +550,15 @@ impl App {
             output_ids,
             output_device_items,
             output_submenu,
+            templates_submenu,
+            template_add_id,
+            template_open_id,
+            template_reload_id,
+            template_items,
+            history_submenu,
+            history_open_id,
+            history_clear_id,
+            history_entry_items,
         });
 
         // Build tray
@@ -568,6 +611,32 @@ impl App {
         mi.dict_submenu.set_text(format!("Dictionary ({n})"));
     }
 
+    /// Rebuild the recent-dictation entries in the History submenu.
+    fn refresh_history_submenu(&mut self) {
+        let Some(mi) = self.menu_items.as_mut() else {
+            return;
+        };
+        let old = std::mem::take(&mut mi.history_entry_items);
+        for (it, _) in old {
+            let _ = mi.history_submenu.remove(&it);
+        }
+        mi.history_entry_items = populate_history_entries(&mi.history_submenu);
+    }
+
+    /// Rebuild the trigger list + count in the Templates submenu.
+    fn refresh_templates_submenu(&mut self) {
+        let Some(mi) = self.menu_items.as_mut() else {
+            return;
+        };
+        let old = std::mem::take(&mut mi.template_items);
+        for (it, _) in old {
+            let _ = mi.templates_submenu.remove(&it);
+        }
+        mi.template_items = populate_template_items(&mi.templates_submenu);
+        mi.templates_submenu
+            .set_text(format!("Templates ({})", crate::templates::count()));
+    }
+
     /// Refresh the License submenu title + status line (cheap, no rebuild).
     fn refresh_license_submenu(&mut self) {
         if let Some(mi) = self.menu_items.as_ref() {
@@ -594,8 +663,6 @@ impl App {
         match event {
             Event::ModelReady => {
                 self.state.set(State::Idle);
-                mi.toggle_item.set_text("Start Recording");
-                mi.toggle_item.set_enabled(true);
                 let disp = format_hotkey_display(
                     &self.state.config.hotkey,
                     &self.state.config.hotkey_mode,
@@ -625,90 +692,54 @@ impl App {
                     crate::notify::app("Uninstalled. You can delete the app from Applications.");
                     crate::util::exit_clean();
                 }
-                if id == &mi.toggle_id {
-                    // Recording lives entirely on the pipeline thread (the single
-                    // chokepoint, off the UI thread — AudioCapture calls into
-                    // CoreAudio which can block for seconds on Bluetooth). The menu
-                    // just forwards the toggle.
-                    match &self.pipeline_tx {
-                        Some(tx) => {
-                            let _ = tx.send(Event::HotkeyToggle);
-                        }
-                        None => warn!("toggle clicked before pipeline was ready"),
-                    }
+                if id == &mi.template_add_id {
+                    // osascript dialogs block → run off the UI thread. The list
+                    // refreshes via templates::take_dirty() in about_to_wait.
+                    std::thread::spawn(add_template_dialog);
                     return;
                 }
-                if id == &mi.test_id {
-                    // Test: record 3 seconds + transcribe + show result
-                    let cfg = self.config.lock_safe().clone();
-                    std::thread::spawn(move || {
-                        info!("=== TEST: Recording 3 seconds... ===");
-                        crate::notify::app("Recording 3 seconds...");
-
-                        match crate::audio::capture::AudioCapture::start(&cfg.input_device) {
-                            Ok(cap) => {
-                                std::thread::sleep(std::time::Duration::from_secs(3));
-                                let audio = cap.stop();
-                                let rms = crate::util::rms(&audio);
-                                info!(
-                                    "=== TEST: Captured {:.1}s, RMS={:.4} ===",
-                                    audio.len() as f32 / crate::audio::SAMPLE_RATE as f32,
-                                    rms
-                                );
-
-                                if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
-                                    crate::notify::app("Test failed: audio too short");
-                                    return;
-                                }
-                                if rms < crate::audio::capture::SILENCE_RMS_THRESHOLD {
-                                    crate::notify::app(
-                                        "Test failed: silence (check mic permission)",
-                                    );
-                                    return;
-                                }
-
-                                let backend = crate::model_manager::resolve_backend(&cfg.model);
-                                info!("=== TEST: Transcribing with '{}' ===", backend.name());
-                                crate::notify::app(&format!(
-                                    "Transcribing with {}...",
-                                    backend.name()
-                                ));
-
-                                let start = std::time::Instant::now();
-                                match crate::transcribe::transcribe_with_backend(
-                                    &audio,
-                                    &cfg.language,
-                                    &backend,
-                                ) {
-                                    Ok(text) if !text.is_empty() => {
-                                        let elapsed = start.elapsed();
-                                        info!(
-                                            "=== TEST OK ({:.2}s): '{}' ===",
-                                            elapsed.as_secs_f64(),
-                                            text
-                                        );
-                                        crate::notify::app(&format!(
-                                            "Test OK ({:.1}s): {}",
-                                            elapsed.as_secs_f64(),
-                                            text
-                                        ));
-                                    }
-                                    Ok(_) => {
-                                        info!("=== TEST: No speech detected ===");
-                                        crate::notify::app("Test: no speech detected");
-                                    }
-                                    Err(e) => {
-                                        info!("=== TEST ERROR: {e} ===");
-                                        crate::notify::app(&format!("Test error: {e}"));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                info!("=== TEST: Capture failed: {e} ===");
-                                crate::notify::app(&format!("Test failed: {e}"));
-                            }
+                if id == &mi.template_open_id {
+                    open_path(&crate::templates::ensure_file());
+                    return;
+                }
+                if id == &mi.template_reload_id {
+                    crate::templates::reload(); // sets the dirty flag → submenu refresh
+                    crate::notify::app(&format!(
+                        "Templates reloaded \u{2014} {} template(s).",
+                        crate::templates::count()
+                    ));
+                    return;
+                }
+                // Click a template trigger → edit (open file) or delete.
+                if let Some((_, trigger)) = mi
+                    .template_items
+                    .iter()
+                    .find(|(it, t)| !t.is_empty() && id == &it.id().0)
+                {
+                    let trigger = trigger.clone();
+                    std::thread::spawn(move || template_action_dialog(&trigger));
+                    return;
+                }
+                if id == &mi.history_open_id {
+                    open_path(&crate::history::file_path());
+                    return;
+                }
+                if id == &mi.history_clear_id {
+                    crate::history::clear(); // sets the dirty flag → submenu refresh
+                    crate::notify::app("History cleared.");
+                    return;
+                }
+                // Click a history entry → copy that dictation to the clipboard.
+                if let Some((_, text)) = mi
+                    .history_entry_items
+                    .iter()
+                    .find(|(it, t)| !t.is_empty() && id == &it.id().0)
+                {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if cb.set_text(text.clone()).is_ok() {
+                            crate::notify::app("Copied to clipboard.");
                         }
-                    });
+                    }
                     return;
                 }
                 if id == &mi.mic_perm_id {
@@ -805,8 +836,7 @@ impl App {
                     return;
                 }
                 if id == &mi.dict_open_id {
-                    let path = crate::dictionary::ensure_file();
-                    let _ = std::process::Command::new("open").arg(&path).spawn();
+                    open_path(&crate::dictionary::ensure_file());
                     return;
                 }
                 if id == &mi.dict_reload_id {
@@ -856,17 +886,16 @@ impl App {
                     std::thread::spawn(move || license_deactivate_dialog(tx));
                     return;
                 }
-                // Click a listed word to remove it from the dictionary.
-                for (it, term) in &mi.dict_entry_items {
-                    if !term.is_empty() && id == &it.id().0 {
-                        if let Ok(true) = crate::dictionary::remove_entry(term) {
-                            crate::notify::app(&format!(
-                                "Removed \u{201c}{term}\u{201d} from dictionary"
-                            ));
-                        }
-                        let _ = self.state.tx.send(Event::DictChanged);
-                        return;
-                    }
+                // Click a listed word → edit (open the file) or delete.
+                if let Some((_, term)) = mi
+                    .dict_entry_items
+                    .iter()
+                    .find(|(it, t)| !t.is_empty() && id == &it.id().0)
+                {
+                    let term = term.clone();
+                    let tx = self.state.tx.clone();
+                    std::thread::spawn(move || dict_action_dialog(&term, tx));
+                    return;
                 }
                 for (item_id, hotkey, mode) in &mi.hotkey_ids {
                     if id == item_id {
@@ -973,7 +1002,6 @@ impl App {
                 // regardless of how recording started). The start sound is
                 // played at each trigger point, never here, to avoid doubling.
                 self.state.set(State::Recording);
-                mi.toggle_item.set_text("Recording\u{2026}");
                 set_tray_icon(&self.tray, State::Recording);
                 crate::overlay::set_state(crate::overlay::OverlayState::Recording);
             }
@@ -1115,27 +1143,6 @@ impl App {
                     State::Processing => crate::overlay::OverlayState::Processing,
                     _ => crate::overlay::OverlayState::Idle, // Idle / Loading
                 });
-                // Keep the toggle item in sync for every state (Recording is
-                // owned by its dedicated arm above). Matters most when the
-                // hotkey — not the menu — drives the transition.
-                if let Some(mi) = &self.menu_items {
-                    match s {
-                        State::Idle => {
-                            mi.toggle_item.set_text("Start Recording");
-                            mi.toggle_item.set_enabled(true);
-                        }
-                        State::Processing => {
-                            mi.toggle_item.set_text("Processing\u{2026}");
-                            mi.toggle_item.set_enabled(false);
-                        }
-                        State::Loading => {
-                            mi.toggle_item
-                                .set_text("\u{231b} Loading model\u{2026} (unavailable)");
-                            mi.toggle_item.set_enabled(false);
-                        }
-                        State::Recording => {}
-                    }
-                }
             }
 
             _ => {}
@@ -1239,6 +1246,13 @@ impl ApplicationHandler<UserEvent> for App {
         // 3. Auto-capture learned a word off the UI thread → refresh the list.
         if crate::dictionary::take_menu_dirty() {
             self.refresh_dict_submenu();
+        }
+        // 4. History / templates changed (a dictation, a clear, an add) → refresh.
+        if crate::history::take_dirty() {
+            self.refresh_history_submenu();
+        }
+        if crate::templates::take_dirty() {
+            self.refresh_templates_submenu();
         }
     }
 
@@ -1832,14 +1846,20 @@ fn stop_and_transcribe(
     let result = crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend);
     match result {
         Ok(text) if !text.is_empty() => {
+            // Record the run so the user can find/re-copy it (History submenu +
+            // history.txt). Records what was *recognised*, not the expansion.
+            crate::history::record(&text);
+            // If the whole dictation matches a template trigger, paste its
+            // expansion instead (e.g. say "signature" → paste your signature).
+            let to_paste = crate::templates::expand(&text).unwrap_or_else(|| text.clone());
             info!(
                 "Pasting ({:.2}s): '{}'",
                 start.elapsed().as_secs_f64(),
-                // char-based, not byte-based: `&text[..80]` panics if byte 80
+                // char-based, not byte-based: `&s[..80]` panics if byte 80
                 // lands mid-codepoint (French accents, CJK — all in scope).
-                text.chars().take(80).collect::<String>()
+                to_paste.chars().take(80).collect::<String>()
             );
-            if let Err(e) = crate::paste::paste_text(&text) {
+            if let Err(e) = crate::paste::paste_text(&to_paste) {
                 tracing::error!("Paste failed: {e}");
             }
             // No per-dictation notification (noise).
@@ -1850,6 +1870,191 @@ fn stop_and_transcribe(
             crate::notify::app(&format!("Error: {e}"));
         }
     }
+}
+
+/// Open a file with the OS default handler (cross-platform).
+fn open_path(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .spawn();
+}
+
+/// Build the recent-dictation entries for the History submenu. Returns
+/// (item, full text) so a click can copy the full (possibly multi-line) text;
+/// the label is a one-line preview. A disabled placeholder (empty text) shows
+/// when there's no history yet.
+fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
+    const MAX: usize = 12;
+    const PREVIEW: usize = 48;
+    let recent = crate::history::recent();
+    let mut items = Vec::new();
+    if recent.is_empty() {
+        let ph = MenuItem::new("  (empty \u{2014} your dictations will appear here)", false, None);
+        let _ = submenu.append(&ph);
+        items.push((ph, String::new()));
+        return items;
+    }
+    for text in recent.iter().take(MAX) {
+        let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if preview.chars().count() > PREVIEW {
+            preview = format!("{}\u{2026}", preview.chars().take(PREVIEW).collect::<String>());
+        }
+        let it = MenuItem::new(&format!("  {preview}"), true, None);
+        let _ = submenu.append(&it);
+        items.push((it, text.clone()));
+    }
+    items
+}
+
+/// Build the trigger labels for the Templates submenu (disabled — the live
+/// actions are Add / Open). Returns (item, trigger).
+fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
+    const MAX: usize = 30;
+    let triggers = crate::templates::triggers();
+    let mut items = Vec::new();
+    if triggers.is_empty() {
+        let ph = MenuItem::new("  (none yet \u{2014} use Add Template\u{2026})", false, None);
+        let _ = submenu.append(&ph);
+        items.push((ph, String::new()));
+        return items;
+    }
+    for t in triggers.iter().take(MAX) {
+        // Enabled so a click opens the edit/delete dialog.
+        let it = MenuItem::new(&format!("  \u{201c}{t}\u{201d}"), true, None);
+        let _ = submenu.append(&it);
+        items.push((it, t.clone()));
+    }
+    if triggers.len() > MAX {
+        let more = MenuItem::new(
+            &format!("  \u{2026} +{} more (use Open file)", triggers.len() - MAX),
+            false,
+            None,
+        );
+        let _ = submenu.append(&more);
+        items.push((more, String::new()));
+    }
+    items
+}
+
+/// "Add Template…" dialog: ask for the trigger, then the content, then save.
+#[cfg(target_os = "macos")]
+fn add_template_dialog() {
+    let Some(trigger) = osascript_input(
+        "Add a template \u{2014} the word/phrase you'll say to paste it. \
+         (For long or multi-line content, edit templates.toml instead.)",
+        "",
+    ) else {
+        return;
+    };
+    let trigger = trigger.trim().to_string();
+    if trigger.is_empty() {
+        return;
+    }
+    let Some(content) =
+        osascript_input(&format!("Text to paste when you say \u{201c}{trigger}\u{201d}:"), "")
+    else {
+        return;
+    };
+    match crate::templates::add(&trigger, &content) {
+        Ok(()) => crate::notify::app(&format!("Template \u{201c}{trigger}\u{201d} saved.")),
+        Err(e) => crate::notify::app(&format!("Couldn't save template: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn add_template_dialog() {
+    crate::notify::app("Add templates by editing templates.toml (the dialog is macOS-only).");
+}
+
+/// Per-template menu click → Edit (open the file for full multi-line/formatting
+/// control) or Delete.
+#[cfg(target_os = "macos")]
+fn template_action_dialog(trigger: &str) {
+    match osascript_choice(
+        &format!("Template \u{201c}{trigger}\u{201d}"),
+        &["Cancel", "Edit", "Delete"],
+    )
+    .as_deref()
+    {
+        Some("Delete") => {
+            if crate::templates::remove(trigger) {
+                crate::notify::app(&format!("Deleted template \u{201c}{trigger}\u{201d}."));
+            }
+        }
+        // "Edit" (and any non-Delete) opens the file — multi-line content with
+        // the user's own formatting is edited there (TOML triple-quotes).
+        Some("Edit") => open_path(&crate::templates::ensure_file()),
+        _ => {}
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn template_action_dialog(_trigger: &str) {
+    open_path(&crate::templates::ensure_file());
+}
+
+/// Per-word dictionary menu click → Edit (open the file) or Delete.
+#[cfg(target_os = "macos")]
+fn dict_action_dialog(term: &str, tx: crossbeam_channel::Sender<Event>) {
+    match osascript_choice(
+        &format!("Dictionary word \u{201c}{term}\u{201d}"),
+        &["Cancel", "Edit", "Delete"],
+    )
+    .as_deref()
+    {
+        Some("Delete") => {
+            if let Ok(true) = crate::dictionary::remove_entry(term) {
+                crate::notify::app(&format!("Removed \u{201c}{term}\u{201d} from dictionary"));
+                let _ = tx.send(Event::DictChanged);
+            }
+        }
+        Some("Edit") => open_path(&crate::dictionary::ensure_file()),
+        _ => {}
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dict_action_dialog(_term: &str, _tx: crossbeam_channel::Sender<Event>) {
+    open_path(&crate::dictionary::ensure_file());
+}
+
+/// Show a dialog with the given buttons (first = Cancel); returns the clicked
+/// button label, or `None` on Cancel/error. macOS only.
+#[cfg(target_os = "macos")]
+fn osascript_choice(message: &str, buttons: &[&str]) -> Option<String> {
+    let cancel = buttons.first().copied().unwrap_or("Cancel");
+    let btns = buttons
+        .iter()
+        .map(|b| format!("\"{}\"", crate::notify::applescript_escape(b)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let script = format!(
+        "button returned of (display dialog \"{}\" buttons {{{}}} \
+         default button \"{}\" cancel button \"{}\" with title \"Whisper Push\")",
+        crate::notify::applescript_escape(message),
+        btns,
+        crate::notify::applescript_escape(cancel),
+        crate::notify::applescript_escape(cancel),
+    );
+    let out = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None; // Cancel → non-zero exit
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .trim_end_matches(['\n', '\r'])
+            .to_string(),
+    )
 }
 
 /// Append one (removable) menu item per dictionary entry; returns them paired

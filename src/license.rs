@@ -11,12 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, UNIX_EPOCH};
 
-// ─── Lemon Squeezy identity (store "whisperpush", one product, two variants) ─
+// ─── Lemon Squeezy identity (store "whisperpush", two products) ──────────────
 // Set LS_STORE_ID back to 0 to disable the ownership check (dev/testing).
+// Two SEPARATE products now: Lifetime (one-time) and Monthly (subscription) —
+// each with one variant. A key is "ours" if it belongs to either product.
 const LS_STORE_ID: u64 = 390985;
-const LS_PRODUCT_ID: u64 = 1123454;
-const LS_VARIANT_ANNUAL: u64 = 1758456; // subscription, 19,99 €/yr (live)
-const LS_VARIANT_LIFETIME: u64 = 1758455; // single payment, 49,99 € (live)
+const LS_PRODUCT_LIFETIME: u64 = 1123454;
+const LS_PRODUCT_MONTHLY: u64 = 1169224;
+const LS_VARIANT_LIFETIME: u64 = 1758455; // Lifetime — single payment €49.99 (live)
+const LS_VARIANT_MONTHLY: u64 = 1828967; // Monthly subscription — €4.99/mo (live)
 
 // Checkout happens in the in-app modal (WKWebView in LicenseView.swift); the
 // checkout URLs live there. The daemon never opens an external browser.
@@ -41,7 +44,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductKind {
-    Annual,
+    Monthly,
     Lifetime,
 }
 
@@ -116,7 +119,7 @@ impl LicenseState {
             .and_then(kind_for_variant)
             // Fall back to expiry: a key with no expiry is lifetime.
             .or(Some(if self.expires_at_unix.is_some() {
-                ProductKind::Annual
+                ProductKind::Monthly
             } else {
                 ProductKind::Lifetime
             }));
@@ -128,7 +131,7 @@ impl LicenseState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LicensedKind {
     Lifetime,
-    /// Annual subscription; `renews` is the period end if the key carries one.
+    /// Recurring subscription; `renews` is the period end if the key carries one.
     Subscription {
         renews: Option<u64>,
     },
@@ -273,7 +276,7 @@ fn licensed(s: &LicenseState) -> LicenseStatus {
     // Prefer the variant-derived kind (robust); fall back to expiry presence.
     let lifetime = match s.product_kind {
         Some(ProductKind::Lifetime) => true,
-        Some(ProductKind::Annual) => false,
+        Some(ProductKind::Monthly) => false,
         None => s.expires_at_unix.is_none(),
     };
     if lifetime {
@@ -592,7 +595,7 @@ pub fn status_text() -> String {
         LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
             match read().expires_at_raw.as_deref().and_then(|s| s.get(0..10)) {
                 Some(d) => format!("Licensed \u{2014} renews {d}"),
-                None => "Licensed \u{2014} Annual".into(),
+                None => "Licensed \u{2014} Monthly".into(),
             }
         }
         LicenseStatus::GraceOffline { days_left } => format!(
@@ -656,12 +659,13 @@ fn belongs_to_us(store_id: u64, product_id: u64) -> bool {
         tracing::warn!("license: LS_STORE_ID unset \u{2014} skipping ownership check");
         return true;
     }
-    store_id == LS_STORE_ID && product_id == LS_PRODUCT_ID
+    store_id == LS_STORE_ID
+        && (product_id == LS_PRODUCT_LIFETIME || product_id == LS_PRODUCT_MONTHLY)
 }
 
 fn kind_for_variant(variant_id: u64) -> Option<ProductKind> {
-    if variant_id == LS_VARIANT_ANNUAL {
-        Some(ProductKind::Annual)
+    if variant_id == LS_VARIANT_MONTHLY {
+        Some(ProductKind::Monthly)
     } else if variant_id == LS_VARIANT_LIFETIME {
         Some(ProductKind::Lifetime)
     } else {
