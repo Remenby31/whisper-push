@@ -523,13 +523,11 @@ fn clear() {
     save(&s);
 }
 
-// ─── Blocked-UX (throttled) ─────────────────────────────────────────────────
-
-static LAST_NOTIFY: AtomicU64 = AtomicU64::new(0);
+// ─── Blocked-UX ─────────────────────────────────────────────────────────────
 
 /// The one dictation gate: returns true if entitled, otherwise fires the
-/// throttled blocked-notification and returns false. Every "may this dictation
-/// proceed?" check routes through here so the policy + throttle live in one place.
+/// blocked-notification and returns false. Every "may this dictation proceed?"
+/// check routes through here so the policy lives in one place.
 pub fn gate() -> bool {
     if is_entitled() {
         true
@@ -539,28 +537,19 @@ pub fn gate() -> bool {
     }
 }
 
-/// Called from the gate when not entitled: a throttled notification carrying a
-/// button that opens the in-app Subscription modal directly (same surface as the
-/// menu bar → License → Subscription item).
+/// Called when not entitled and the user made a genuine dictation attempt: a
+/// notification carrying a button that opens the in-app Subscription modal
+/// directly (same surface as menu bar → License → Subscription). NOT throttled —
+/// callers fire it per real attempt, so the nudge shows every time they try.
 pub fn on_blocked() {
+    // Short + punchy — the button IS the CTA, so the body is just the fact.
     let (body, button) = match status() {
-        LicenseStatus::Locked => (
-            "Your 7-day trial has ended. Subscribe to keep dictating.",
-            "Subscribe",
-        ),
-        LicenseStatus::Expired => (
-            "Your Whisper Push subscription expired. Renew to keep dictating.",
-            "Renew",
-        ),
-        LicenseStatus::Disabled => (
-            "Your Whisper Push license is no longer active. Open Subscription to fix it.",
-            "Manage",
-        ),
+        LicenseStatus::Locked => ("Your 7-day trial has ended.", "Subscribe"),
+        LicenseStatus::Expired => ("Your subscription has expired.", "Renew"),
+        LicenseStatus::Disabled => ("Your license is inactive.", "Manage"),
         _ => return, // entitled
     };
-    if throttle(&LAST_NOTIFY, now(), 300) {
-        crate::notify::app_action(body, button, open_paywall);
-    }
+    crate::notify::app_action(body, button, open_paywall);
 }
 
 /// Open the in-app subscription / activation modal — the same window the tray's
@@ -568,18 +557,8 @@ pub fn on_blocked() {
 /// its own thread (the notification delegate spawns it); the daemon then picks up
 /// the resulting license.json via `maybe_reload`, so no manual refresh is needed.
 fn open_paywall() {
-    if !crate::onboarding::run_license_window() {
+    if !crate::onboarding::run_license_window(false) {
         tracing::info!("license: subscribe action — license window unavailable (dev build?)");
-    }
-}
-
-/// True (and records `t`) if at least `gap` seconds passed since the last fire.
-fn throttle(slot: &AtomicU64, t: u64, gap: u64) -> bool {
-    if t.saturating_sub(slot.load(Ordering::Relaxed)) >= gap {
-        slot.store(t, Ordering::Relaxed);
-        true
-    } else {
-        false
     }
 }
 

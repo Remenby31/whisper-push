@@ -38,6 +38,9 @@ class OnboardingState: ObservableObject {
     /// Standalone license/payment modal (menu bar → License → Subscription).
     /// Shows only LicenseView; its buttons close the window instead of advancing.
     let licenseOnly: Bool
+    /// Open the modal directly on the activate (enter-your-key) screen instead of
+    /// the paywall (menu bar → Activate with License Key…). Implies `licenseOnly`.
+    let startActivate: Bool
 
     // User choices
     @Published var selectedModels: Set<String> = []
@@ -63,6 +66,7 @@ class OnboardingState: ObservableObject {
         self.daemonPath = Self.argValue(args, flag: "--daemon-path")
         self.isDesignPreview = args.contains("--design-preview")
         self.licenseOnly = args.contains("--license-only")
+        self.startActivate = args.contains("--activate")
 
         let freeDiskGB = Self.freeDiskSpaceGB()
         let ramGB = Self.totalRAMGB()

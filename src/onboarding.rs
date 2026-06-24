@@ -97,7 +97,7 @@ pub fn run() -> Option<String> {
 /// mode) and block until it closes. Returns false if the wizard isn't installed
 /// (e.g. a `cargo run` dev build) so the caller can fall back to a CLI dialog.
 #[cfg(target_os = "macos")]
-pub fn run_license_window() -> bool {
+pub fn run_license_window(start_activate: bool) -> bool {
     let Some(wizard) = wizard_binary_path() else {
         return false;
     };
@@ -105,14 +105,44 @@ pub fn run_license_window() -> bool {
         return false;
     }
     let daemon = std::env::current_exe().unwrap_or_default();
+    // `--activate` lands the modal on the "enter your key" screen (which itself
+    // has a "Buy a license" button); without it the modal opens on the paywall.
+    let mut args: Vec<String> = vec!["--license-only".into()];
+    if start_activate {
+        args.push("--activate".into());
+    }
+    args.push("--daemon-path".into());
+    args.push(daemon.to_string_lossy().into_owned());
+    // Launch the wizard's .app through LaunchServices (`open`) instead of exec'ing
+    // the binary directly. A GUI process *spawned by our menu-bar accessory* is
+    // denied foreground activation by macOS and opens behind everything — the
+    // user then has to hunt for it in the Dock. `open` activates it like a normal
+    // launch; `-W` blocks until it closes, so the caller still refreshes the
+    // license afterwards. (`--args` forwards our flags to the app.)
+    let bundle = wizard
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent());
+    if let Some(app) = bundle {
+        if app.extension().map_or(false, |e| e == "app") {
+            return std::process::Command::new("/usr/bin/open")
+                .arg("-W")
+                .arg(app)
+                .arg("--args")
+                .args(&args)
+                .status()
+                .is_ok();
+        }
+    }
+    // Fallback (dev / non-bundled binary): exec it directly.
     std::process::Command::new(&wizard)
-        .args(["--license-only", "--daemon-path", &daemon.to_string_lossy()])
+        .args(&args)
         .status()
         .is_ok()
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run_license_window() -> bool {
+pub fn run_license_window(_start_activate: bool) -> bool {
     false
 }
 

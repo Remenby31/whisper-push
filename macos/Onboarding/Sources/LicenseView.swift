@@ -52,6 +52,8 @@ struct LicenseView: View {
             }
         }
         .onDisappear { state.expandedForCheckout = false }
+        // Menu → "Activate with License Key…" opens straight on the key screen.
+        .onAppear { if state.startActivate { mode = .activate } }
     }
 
     // MARK: Paywall
@@ -202,7 +204,7 @@ struct LicenseView: View {
                 Button(action: activate) { Text(busy ? "Activating…" : "Activate") }
                     .buttonStyle(BrandPrimaryButtonStyle(enabled: canActivate)).disabled(!canActivate)
                     .padding(.horizontal, 80).padding(.top, 16)
-                Button("‹ Back to plans") { message = nil; mode = .choose }
+                Button("Buy a license") { message = nil; mode = .choose }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.brandGreen.opacity(0.8)).padding(.top, 10)
             }

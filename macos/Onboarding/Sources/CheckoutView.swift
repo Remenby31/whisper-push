@@ -64,6 +64,10 @@ struct CheckoutView: NSViewRepresentable {
             let js = #"""
             (function(){
               var t = document.body ? document.body.innerText : "";
+              // LS often shows the license key (and email) in a read-only <input>,
+              // whose value innerText doesn't expose — fold those in so the
+              // auto-capture is reliable and the user never has to open their mail.
+              document.querySelectorAll('input,textarea').forEach(function(el){ t += " " + (el.value || ""); });
               var k = (t.match(/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}/)||[])[0] || "";
               var e = (t.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)||[])[0] || "";
               var s = /thank you|confirm|success|receipt|your order|order #|license key/i.test(location.href + " " + t);

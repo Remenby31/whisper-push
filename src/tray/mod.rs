@@ -189,6 +189,11 @@ struct MenuItems {
     license_status_item: MenuItem,
     license_subscription_id: String,
     license_deactivate_id: String,
+    /// Buy-forward top block, present only while unlicensed: an urgency status
+    /// line + an "Unlock" CTA. `unlock_id` is empty when the block isn't shown.
+    trial_label: Option<MenuItem>,
+    unlock_item: Option<MenuItem>,
+    unlock_id: String,
 }
 
 impl App {
@@ -451,6 +456,40 @@ impl App {
         // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
 
+        // While unlicensed (trial included), pin a BUY-FORWARD block to the VERY
+        // TOP of the menu: an urgency line (days left / trial ended) + an "Unlock"
+        // CTA that opens the PLANS directly — leading with purchase, not key entry.
+        // Activating an existing key stays available inside that modal ("I already
+        // have a license key") and in the License submenu. Retired once licensed.
+        let st = crate::license::status();
+        let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
+        let (trial_label, unlock_item, unlock_id) = if licensed {
+            (None, None, String::new())
+        } else {
+            use crate::license::LicenseStatus as LS;
+            let urgency = match st {
+                LS::Trial { days_left } => format!(
+                    "\u{23f3} Trial \u{2014} {days_left} day{} left",
+                    if days_left == 1 { "" } else { "s" }
+                ),
+                LS::Locked => "Trial ended".into(),
+                LS::Expired => "Subscription expired".into(),
+                LS::GraceOffline { days_left } => format!(
+                    "Offline \u{2014} reconnect within {days_left} day{}",
+                    if days_left == 1 { "" } else { "s" }
+                ),
+                LS::Disabled => "License inactive".into(),
+                LS::Licensed(_) => String::new(),
+            };
+            let label = MenuItem::new(&urgency, false, None);
+            let unlock = MenuItem::new("\u{2726} Unlock Whisper Push\u{2026}", true, None);
+            let uid = unlock.id().0.clone();
+            let _ = menu.append(&label);
+            let _ = menu.append(&unlock);
+            let _ = menu.append(&PredefinedMenuItem::separator());
+            (Some(label), Some(unlock), uid)
+        };
+
         let _ = menu.append(&status_item);
         let warn_item = if !perms.all_granted() {
             let w = MenuItem::new(
@@ -536,6 +575,9 @@ impl App {
             license_status_item,
             license_subscription_id,
             license_deactivate_id,
+            trial_label,
+            unlock_item,
+            unlock_id,
             status_item,
             notifications_item,
             sound_item,
@@ -643,6 +685,19 @@ impl App {
             mi.license_status_item
                 .set_text(crate::license::status_text());
             mi.license_submenu.set_text(crate::license::submenu_title());
+            // Retire the buy-forward top block once a key is active.
+            if matches!(
+                crate::license::status(),
+                crate::license::LicenseStatus::Licensed(_)
+            ) {
+                if let Some(lbl) = &mi.trial_label {
+                    lbl.set_text("\u{2713} License active");
+                }
+                if let Some(it) = &mi.unlock_item {
+                    it.set_enabled(false);
+                    it.set_text("");
+                }
+            }
         }
     }
 
@@ -868,12 +923,26 @@ impl App {
                     });
                     return;
                 }
+                if !mi.unlock_id.is_empty() && id == &mi.unlock_id {
+                    // Buy-forward: open the license modal on the PLANS screen
+                    // (forced to the front). Entering an existing key is available
+                    // there via "I already have a license key". Dev fallback: dialog.
+                    let tx = self.state.tx.clone();
+                    std::thread::spawn(move || {
+                        if crate::onboarding::run_license_window(false) {
+                            let _ = tx.send(Event::LicenseChanged);
+                        } else {
+                            license_activate_dialog(tx);
+                        }
+                    });
+                    return;
+                }
                 if id == &mi.license_subscription_id {
                     // Open the in-app payment / activation modal. Falls back to a
                     // text dialog in dev builds where the wizard isn't bundled.
                     let tx = self.state.tx.clone();
                     std::thread::spawn(move || {
-                        if crate::onboarding::run_license_window() {
+                        if crate::onboarding::run_license_window(false) {
                             let _ = tx.send(Event::LicenseChanged);
                         } else {
                             license_activate_dialog(tx);
@@ -1430,12 +1499,13 @@ fn handle_pipeline_event(
 ) {
     match event {
         Event::HotkeyDown => {
-            if !crate::license::gate() {
-                return;
-            }
             if *recording {
                 return;
             }
+            // Entitlement is read here but enforced only AFTER the hold is
+            // confirmed (below), so an incidental Ctrl tap (e.g. Ctrl+C) never
+            // triggers the "subscribe" nudge — only a genuine dictation hold does.
+            let entitled = crate::license::is_entitled();
             let cfg = config.lock_safe();
             let device = crate::audio::effective_input_device(&cfg.input_device);
             let delay = cfg.hold_delay;
@@ -1444,9 +1514,10 @@ fn handle_pipeline_event(
             drop(cfg);
 
             // Immediate audio acknowledgement — a 70 ms blip the moment the
-            // key is pressed, before hold_delay. The user gets a clear cue
-            // that the key was heard; hold_delay still gates recording.
-            if sound_feedback {
+            // key is pressed, before hold_delay. Only when we'll actually record:
+            // a blocked (trial-over) user shouldn't hear a "start" blip with no
+            // transcription.
+            if entitled && sound_feedback {
                 crate::audio::playback::play_sound("start");
             }
 
@@ -1486,6 +1557,13 @@ fn handle_pipeline_event(
             }
             if cancelled {
                 debug!("Quick tap — mic never opened");
+                return;
+            }
+            // Genuine dictation attempt, but the trial's over / not licensed →
+            // nudge the user to buy EVERY time (on_blocked is no longer throttled)
+            // and don't open the mic.
+            if !entitled {
+                crate::license::on_blocked();
                 return;
             }
             // Hold confirmed — show the listening pill now, *before* the
