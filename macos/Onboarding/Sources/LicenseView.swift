@@ -16,10 +16,11 @@ struct LicenseView: View {
     private let checkoutLifetime = "https://whisperpush.lemonsqueezy.com/checkout/buy/04ecf078-9a78-4daf-a5a5-edf77a019c07"
 
     // Strip the embedded checkout down to just the payment form. `embed=1` drops
-    // the LS site chrome; `media/logo/desc/discount=0` remove the product image,
-    // store logo, description and discount field — the block you used to scroll
-    // past before reaching the card fields. (Lemon Squeezy checkout URL options.)
-    private let checkoutOptions = "embed=1&media=0&logo=0&desc=0&discount=0"
+    // the LS site chrome; `media/logo/desc=0` remove the product image, store logo
+    // and description — the block you used to scroll past before reaching the card
+    // fields. `discount=1` keeps the "Add discount code" field visible so promo
+    // codes can be redeemed in-app. (Lemon Squeezy checkout URL options.)
+    private let checkoutOptions = "embed=1&media=0&logo=0&desc=0&discount=1"
 
     private enum Plan { case monthly, lifetime }
     private enum Mode: Equatable { case choose, checkout(String), activate }

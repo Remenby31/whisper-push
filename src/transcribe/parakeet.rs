@@ -70,7 +70,7 @@ mod inner {
     /// Keep the model's pages resident by running a tiny inference on silence.
     /// Non-blocking — if a real transcription holds the lock, skip this tick.
     pub fn warm() {
-        let Ok(mut guard) = PARAKEET.try_lock() else {
+        let Some(mut guard) = PARAKEET.try_lock_safe() else {
             return;
         };
         let Some(parakeet) = guard.as_mut() else {

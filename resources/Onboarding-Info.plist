@@ -12,16 +12,20 @@
     <string>Onboarding</string>
     <key>CFBundleIdentifier</key>
     <string>com.whisper-push.onboarding</string>
+    <!-- User-facing name in the Dock / Cmd+Tab / menu bar. Kept as the brand
+         "Whisper Push" (not the internal "Onboarding" codename) so neither the
+         first-launch wizard nor the standalone payment popup ever surfaces
+         "Onboarding" — and a payment window shows the trusted brand. -->
     <key>CFBundleName</key>
-    <string>Whisper Push Onboarding</string>
+    <string>Whisper Push</string>
     <key>CFBundleDisplayName</key>
-    <string>Whisper Push Onboarding</string>
+    <string>Whisper Push</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleVersion</key>
-    <string>1.2.4</string>
+    <string>1.2.5</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.4</string>
+    <string>1.2.5</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

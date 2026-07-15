@@ -84,7 +84,15 @@ whisper-push/
 ### Model
 - `ggml-large-v3-turbo-q5_0.bin` (~1.5GB) downloaded from HuggingFace on first run
 - Stored in platform data dir (Application Support / XDG_DATA / AppData)
-- Stays loaded in RAM for instant transcription; idle unload after N minutes (configurable)
+- Stays loaded in RAM for the daemon's lifetime (no idle unload). A keep-warm
+  heartbeat (a silent inference every 90 s while a model is loaded) keeps macOS
+  from compressing/swapping the weights, so the first dictation of the day is
+  instant instead of paying an 11–18 s page-in. Gated by `config.keep_model_resident`
+  (default true); see the "Keep-warm" note in `src/transcribe/mod.rs`. NB: mlock
+  can't pin the weights on macOS (OS forbids wiring shared file-backed pages).
+  Covers **Parakeet + Whisper only** — Voxtral is excluded (WGPU forbids using the
+  model off its load thread), so Voxtral users still pay the cold-start page-in
+  (plus the existing ~15 s first-transcription shader compile).
 
 ### Paste mechanism
 1. Save current clipboard (arboard)

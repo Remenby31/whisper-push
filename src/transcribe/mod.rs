@@ -5,7 +5,6 @@ use crate::util::LockSafe;
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tracing::info;
 
@@ -37,19 +36,28 @@ static MODEL: Mutex<Option<whisper_rs::WhisperContext>> = Mutex::new(None);
 
 // ─── Keep-warm ───────────────────────────────────────────────────────────────
 // A large model (Parakeet ships 2.3 GB of FP32 weights) is mmapped by the
-// runtime, so the OS evicts those pages from RAM during idle periods. The first
-// dictation after a pause then pays a multi-second page-in *before* any
-// inference runs — which reads as "processing is slow", though warm dictations
-// stay instant. We keep the weights resident by running a tiny silent inference
-// every interval — but only within a window after real use, so an idle daemon
-// doesn't burn battery overnight.
+// runtime, so macOS compresses/swaps those pages out during idle periods. The
+// first dictation after a pause then pays a multi-second page-in + decompress
+// *before* any inference runs (measured: ~2 GB re-faulted, 11–18 s), which reads
+// as "the model takes 20 s to load" — though warm dictations stay at ~0.5–1.5 s.
+//
+// mlock can't pin the weights on macOS: the OS refuses to wire shared file-backed
+// pages (EPERM), the MAP_PRIVATE variant only makes a useless dirty copy, and
+// ONNX Runtime owns its own mappings anyway. So we keep them resident the proven
+// way — a tiny silent inference every interval touches every weight, so the OS
+// never reclaims them. It runs whenever a model is loaded (gated by
+// `config.keep_model_resident`); system sleep freezes the thread, so an asleep
+// Mac burns nothing. This is the single thing that makes the first dictation of
+// the day instant instead of cold.
 
-/// Unix-secs of the last real dictation (0 = never). Drives the keep-warm window.
-static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
-/// How long after the last dictation we keep the model warm.
-const KEEP_WARM_WINDOW: Duration = Duration::from_secs(15 * 60);
-/// Heartbeat between keep-warm ticks — comfortably under the few-minutes idle
-/// window in which the OS starts reclaiming the pages.
+/// Heartbeat between keep-warm ticks. Reclaim is pressure-driven, not a fixed
+/// timer (logs show full eviction after ~3 min under load, but survival past
+/// ~10 min when idle): a 90 s re-touch keeps the pages "recently used" so under
+/// normal pressure they stay hot indefinitely while awake. Under an acute
+/// pressure spike eviction can still beat a single 90 s gap → at most one
+/// bounded, self-healing cold dictation (the next inference re-touches every
+/// weight). 90 s is a conservative, latency-favouring choice; raise it to trade
+/// a little robustness for battery.
 const KEEP_WARM_INTERVAL: Duration = Duration::from_secs(90);
 /// Silence length for a warm tick: 1 s @ 16 kHz, enough to run the full encoder
 /// forward pass (touching every weight) on any backend.
@@ -83,22 +91,10 @@ pub(crate) fn page_faults() -> (i64, i64) {
 /// macOS Apple-Silicon page size (also the unit `vm_stat`/`footprint` report).
 const PAGE_BYTES: i64 = 16_384;
 
-/// Record that a real dictation just happened (opens/extends the keep-warm
-/// window). Called from the transcription choke point.
-fn mark_activity() {
-    LAST_ACTIVITY.store(crate::util::now_secs(), Ordering::Relaxed);
-}
-
-/// True while we're within the keep-warm window after the last dictation.
-fn keep_warm_due() -> bool {
-    let last = LAST_ACTIVITY.load(Ordering::Relaxed);
-    last != 0 && crate::util::now_secs().saturating_sub(last) < KEEP_WARM_WINDOW.as_secs()
-}
-
 /// Whisper keep-warm: a tiny inference on silence to keep the weights resident.
 /// Non-blocking — if a real transcription holds the model lock, skip this tick.
 fn warm_whisper() {
-    let Ok(guard) = MODEL.try_lock() else {
+    let Some(guard) = MODEL.try_lock_safe() else {
         return;
     };
     let Some(ctx) = guard.as_ref() else {
@@ -119,27 +115,41 @@ fn warm_whisper() {
     tracing::debug!("whisper kept warm ({:.2}s)", t.elapsed().as_secs_f64());
 }
 
-/// Spawn the keep-warm heartbeat (cross-platform). Every interval, while the
-/// user is in an active dictation window, it touches the loaded model's weights
-/// so the OS keeps them in RAM and the first dictation after a short pause stays
-/// instant instead of paying a multi-second page-in. Each backend's `warm()` is
-/// a cheap no-op when it isn't the loaded one. Voxtral is intentionally excluded:
-/// WGPU forbids using the model from a thread other than the one that loaded it.
-pub fn spawn_keep_warm() {
+/// Spawn the keep-warm heartbeat. Every interval, while a model is loaded, it
+/// runs a tiny silent inference that touches every weight, so macOS never
+/// reclaims the pages and the first dictation after any idle gap — including the
+/// first one of the day — stays instant instead of paying a multi-second
+/// page-in. Each backend's `warm()` is a cheap no-op when it isn't the loaded
+/// one. Voxtral is intentionally excluded: WGPU forbids using the model from a
+/// thread other than the one that loaded it.
+///
+/// `enabled` mirrors `config.keep_model_resident`. When off, the thread isn't
+/// spawned and the first dictation after an idle gap pays the cold-start page-in.
+pub fn spawn_keep_warm(enabled: bool) {
+    if !enabled {
+        info!("keep-warm disabled (config.keep_model_resident = false)");
+        return;
+    }
     info!(
-        "keep-warm armed (every {}s, up to {} min after last use)",
-        KEEP_WARM_INTERVAL.as_secs(),
-        KEEP_WARM_WINDOW.as_secs() / 60
+        "keep-warm armed (every {}s while a model is loaded; paused while the Mac sleeps)",
+        KEEP_WARM_INTERVAL.as_secs()
     );
     std::thread::Builder::new()
         .name("keep-warm".into())
         .spawn(|| {
             loop {
                 std::thread::sleep(KEEP_WARM_INTERVAL);
-                if keep_warm_due() {
+                // Engines (parakeet-rs / whisper.cpp) can panic; the real
+                // transcription path guards against this with catch_unwind at the
+                // choke point, and every other long-lived engine loop in the app
+                // does the same. Without this, one panicked warm tick would kill
+                // the heartbeat for the rest of the session — silently bringing
+                // the cold-start back while real dictations still work. The locks
+                // are poison-tolerant (`try_lock_safe`), so the next tick recovers.
+                let _ = std::panic::catch_unwind(|| {
                     parakeet::warm();
                     warm_whisper();
-                }
+                });
             }
         })
         .ok();
@@ -216,8 +226,6 @@ pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend)
     if !crate::license::gate() {
         return Ok(String::new());
     }
-    // A real dictation — open/extend the keep-warm window for the next one.
-    mark_activity();
     // Catch any panic from an engine (parakeet-rs / whisper.cpp / wgpu) or the
     // correction layers HERE, at the single choke point, and turn it into an
     // Err. A bad input then can't kill the caller's (spawned) thread or wedge the

@@ -14,11 +14,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// `.lock().unwrap()` / `.lock().unwrap_or_else(|e| e.into_inner())`.
 pub trait LockSafe<T> {
     fn lock_safe(&self) -> MutexGuard<'_, T>;
+    /// Non-blocking, poison-tolerant `try_lock`. `Some` if the lock is free
+    /// (even if poisoned — we recover the guard, same policy as `lock_safe`),
+    /// `None` only when another thread currently holds it. Use for "skip this
+    /// optional work if the lock is busy" — e.g. the keep-warm tick. Raw
+    /// `try_lock()` would return `Err` on a *poisoned-but-free* mutex too, so a
+    /// single caught engine panic would silently disable the caller forever.
+    fn try_lock_safe(&self) -> Option<MutexGuard<'_, T>>;
 }
 
 impl<T> LockSafe<T> for Mutex<T> {
     fn lock_safe(&self) -> MutexGuard<'_, T> {
         self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn try_lock_safe(&self) -> Option<MutexGuard<'_, T>> {
+        match self.try_lock() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
     }
 }
 

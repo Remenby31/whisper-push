@@ -20,24 +20,38 @@ pub const RESAMPLE_CHUNK_SIZE: usize = 1024;
 /// auto-fallback in the record pipeline.
 pub const DEAD_MIC_PEAK: f32 = 1e-4;
 
-/// List available input audio devices.
+/// Upper bound on a CoreAudio device enumeration. `cpal`'s `input_devices()` /
+/// `output_devices()` call into CoreAudio with no deadline of their own, and a
+/// registered-but-absent Continuity (iPhone) microphone can make that block
+/// effectively forever. `list_devices()` runs on the tray's MAIN thread while
+/// building the menu at startup (`create_tray`), so an unbounded stall there
+/// wedges the entire daemon — the model never loads, the hotkey never arms. Bound
+/// it; on timeout we return an empty list (the "Auto" entry still works) instead
+/// of hanging. A healthy enumeration is sub-100 ms, so this never bites normally.
+const DEVICE_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
+/// stalled CoreAudio enumeration can't wedge the caller (notably tray startup).
 pub fn list_devices() -> Result<Vec<String>> {
-    let host = cpal::default_host();
-    let devices: Vec<String> = host
-        .input_devices()?
-        .filter_map(|d| d.name().ok())
-        .collect();
-    Ok(devices)
+    crate::util::run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+        cpal::default_host()
+            .input_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
+            .unwrap_or_default()
+    })
+    .ok_or_else(|| anyhow::anyhow!("input device enumeration timed out (CoreAudio stalled)"))
 }
 
 /// List available output audio devices (used for sound-feedback playback).
+/// Bounded by `DEVICE_ENUM_TIMEOUT` for the same reason as `list_devices`.
 pub fn list_output_devices() -> Result<Vec<String>> {
-    let host = cpal::default_host();
-    let devices: Vec<String> = host
-        .output_devices()?
-        .filter_map(|d| d.name().ok())
-        .collect();
-    Ok(devices)
+    crate::util::run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+        cpal::default_host()
+            .output_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
+            .unwrap_or_default()
+    })
+    .ok_or_else(|| anyhow::anyhow!("output device enumeration timed out (CoreAudio stalled)"))
 }
 
 /// Find an input device by name ("auto" = default).

@@ -38,6 +38,14 @@ pub struct Config {
     pub online_enrichment: bool,
     /// Show the floating "listening" pill (live mic waveform) while recording.
     pub overlay_enabled: bool,
+    /// Keep the active model warm in RAM via a periodic silent inference, so the
+    /// OS never reclaims its weights. Eliminates the multi-second page-in that
+    /// made the first dictation after an idle gap slow ("model load takes 20 s").
+    /// (mlock can't pin the weights on macOS, so this is the working mechanism.)
+    /// Costs a tiny GPU/ANE tick every ~90 s while the Mac is awake and a model
+    /// is loaded; system sleep pauses it. Default on; turn off to save battery at
+    /// the cost of a slow first dictation after each idle gap.
+    pub keep_model_resident: bool,
 }
 
 impl Default for Config {
@@ -45,7 +53,7 @@ impl Default for Config {
         Self {
             hotkey: "ctrl".into(),
             hotkey_mode: "hold".into(),
-            hold_delay: 0.15,
+            hold_delay: 0.06,
             language: "auto".into(),
             model: "ggml-large-v3-turbo-q5_0.bin".into(),
             notifications: true,
@@ -58,6 +66,7 @@ impl Default for Config {
             dictionary_enabled: true,
             online_enrichment: false,
             overlay_enabled: true,
+            keep_model_resident: true,
         }
     }
 }
@@ -161,7 +170,7 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.hotkey, "ctrl");
         assert_eq!(cfg.hotkey_mode, "hold");
-        assert_eq!(cfg.hold_delay, 0.15);
+        assert_eq!(cfg.hold_delay, 0.06);
         assert_eq!(cfg.language, "auto");
         assert_eq!(cfg.model, "ggml-large-v3-turbo-q5_0.bin");
         assert!(cfg.notifications);
@@ -170,6 +179,7 @@ mod tests {
         assert_eq!(cfg.output_device, "auto");
         assert!(!cfg.debug);
         assert!(!cfg.auto_start);
+        assert!(cfg.keep_model_resident);
     }
 
     #[test]
