@@ -1485,6 +1485,31 @@ fn notify_ui(ui_tx: &Sender<Event>, ev: Event) {
     wake_main();
 }
 
+/// Wait out the hold-delay gate. Returns `true` if the hold was cancelled before
+/// `delay` elapsed — a quick tap (`HotkeyUp`), a model switch (re-queued via
+/// `self_tx` so it isn't dropped), or a dead channel; `false` means a genuine
+/// hold was confirmed. Shared by the entitled (pre-roll) and not-entitled
+/// (nudge) `HotkeyDown` paths so the quick-tap filter lives in one place.
+fn hold_gate(rx: &Receiver<Event>, self_tx: &Sender<Event>, delay: f64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(delay);
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        if remaining.is_zero() {
+            return false;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(Event::HotkeyUp) => return true,
+            Ok(Event::LoadModel(m)) => {
+                let _ = self_tx.send(Event::LoadModel(m));
+                return true;
+            }
+            Ok(_) => {} // ignore a duplicate HotkeyDown/Toggle here
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => return false,
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
 /// Handle one pipeline event. Split out of `pipeline_loop` so each event runs
 /// inside a `catch_unwind` at the call site — a panic here is contained and the
 /// loop resets to idle rather than the worker thread dying.
@@ -1514,86 +1539,58 @@ fn handle_pipeline_event(
             drop(cfg);
 
             // Immediate audio acknowledgement — a 70 ms blip the moment the
-            // key is pressed, before hold_delay. Only when we'll actually record:
-            // a blocked (trial-over) user shouldn't hear a "start" blip with no
-            // transcription.
+            // key is pressed. Only when we'll actually record: a blocked
+            // (trial-over) user shouldn't hear a "start" blip with no transcription.
             if entitled && sound_feedback {
                 crate::audio::playback::play_sound("start");
             }
 
-            // Batch mode (Whisper, Parakeet) — do NOT pre-roll the mic.
-            // Wait for hold_delay synchronously while peeking for an early
-            // HotkeyUp; the microphone only opens once a genuine hold is
-            // confirmed. Privacy: with the previous pre-roll, every Ctrl
-            // tap (e.g. Ctrl+C) briefly opened the mic, which made the
-            // macOS "mic in use" indicator flicker / stay lit.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(delay);
-            let mut cancelled = false;
-            while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
-                if remaining.is_zero() {
-                    break;
-                }
-                match rx.recv_timeout(remaining) {
-                    Ok(Event::HotkeyUp) => {
-                        cancelled = true;
-                        break;
-                    }
-                    // A model switch must not be silently dropped by the gate.
-                    // Re-queue it and cancel this (not-yet-started) recording —
-                    // safe because the mic isn't open yet, so LoadModel is then
-                    // processed cleanly with nothing recording.
-                    Ok(Event::LoadModel(m)) => {
-                        let _ = self_tx.send(Event::LoadModel(m));
-                        cancelled = true;
-                        break;
-                    }
-                    Ok(_) => {} // ignore a duplicate HotkeyDown/Toggle here
-                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
-                    Err(_) => {
-                        cancelled = true;
-                        break;
-                    }
-                }
-            }
-            if cancelled {
-                debug!("Quick tap — mic never opened");
-                return;
-            }
-            // Genuine dictation attempt, but the trial's over / not licensed →
-            // nudge the user to buy EVERY time (on_blocked is no longer throttled)
-            // and don't open the mic.
+            // Not entitled: filter quick taps with the gate, then nudge on a
+            // genuine hold. Never open the mic.
             if !entitled {
-                crate::license::on_blocked();
+                if !hold_gate(rx, self_tx, delay) {
+                    crate::license::on_blocked();
+                }
                 return;
             }
-            // Hold confirmed — show the listening pill now, *before* the
-            // synchronous mic open (50–200 ms), so it appears the instant
-            // recording begins instead of lagging it ~500 ms behind the poll.
-            // Showing it only here (not on key-down) means a quick tap / Ctrl-
-            // click never flashes the pill. Hidden again if the mic fails to open.
-            notify_ui(ui_tx, Event::ShowOverlay);
-            match crate::audio::capture::AudioCapture::start(&device) {
-                Ok(cap) => {
-                    *capture = Some(cap);
-                    *recording = true;
-                    // Tell the UI thread so the menu-bar icon turns citron —
-                    // without this the icon only updated on menu-driven recording.
-                    notify_ui(ui_tx, Event::StateChanged(State::Recording));
-                    // Harvest on-screen names off the pipeline thread so the AX
-                    // reads can't add latency between key-up and transcription
-                    // (#7). Runs during the recording; consumed at transcribe end.
-                    let lang = language.clone();
-                    std::thread::spawn(move || crate::dictionary::update_session_context(&lang));
-                    info!("Recording…");
-                }
+
+            // PRE-ROLL — open the mic the instant the key goes down (at the
+            // "start" cue), NOT after the hold-delay gate, so the beginning of
+            // speech is captured instead of lost to the open latency. The stream
+            // buffers from the moment it's ready; we keep it only if the hold is
+            // confirmed, else discard it (a quick tap). cpal streams are `!Send`,
+            // so the open must run here on the pipeline thread. Trade-off: a quick
+            // Ctrl tap (e.g. Ctrl+click) now briefly opens+closes the mic, so the
+            // macOS mic indicator blinks — harmless on a built-in/wired mic; on a
+            // Bluetooth mic it also blips the audio mode, so prefer a local mic.
+            let cap = match crate::audio::capture::AudioCapture::start(&device) {
+                Ok(c) => c,
                 Err(e) => {
                     warn!("Capture failed: {e}");
-                    notify_ui(ui_tx, Event::HideOverlay);
                     crate::notify::app(
                         "Couldn't start recording — check your microphone is connected.",
                     );
+                    return;
                 }
+            };
+            // Hold-delay gate, with the mic already capturing. A release within
+            // hold_delay is a quick tap → discard the pre-rolled audio and close.
+            if hold_gate(rx, self_tx, delay) {
+                debug!("Quick tap — discarding pre-roll");
+                drop(cap); // stops + closes the stream
+                return;
             }
+            // Confirmed hold — commit. Show the pill + turn the icon citron only
+            // now, so a quick tap / Ctrl-click never flashes the pill.
+            notify_ui(ui_tx, Event::ShowOverlay);
+            *capture = Some(cap);
+            *recording = true;
+            notify_ui(ui_tx, Event::StateChanged(State::Recording));
+            // Harvest on-screen names off the pipeline thread so the AX reads
+            // can't add latency between key-up and transcription (#7).
+            let lang = language.clone();
+            std::thread::spawn(move || crate::dictionary::update_session_context(&lang));
+            info!("Recording…");
         }
 
         Event::HotkeyUp => {

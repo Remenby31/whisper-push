@@ -8,6 +8,16 @@ import AppKit
 /// bundle wrapper, so without this the SwiftUI WindowGroup creates the window
 /// but macOS never activates the process and the window is never shown.
 final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
+    /// The standalone payment modal (menu bar → License → Subscription, or the
+    /// "Upgrade"/"Renew" notification button) is launched with `--license-only`.
+    /// That popup must stay *above every other app* until the user acts on it —
+    /// a normal window drops behind as soon as another app takes focus, so the
+    /// user thinks nothing happened. The full first-launch wizard stays a normal
+    /// window (it owns the whole session, so pinning it on top would be rude).
+    private var isPaymentPopup: Bool {
+        ProcessInfo.processInfo.arguments.contains("--license-only")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         bringToFront()
@@ -28,6 +38,16 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
         // WindowGroup creates the window before the delegate fires, so it's
         // already in NSApp.windows.
         if let window = NSApp.windows.first {
+            if isPaymentPopup {
+                // Elevate to a floating popup so it stays on top even after the
+                // user clicks back into another app, and follow them onto
+                // whatever Space is active (the daemon can fire this from any
+                // context). Otherwise the checkout is easy to lose behind the
+                // window that had focus.
+                window.level = .floating
+                window.collectionBehavior.insert(.moveToActiveSpace)
+                window.collectionBehavior.insert(.fullScreenAuxiliary)
+            }
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
         }

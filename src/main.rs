@@ -417,37 +417,26 @@ mod doctor {
             }
         );
 
-        // Audio devices (with timeout — CoreAudio can hang without NSApp)
+        // Audio devices — enumeration is internally bounded (see
+        // audio::list_devices / DEVICE_ENUM_TIMEOUT), so no wrapper needed here.
         println!("\nInput devices:");
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = crate::audio::list_devices();
-            let _ = tx.send(result);
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(Ok(devices)) => {
+        match crate::audio::list_devices() {
+            Ok(devices) => {
                 for (i, name) in devices.iter().enumerate() {
                     println!("  [{i}] {name}");
                 }
             }
-            Ok(Err(e)) => println!("  Error: {e}"),
-            Err(_) => println!("  (timeout — run as app for full device list)"),
+            Err(e) => println!("  ({e})"),
         }
 
         println!("\nOutput devices:");
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = crate::audio::list_output_devices();
-            let _ = tx.send(result);
-        });
-        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(Ok(devices)) => {
+        match crate::audio::list_output_devices() {
+            Ok(devices) => {
                 for (i, name) in devices.iter().enumerate() {
                     println!("  [{i}] {name}");
                 }
             }
-            Ok(Err(e)) => println!("  Error: {e}"),
-            Err(_) => println!("  (timeout — run as app for full device list)"),
+            Err(e) => println!("  ({e})"),
         }
 
         // Model
@@ -997,10 +986,11 @@ mod app {
         // Optional online enrichment (opt-in, default off).
         crate::enrich::set_enabled(cfg.online_enrichment);
 
-        // Keep the speech model resident in RAM during active use, so the first
-        // dictation after a short pause stays instant instead of paying a
-        // multi-second page-in of the (large) model weights.
-        crate::transcribe::spawn_keep_warm();
+        // Keep the speech model resident in RAM while a model is loaded, so the
+        // first dictation after any idle gap (including the first of the day)
+        // stays instant instead of paying a multi-second page-in of the (large)
+        // model weights. Gated by config — see `keep_model_resident`.
+        crate::transcribe::spawn_keep_warm(cfg.keep_model_resident);
         // macOS App Nap throttles background (LSUIElement) apps: it would delay
         // the keep-warm heartbeat and hasten eviction of the model's pages.
         // Opt out — without disabling system sleep, so battery is unaffected.
