@@ -76,8 +76,16 @@ jobs:
           make dmg SIGN_ID="$SIGN"
           make zip SIGN_ID="$SIGN"
 
+      # Non-fatal by choice: notarization needs an in-effect Apple Developer
+      # Program agreement (Apple returns 403 when it has lapsed — a legal step
+      # only the account holder can resolve). The DMG is still Developer ID
+      # signed, so it ships and runs (first launch shows a Gatekeeper
+      # right-click→Open prompt). `continue-on-error` keeps the macOS job green
+      # so the release still publishes; once the agreement is re-signed, a
+      # re-run notarizes + staples cleanly and the prompt disappears.
       - name: Notarize DMG
         if: env.APPLE_API_KEY_BASE64 != ''
+        continue-on-error: true
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
