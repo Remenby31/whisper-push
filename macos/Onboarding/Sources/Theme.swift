@@ -114,11 +114,34 @@ struct LogoSquircle: View {
     @State private var breathing = false
 
     private static let nsImage: NSImage? = {
-        // Prefer PDF (vector); fall back to PNG so we always render something.
-        for ext in ["pdf", "png"] {
-            if let url = Bundle.module.url(forResource: "AppIcon", withExtension: ext),
+        // IMPORTANT: never touch `Bundle.module`. SwiftPM's generated accessor
+        // `fatalError`s in its static initializer when it can't locate the
+        // resource bundle at the ONE path it hardcodes — and for an executable
+        // target embedded in an .app that path (`Bundle.main.bundleURL/…`) does
+        // not match where the .app packaging puts the bundle, so merely
+        // referencing `Bundle.module` crash-loops the whole wizard. Locate the
+        // icon ourselves against `Bundle.main`, which is reliable in the .app
+        // (AppIcon.icns sits in Contents/Resources) and covers the SPM resource
+        // bundle in both the .app and `make onboarding-preview` (raw binary).
+        // Prefer vector PDF, then icns, then PNG; always fall back to nil.
+        let icon = "AppIcon"
+
+        // 1. Loose resources copied straight into the main bundle (the .app).
+        for ext in ["pdf", "icns", "png"] {
+            if let url = Bundle.main.url(forResource: icon, withExtension: ext),
                let img = NSImage(contentsOf: url) {
                 return img
+            }
+        }
+
+        // 2. SwiftPM resource bundle, located WITHOUT the crashing accessor.
+        //    Covers .app (Contents/Resources) and preview (.build/release).
+        let bases = [Bundle.main.resourceURL, Bundle.main.bundleURL]
+            .compactMap { $0?.appendingPathComponent("Onboarding_Onboarding.bundle") }
+        for base in bases {
+            for ext in ["pdf", "png"] {
+                let url = base.appendingPathComponent(icon).appendingPathExtension(ext)
+                if let img = NSImage(contentsOf: url) { return img }
             }
         }
         return nil
