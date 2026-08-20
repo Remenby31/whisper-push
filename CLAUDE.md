@@ -193,6 +193,39 @@ Enhancements layered on top of the existing modules — no new architectural pie
 - **Makefile** — `make install` copies the bundle to `/Applications` and writes the login `LaunchAgent`. `make uninstall` reverses it. `make dmg` bundles `~/Library/Application Support/whisper-push/models/ggml-large-v3-turbo-q5_0.bin` into `Contents/Resources/models/` **before** signing, so the distributed DMG (~528 MB) gives a zero-download first launch. `make install` stays slim — only `make dmg` ships the model.
 - **App icon** — `resources/AppIcon.icns` generated from the brand kit squircle PNGs, referenced by `Info.plist` (`CFBundleIconFile`).
 
+## Licensing UX (Lemon Squeezy) — flows & gotchas
+
+- **Key only.** `license::activate(key)` — Lemon Squeezy's activate call takes nothing
+  else; the purchase email is recorded from the server response for display
+  (`license status` JSON carries `email` + `renews`). CLI `--email` is accepted and
+  ignored (older helpers). The Swift activate screen has ONE field: auto-focused,
+  Return submits, prefilled from the clipboard when it holds a UUID, plus a paste button.
+- **One way in.** Every entry point (top-level "✦ Unlock…", License ▸ Subscribe…/Manage
+  License…, License ▸ Enter License Key…, the blocked-dictation notification →
+  `Event::OpenLicenseWindow`) goes through `tray::App::open_license_window`, on the main
+  thread, which **yields activation** to the helper (`yieldActivationToApplicationWith
+  BundleIdentifier`, macOS 14+ cooperative activation) then runs `open -W` on its own
+  thread. A licensed user gets a "License active" screen (plan, email, Deactivate), never
+  the paywall. `refresh_license_submenu` is two-way (activation AND deactivation).
+- **`run_license_window` checks `status.success()`** and logs every failure
+  (`grep "license window"`); a false return falls back to the native key dialog.
+- **Helper window is AppKit-owned** (`OnboardingAppDelegate.makeWindow`, not a
+  `WindowGroup`): (1) built with the macOS 26 SDK, a WindowGroup only presents its window
+  once the app is *active* — and a process spawned by the accessory daemon is often denied
+  activation → **no window at all** (the shipped helper still builds fine on CI's
+  `macos-14` / SDK 14.5, which is why it "worked"); (2) **last window closed ⇒ quit**.
+  Before, closing the modal with the red button left a windowless process alive: the
+  next `open -W` just poked it, nothing appeared ("I already have a license key does
+  nothing"), and the daemon thread blocked forever.
+- **Revalidation while running.** `license::init()` is load-only; the daemon calls
+  `start_background_revalidation()` (hourly, when due). Without it a daemon that stayed
+  up slid Licensed → GraceOffline (3 d) → Locked (14 d) while online. CLI `license
+  status` revalidates *synchronously* when due (never a pending check left behind — an
+  orphaned one rewrote license.json with `last_validated_ok=0` ⇒ "locked").
+- **Testing the helper locally:** an **ad-hoc-signed** copy of Onboarding.app with the
+  real bundle id shows no window on macOS 26 — test the bare binary or an unsigned
+  bundle; the Dev-ID-signed release is unaffected. GUI tests steal focus: keep them short.
+
 ## Adaptive dictation (learned word correction)
 
 Persistent, cross-model, output-side correction that learns from user corrections — **no

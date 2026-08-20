@@ -1,12 +1,15 @@
 import SwiftUI
 import AppKit
 
-/// Paywall + activation step. Three modes in one modal:
+/// Paywall + activation step. Four modes in one modal:
 ///  • choose   — native plan cards (value prop, prices, badges) → one CTA
 ///  • checkout — embedded Lemon Squeezy payment (WKWebView), framed as "secure checkout"
-///  • activate — key + email (auto-filled after purchase; manual fallback)
+///  • activate — license key only (auto-filled after purchase or from the
+///               clipboard; typed/pasted as the fallback)
+///  • licensed — what an already-licensed user sees instead of the paywall
+///               (plan, purchase email, deactivate)
 /// Reused as onboarding step 3/6 and standalone via `--license-only`
-/// (menu bar → License → Subscription).
+/// (menu bar → License → Subscribe… / Manage License… / Enter License Key…).
 struct LicenseView: View {
     @EnvironmentObject var state: OnboardingState
 
@@ -23,15 +26,23 @@ struct LicenseView: View {
     private let checkoutOptions = "embed=1&media=0&logo=0&desc=0&discount=1"
 
     private enum Plan { case monthly, lifetime }
-    private enum Mode: Equatable { case choose, checkout(String), activate }
+    private enum Mode: Equatable { case choose, checkout(String), activate, licensed }
+
+    /// What the daemon reports about the current license (`license status`).
+    struct LicenseInfo: Equatable {
+        var kind: String      // "lifetime" | "subscription"
+        var email: String?
+        var renews: String?   // YYYY-MM-DD for subscriptions
+    }
 
     @State private var mode: Mode = .choose
     @State private var plan: Plan = .monthly
     @State private var key = ""
-    @State private var email = ""
     @State private var busy = false
     @State private var message: String?
     @State private var activated = false
+    @State private var info: LicenseInfo?
+    @FocusState private var keyFocused: Bool
 
     var body: some View {
         Group {
@@ -39,6 +50,7 @@ struct LicenseView: View {
             case .choose: chooseView
             case .checkout(let url): checkoutView(url)
             case .activate: activateView
+            case .licensed: licensedView
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -51,10 +63,19 @@ struct LicenseView: View {
             } else {
                 state.expandedForCheckout = false
             }
+            if newMode == .activate { prefillFromClipboard() }
         }
         .onDisappear { state.expandedForCheckout = false }
-        // Menu → "Activate with License Key…" opens straight on the key screen.
-        .onAppear { if state.startActivate { mode = .activate } }
+        .onAppear {
+            // Menu → "Enter License Key…" opens straight on the key screen.
+            if state.startActivate {
+                mode = .activate
+                prefillFromClipboard()
+            }
+            // An already-licensed user must never land on the paywall: ask the
+            // daemon and switch to the manage screen (cheap local read).
+            refreshLicenseInfo()
+        }
     }
 
     // MARK: Paywall
@@ -151,19 +172,15 @@ struct LicenseView: View {
             .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 8)
 
             // Minimal embedded checkout (see `checkoutOptions`). We poll the DOM
-            // for the key (no Lemon.js needed).
-            CheckoutView(url: URL(string: "\(url)?\(checkoutOptions)")!) { foundKey, foundEmail, success in
-                if let foundKey { key = foundKey }
-                if let foundEmail, email.isEmpty { email = foundEmail }
-                let mail = foundEmail ?? (email.isEmpty ? nil : email)
-                if !busy, !activated, let k = foundKey, let mail {
-                    // Key + email captured → activate automatically, no copy/paste.
+            // for the key (no Lemon.js needed). The email LS shows alongside is
+            // not needed — the key alone activates.
+            CheckoutView(url: URL(string: "\(url)?\(checkoutOptions)")!) { foundKey, _, success in
+                if let foundKey, !busy, !activated {
+                    // Key captured → activate automatically, no copy/paste.
                     mode = .activate
-                    runActivation(key: k, email: mail)
-                } else if success {
-                    message = key.isEmpty
-                        ? "Payment received — paste the license key from your email."
-                        : "Payment received — add your email to finish."
+                    runActivation(key: foundKey)
+                } else if success, !activated {
+                    message = "Payment received — paste the license key from your email."
                     mode = .activate
                 }
             }
@@ -187,12 +204,36 @@ struct LicenseView: View {
                 .font(.system(size: 22, weight: .bold)).foregroundStyle(Color.brandGreen).padding(.top, 10)
 
             if !activated {
-                VStack(spacing: 8) {
-                    TextField("License key", text: $key).textFieldStyle(.roundedBorder).disableAutocorrection(true)
-                    TextField("Purchase email", text: $email).textFieldStyle(.roundedBorder).disableAutocorrection(true)
+                Text("Paste the license key from your purchase email.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.brandGreen.opacity(0.65))
+                    .padding(.top, 4)
+
+                HStack(spacing: 6) {
+                    TextField("XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX", text: $key)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .disableAutocorrection(true)
+                        .focused($keyFocused)
+                        .onSubmit { if canActivate { activate() } }
+                    // One-click paste: works even when keyboard focus is flaky
+                    // (the modal is spawned by a background agent and macOS may
+                    // refuse to make it the active app).
+                    Button { if let s = Self.clipboardKey(strict: false) { key = s } } label: {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Color.brandGreen)
+                            .frame(width: 28, height: 24)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.brandGreen.opacity(0.2), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Paste from clipboard")
                 }
-                .frame(maxWidth: 320)
-                .padding(.top, 16)
+                .frame(maxWidth: 340)
+                .padding(.top, 14)
+                // Focus the field as soon as the screen is up so typing/⌘V just works.
+                .onAppear { DispatchQueue.main.async { keyFocused = true } }
             }
 
             if let message {
@@ -212,6 +253,59 @@ struct LicenseView: View {
 
             Spacer()
             (activated ? AnyView(doneButton) : AnyView(trialLink)).padding(.bottom, 18)
+        }
+    }
+
+    // MARK: Licensed (manage)
+
+    private var licensedView: some View {
+        VStack(spacing: 0) {
+            LogoSquircle(size: 52).padding(.top, 24)
+            Text("License active")
+                .font(.system(size: 22, weight: .bold)).foregroundStyle(Color.brandGreen).padding(.top, 10)
+
+            VStack(spacing: 6) {
+                Text(planLabel)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.brandGreen)
+                if let email = info?.email, !email.isEmpty {
+                    Text("Licensed to \(email)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.brandGreen.opacity(0.65))
+                }
+                Text("Up to 5 devices · manage billing from your purchase email")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.brandGreen.opacity(0.5))
+            }
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 36)
+            .padding(.top, 14)
+
+            if let message {
+                Text(message).font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color.brandGreen).multilineTextAlignment(.center)
+                    .padding(.horizontal, 36).padding(.top, 14)
+            }
+
+            Button(action: deactivate) { Text(busy ? "Deactivating…" : "Deactivate this device") }
+                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color.brandGreen.opacity(0.8))
+                .disabled(busy)
+                .padding(.top, 22)
+                .help("Frees one of your device slots; you can re-activate anytime.")
+
+            Spacer()
+            doneButton.padding(.bottom, 18)
+        }
+    }
+
+    private var planLabel: String {
+        switch info?.kind {
+        case "lifetime": return "Lifetime — paid once, yours forever"
+        case "subscription":
+            if let d = info?.renews, !d.isEmpty { return "Monthly — renews \(d)" }
+            return "Monthly subscription"
+        default: return "Whisper Push"
         }
     }
 
@@ -235,7 +329,7 @@ struct LicenseView: View {
     // MARK: Actions
 
     private var canActivate: Bool {
-        !busy && !key.trimmingCharacters(in: .whitespaces).isEmpty && email.contains("@")
+        !busy && !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func proceed() {
@@ -243,44 +337,115 @@ struct LicenseView: View {
     }
 
     private func activate() {
-        runActivation(key: key.trimmingCharacters(in: .whitespaces),
-                      email: email.trimmingCharacters(in: .whitespaces))
+        runActivation(key: key.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// If the clipboard holds something that looks like a Lemon Squeezy key
+    /// (UUID), drop it into the field — the user just copied it from the email.
+    private func prefillFromClipboard() {
+        if key.isEmpty, let s = Self.clipboardKey(strict: true) { key = s }
+    }
+
+    /// Clipboard text as a candidate key. `strict` requires the UUID shape (used
+    /// for silent prefill); the paste button accepts any single-line text.
+    static func clipboardKey(strict: Bool) -> String? {
+        guard let raw = NSPasteboard.general.string(forType: .string) else { return nil }
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, !s.contains("\n") else { return nil }
+        if !strict { return s }
+        let uuid = "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+        return s.range(of: uuid, options: .regularExpression) != nil ? s : nil
     }
 
     /// Shared activation core — used by the manual button and by auto-activation
     /// after an in-app purchase.
-    private func runActivation(key k: String, email e: String) {
-        guard !busy, let path = state.daemonPath,
-              FileManager.default.isExecutableFile(atPath: path) else {
+    private func runActivation(key k: String) {
+        guard !busy, let path = daemonBinary else {
             message = "Activation needs the installed app."
             return
         }
-        key = k; email = e // reflect captured values in the fields
+        key = k // reflect the captured value in the field
         busy = true; message = nil
         DispatchQueue.global().async {
-            let (ok, err) = Self.runActivate(path: path, key: k, email: e)
+            let (ok, err) = Self.runDaemon(path: path, ["license", "activate", "--key", k], successKey: "activated")
             DispatchQueue.main.async {
                 busy = false; activated = ok
                 message = ok ? "Your license is active — thank you!"
-                             : (err ?? "Couldn't activate — check the key and email above.")
+                             : (err ?? "Couldn't activate — check the key above.")
+                if ok { refreshLicenseInfo(switchMode: false) }
             }
         }
     }
 
-    /// Run `daemon license activate …`, parse the final JSON line.
-    private static func runActivate(path: String, key: String, email: String) -> (Bool, String?) {
+    private func deactivate() {
+        guard !busy, let path = daemonBinary else { return }
+        busy = true; message = nil
+        DispatchQueue.global().async {
+            let (ok, _) = Self.runDaemon(path: path, ["license", "deactivate"], successKey: "result", successValue: "done")
+            DispatchQueue.main.async {
+                busy = false
+                if ok {
+                    info = nil
+                    message = "This device has been deactivated."
+                    mode = .choose
+                } else {
+                    message = "Couldn't reach the server — check your connection and retry."
+                }
+            }
+        }
+    }
+
+    /// Ask the daemon for the license state; a licensed user gets the manage
+    /// screen instead of the paywall (unless they explicitly asked for the key
+    /// screen, or we're mid-activation).
+    private func refreshLicenseInfo(switchMode: Bool = true) {
+        guard let path = daemonBinary else { return }
+        DispatchQueue.global().async {
+            let obj = Self.runDaemonJSON(path: path, ["license", "status"])
+            let licensed = (obj?["status"] as? String) == "licensed"
+            let parsed = licensed ? LicenseInfo(kind: (obj?["kind"] as? String) ?? "",
+                                                email: obj?["email"] as? String,
+                                                renews: obj?["renews"] as? String) : nil
+            DispatchQueue.main.async {
+                info = parsed
+                if switchMode, licensed, !state.startActivate, mode == .choose {
+                    mode = .licensed
+                }
+            }
+        }
+    }
+
+    private var daemonBinary: String? {
+        guard let path = state.daemonPath, FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return path
+    }
+
+    /// Run the daemon CLI and parse its final JSON line.
+    private static func runDaemonJSON(path: String, _ args: [String]) -> [String: Any]? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["license", "activate", "--key", key, "--email", email]
+        p.arguments = args
         let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        do { try p.run() } catch { return (false, "Couldn't start activation.") }
+        do { try p.run() } catch { return nil }
         p.waitUntilExit()
         let data = out.fileHandleForReading.readDataToEndOfFile()
         let line = String(data: data, encoding: .utf8)?.split(separator: "\n").last.map(String.init) ?? ""
-        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else {
-            return (false, nil)
+        return try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+    }
+
+    /// Run a daemon command and report (success, humanized error).
+    private static func runDaemon(path: String, _ args: [String],
+                                  successKey: String, successValue: String? = nil) -> (Bool, String?) {
+        guard let obj = runDaemonJSON(path: path, args) else {
+            return (false, "Couldn't start the activation helper.")
         }
-        if (obj["activated"] as? Bool) ?? false { return (true, nil) }
+        let ok: Bool
+        if let want = successValue {
+            ok = (obj[successKey] as? String) == want
+        } else {
+            ok = (obj[successKey] as? Bool) ?? false
+        }
+        if ok { return (true, nil) }
         let err = obj["error"] as? String
         return (false, err == "offline" ? "No connection — check your internet and retry." : err)
     }

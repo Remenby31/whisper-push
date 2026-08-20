@@ -197,7 +197,14 @@ struct MenuItems {
     // License (Lemon Squeezy)
     license_submenu: Submenu,
     license_status_item: MenuItem,
+    /// "Subscribe…" while unlicensed / "Manage License…" once a key is active.
+    license_subscription_item: MenuItem,
     license_subscription_id: String,
+    /// "Enter License Key…" — straight to the key screen; disabled once licensed.
+    license_activate_item: MenuItem,
+    license_activate_id: String,
+    /// "Deactivate this device…" — only meaningful (enabled) while licensed.
+    license_deactivate_item: MenuItem,
     license_deactivate_id: String,
     /// Buy-forward top block, present only while unlicensed: an urgency status
     /// line + an "Unlock" CTA. `unlock_id` is empty when the block isn't shown.
@@ -410,16 +417,21 @@ impl App {
         let dict_forget_voice_id = dict_forget_voice_item.id().0.clone();
 
         // License submenu (Lemon Squeezy). All state/text comes from license.rs.
+        // Items are created once; `refresh_license_submenu` retitles/enables
+        // them as the state moves between trial ↔ licensed (both directions).
         let license_submenu = Submenu::new(&crate::license::submenu_title(), true);
         let license_status_item = MenuItem::new(&crate::license::status_text(), false, None);
-        let license_subscription_item = MenuItem::new("Subscription\u{2026}", true, None);
+        let license_subscription_item = MenuItem::new("Subscribe\u{2026}", true, None);
+        let license_activate_item = MenuItem::new("Enter License Key\u{2026}", true, None);
         let license_deactivate_item = MenuItem::new("Deactivate this device\u{2026}", true, None);
         let _ = license_submenu.append(&license_status_item);
         let _ = license_submenu.append(&PredefinedMenuItem::separator());
         let _ = license_submenu.append(&license_subscription_item);
+        let _ = license_submenu.append(&license_activate_item);
         let _ = license_submenu.append(&PredefinedMenuItem::separator());
         let _ = license_submenu.append(&license_deactivate_item);
         let license_subscription_id = license_subscription_item.id().0.clone();
+        let license_activate_id = license_activate_item.id().0.clone();
         let license_deactivate_id = license_deactivate_item.id().0.clone();
 
         // Templates submenu (voice snippets). Triggers are disabled labels; the
@@ -587,7 +599,11 @@ impl App {
             dict_entry_items,
             license_submenu,
             license_status_item,
+            license_subscription_item,
             license_subscription_id,
+            license_activate_item,
+            license_activate_id,
+            license_deactivate_item,
             license_deactivate_id,
             trial_label,
             unlock_item,
@@ -616,6 +632,8 @@ impl App {
             history_clear_id,
             history_entry_items,
         });
+        // Apply the enabled/title state of the license items for the current state.
+        self.refresh_license_submenu();
 
         // Build tray
         let mut builder = TrayIconBuilder::new()
@@ -693,26 +711,61 @@ impl App {
             .set_text(format!("Templates ({})", crate::templates::count()));
     }
 
-    /// Refresh the License submenu title + status line (cheap, no rebuild).
+    /// Refresh every license-dependent menu item from `license::status()` — in
+    /// BOTH directions (activation, deactivation, expiry), cheap, no rebuild.
     fn refresh_license_submenu(&mut self) {
-        if let Some(mi) = self.menu_items.as_ref() {
-            mi.license_status_item
-                .set_text(crate::license::status_text());
-            mi.license_submenu.set_text(crate::license::submenu_title());
-            // Retire the buy-forward top block once a key is active.
-            if matches!(
-                crate::license::status(),
-                crate::license::LicenseStatus::Licensed(_)
-            ) {
-                if let Some(lbl) = &mi.trial_label {
-                    lbl.set_text("\u{2713} License active");
-                }
-                if let Some(it) = &mi.unlock_item {
-                    it.set_enabled(false);
-                    it.set_text("");
-                }
-            }
+        let Some(mi) = self.menu_items.as_ref() else { return };
+        let licensed = matches!(
+            crate::license::status(),
+            crate::license::LicenseStatus::Licensed(_)
+        );
+        mi.license_status_item
+            .set_text(crate::license::status_text());
+        mi.license_submenu.set_text(crate::license::submenu_title());
+        mi.license_subscription_item.set_text(if licensed {
+            "Manage License\u{2026}"
+        } else {
+            "Subscribe\u{2026}"
+        });
+        mi.license_activate_item.set_enabled(!licensed);
+        mi.license_deactivate_item.set_enabled(licensed);
+        // The buy-forward top block (built only when unlicensed at startup):
+        // retire it once a key is active, restore it if the license goes away.
+        if let Some(lbl) = &mi.trial_label {
+            lbl.set_text(if licensed {
+                "\u{2713} License active".to_string()
+            } else {
+                crate::license::status_text()
+            });
         }
+        if let Some(it) = &mi.unlock_item {
+            it.set_enabled(!licensed);
+            it.set_text(if licensed {
+                ""
+            } else {
+                "\u{2726} Unlock Whisper Push\u{2026}"
+            });
+        }
+    }
+
+    /// The one way to open the license / subscription modal, from every entry
+    /// point (Unlock, Subscribe/Manage, Enter License Key, the blocked-dictation
+    /// notification). Runs on the main thread so the helper gets the activation
+    /// hand-off, then blocks on its own thread until the window closes and
+    /// refreshes the menu from the (possibly rewritten) license.json. Dev builds
+    /// without the helper bundle fall back to a native key dialog.
+    fn open_license_window(&self, start_activate: bool) {
+        let tx = self.state.tx.clone();
+        std::thread::Builder::new()
+            .name("license-window".into())
+            .spawn(move || {
+                if crate::onboarding::run_license_window(start_activate) {
+                    let _ = tx.send(Event::LicenseChanged);
+                } else {
+                    license_activate_dialog(tx);
+                }
+            })
+            .ok();
     }
 
     fn process_event(&mut self, event: Event) {
@@ -722,6 +775,10 @@ impl App {
         }
         if matches!(event, Event::LicenseChanged) {
             self.refresh_license_submenu();
+            return;
+        }
+        if let Event::OpenLicenseWindow { start_activate } = event {
+            self.open_license_window(start_activate);
             return;
         }
         let mi = match &self.menu_items {
@@ -964,31 +1021,17 @@ impl App {
                     });
                     return;
                 }
-                if !mi.unlock_id.is_empty() && id == &mi.unlock_id {
-                    // Buy-forward: open the license modal on the PLANS screen
-                    // (forced to the front). Entering an existing key is available
-                    // there via "I already have a license key". Dev fallback: dialog.
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || {
-                        if crate::onboarding::run_license_window(false) {
-                            let _ = tx.send(Event::LicenseChanged);
-                        } else {
-                            license_activate_dialog(tx);
-                        }
-                    });
+                if (!mi.unlock_id.is_empty() && id == &mi.unlock_id)
+                    || id == &mi.license_subscription_id
+                {
+                    // Buy-forward (plans screen; a licensed user gets the
+                    // "manage" screen instead — the modal reads the state).
+                    self.open_license_window(false);
                     return;
                 }
-                if id == &mi.license_subscription_id {
-                    // Open the in-app payment / activation modal. Falls back to a
-                    // text dialog in dev builds where the wizard isn't bundled.
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || {
-                        if crate::onboarding::run_license_window(false) {
-                            let _ = tx.send(Event::LicenseChanged);
-                        } else {
-                            license_activate_dialog(tx);
-                        }
-                    });
+                if id == &mi.license_activate_id {
+                    // Straight to "enter your key".
+                    self.open_license_window(true);
                     return;
                 }
                 if id == &mi.license_deactivate_id {
@@ -1888,6 +1931,14 @@ static TRAY_TX: OnceLock<Sender<Event>> = OnceLock::new();
 /// pipeline exists, so it can't be handed the sender directly.
 static PIPELINE_TX: OnceLock<Sender<Event>> = OnceLock::new();
 
+/// Post an event to the UI (main) thread from anywhere — e.g. the notification
+/// delegate asking for the license window. Dropped silently before `run`.
+pub fn post(event: Event) {
+    if let Some(tx) = TRAY_TX.get() {
+        let _ = tx.send(event);
+    }
+}
+
 fn schedule_tray_flush(after: Duration) {
     if let Some(tx) = TRAY_TX.get() {
         let tx = tx.clone();
@@ -2520,11 +2571,8 @@ fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
     if key.trim().is_empty() {
         return;
     }
-    let Some(email) = osascript_input("Enter the email used for your purchase:", "") else {
-        return;
-    };
     use crate::license::ActivateOutcome::*;
-    let msg = match crate::license::activate(&key, &email) {
+    let msg = match crate::license::activate(&key) {
         Activated => "License activated \u{2014} thank you!".to_string(),
         Rejected(r) => format!("Activation failed: {r}"),
         Offline => "Couldn't reach the license server. Check your connection and retry.".into(),

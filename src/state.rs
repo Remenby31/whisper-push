@@ -60,6 +60,11 @@ pub enum Event {
     DictChanged,
     /// The license state changed (activate/deactivate) — refresh its submenu
     LicenseChanged,
+    /// Open the license / subscription modal (the one surface for buying,
+    /// activating and managing a license). Routed through the UI thread so the
+    /// activation hand-off to the helper app happens on the main thread; `true`
+    /// lands directly on the enter-your-key screen.
+    OpenLicenseWindow { start_activate: bool },
     /// Trailing tray-icon refresh: re-apply the current state's icon on the main
     /// thread after a coalesced burst (see `tray::set_tray_icon`).
     RefreshTrayIcon,

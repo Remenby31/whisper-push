@@ -1,4 +1,4 @@
-//! Lemon Squeezy licensing — 7-day trial then locked, key + verified email.
+//! Lemon Squeezy licensing — 7-day trial then locked, then a license key.
 //!
 //! Output-side gate only: `is_entitled()` is a cheap RwLock read + arithmetic on
 //! the hot path; the network (activate/validate/deactivate) runs off-thread or on
@@ -90,7 +90,7 @@ pub struct LicenseState {
     license_key: Option<String>,
     instance_id: Option<String>,
     instance_name: Option<String>,
-    customer_email: Option<String>, // verified, lowercased
+    customer_email: Option<String>, // as reported by the server, lowercased
     product_kind: Option<ProductKind>,
     key_status: Option<KeyStatus>,
     expires_at_raw: Option<String>, // ISO string for display (None = lifetime)
@@ -235,16 +235,57 @@ fn write() -> RwLockWriteGuard<'static, LicenseState> {
 }
 
 /// Arm state + kick a background revalidation if a key is due. Never blocks.
+/// Load license.json (anchoring the trial on first run). No network — safe for
+/// the CLI, whose process exits right after printing. The daemon adds
+/// `start_background_revalidation` on top.
 pub fn init() {
-    let (has_key, last_attempt) = {
-        let s = read();
-        (s.license_key.is_some(), s.last_validation_attempt)
-    };
-    if has_key && now().saturating_sub(last_attempt) > REVALIDATE_EVERY {
-        std::thread::spawn(|| {
-            let _ = validate();
-        });
+    let _ = ensure();
+}
+
+/// Re-try a due server check no more often than this while it keeps failing
+/// (offline), so a customer in the offline grace window is re-confirmed within
+/// the hour of the network coming back rather than after REVALIDATE_EVERY.
+const REVALIDATE_RETRY: u64 = 55 * 60;
+/// Cadence of the daemon's background check (cheap: one lock read per tick).
+const REVALIDATE_POLL: Duration = Duration::from_secs(3600);
+
+/// A key is stored and its server verdict is older than REVALIDATE_EVERY (and
+/// we haven't just tried). Also true right after the v2 upgrade, where
+/// `load_anchored` zeroes the verdict of an untagged file on purpose.
+fn revalidation_due() -> bool {
+    let s = read();
+    let t = now();
+    s.license_key.is_some()
+        && t.saturating_sub(s.last_validated_ok) > REVALIDATE_EVERY
+        && t.saturating_sub(s.last_validation_attempt) >= REVALIDATE_RETRY
+}
+
+/// Re-check the key online if it's due. Synchronous (≤ HTTP_TIMEOUT) — off the
+/// hot path only: the CLI before printing a status, the daemon's background
+/// loop. Returns whether a check ran, so callers can refresh their UI.
+pub fn revalidate_if_due() -> bool {
+    if !revalidation_due() {
+        return false;
     }
+    let _ = validate();
+    true
+}
+
+/// Daemon only: keep the cached verdict fresh for the whole run — a check at
+/// startup, then hourly whenever one is due. Without this a daemon that simply
+/// stays up slides from Licensed to GraceOffline after 3 days and locks a paying
+/// customer after 14, while online the whole time (nothing re-validated between
+/// restarts). Each completed check refreshes the tray's license items.
+pub fn start_background_revalidation() {
+    std::thread::Builder::new()
+        .name("license-revalidate".into())
+        .spawn(|| loop {
+            if revalidate_if_due() {
+                crate::tray::post(crate::state::Event::LicenseChanged);
+            }
+            std::thread::sleep(REVALIDATE_POLL);
+        })
+        .ok();
 }
 
 /// The single source of truth. Pure over (state, now) → testable, no network.
@@ -361,15 +402,14 @@ fn post_form(url: &str, params: &[(&str, &str)]) -> Result<Value, NetErr> {
     }
 }
 
-/// Activate this device. Verifies store/product, test-mode, and email match.
-pub fn activate(key: &str, email: &str) -> ActivateOutcome {
+/// Activate this device with a license key. The key alone is the credential —
+/// Lemon Squeezy's activate call takes nothing else, and the purchase email it
+/// returns is only recorded for display (`status_json`). Verifies store/product
+/// ownership and test-mode; any rejection past activation frees the slot again.
+pub fn activate(key: &str) -> ActivateOutcome {
     let key = key.trim().to_string();
-    let email = email.trim().to_lowercase();
     if key.is_empty() {
         return ActivateOutcome::Rejected("Empty license key.".into());
-    }
-    if email.is_empty() {
-        return ActivateOutcome::Rejected("Email required.".into());
     }
 
     // Already activated on this device for this key → just revalidate, no new slot.
@@ -438,15 +478,12 @@ pub fn activate(key: &str, email: &str) -> ActivateOutcome {
     if !belongs_to_us(store_id, product_id) {
         return reject("This license key isn't for Whisper Push.");
     }
-    if cust_email != email {
-        return reject("Email doesn't match this license.");
-    }
 
     let mut s = write();
     s.license_key = Some(key);
     s.instance_id = instance_id;
     s.instance_name = Some(name);
-    s.customer_email = Some(cust_email);
+    s.customer_email = (!cust_email.is_empty()).then_some(cust_email);
     s.apply(&v);
     let t = now();
     s.last_validated_ok = t;
@@ -457,10 +494,10 @@ pub fn activate(key: &str, email: &str) -> ActivateOutcome {
 
 /// Refresh the cached verdict from the server. Off-thread; never on hot path.
 pub fn validate() -> ValidateOutcome {
-    let (key, instance_id, verified) = {
+    let (key, instance_id) = {
         let s = read();
         match s.license_key.clone() {
-            Some(k) => (k, s.instance_id.clone(), s.customer_email.clone()),
+            Some(k) => (k, s.instance_id.clone()),
             None => return ValidateOutcome::Invalid,
         }
     };
@@ -482,22 +519,15 @@ pub fn validate() -> ValidateOutcome {
     s.last_validation_attempt = now();
     s.apply(&v);
     let valid = v.get("valid").and_then(Value::as_bool).unwrap_or(false);
-    let email_ok = match (
-        verified.as_deref(),
-        v.pointer("/meta/customer_email").and_then(Value::as_str),
-    ) {
-        (Some(a), Some(b)) => a == b.to_lowercase(),
-        _ => true, // can't compare → don't fail on this alone
-    };
+    if let Some(e) = v.pointer("/meta/customer_email").and_then(Value::as_str) {
+        s.customer_email = Some(e.to_lowercase()); // keep the display copy fresh
+    }
 
-    if valid && email_ok {
+    if valid {
         s.last_validated_ok = now();
         save(&s);
         ValidateOutcome::Valid
     } else {
-        if !email_ok {
-            s.key_status = Some(KeyStatus::Disabled);
-        }
         let err = v
             .get("error")
             .and_then(Value::as_str)
@@ -578,13 +608,14 @@ pub fn on_blocked() {
 }
 
 /// Open the in-app subscription / activation modal — the same window the tray's
-/// "Subscription…" item opens, so checkout lives in exactly one place. Runs on
-/// its own thread (the notification delegate spawns it); the daemon then picks up
-/// the resulting license.json via `maybe_reload`, so no manual refresh is needed.
+/// "Subscribe…" item opens, so checkout lives in exactly one place. The
+/// notification delegate calls this off the main thread, so it only *posts* the
+/// request; the tray opens the window from the main thread (where it can hand
+/// activation to the helper app) and refreshes the license when it closes.
 fn open_paywall() {
-    if !crate::onboarding::run_license_window(false) {
-        tracing::info!("license: subscribe action — license window unavailable (dev build?)");
-    }
+    crate::tray::post(crate::state::Event::OpenLicenseWindow {
+        start_activate: false,
+    });
 }
 
 // ─── Display (tray + CLI) ───────────────────────────────────────────────────
@@ -623,25 +654,34 @@ pub fn submenu_title() -> String {
     }
 }
 
-/// Machine-readable status (for the CLI / Swift onboarding).
+/// Machine-readable status (for the CLI / Swift onboarding). Licensed states
+/// also carry the purchase email and, for subscriptions, the renewal date, so
+/// the modal can show "Licensed to …" without a second round-trip.
 pub fn status_json() -> String {
-    match status() {
-        LicenseStatus::Trial { days_left } => {
-            format!("{{\"status\":\"trial\",\"days_left\":{days_left}}}")
-        }
-        LicenseStatus::Licensed(LicensedKind::Lifetime) => {
-            "{\"status\":\"licensed\",\"kind\":\"lifetime\"}".into()
-        }
-        LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
-            "{\"status\":\"licensed\",\"kind\":\"subscription\"}".into()
+    use serde_json::json;
+    let v = match status() {
+        LicenseStatus::Trial { days_left } => json!({"status": "trial", "days_left": days_left}),
+        LicenseStatus::Licensed(kind) => {
+            let s = read();
+            let renews = s.expires_at_raw.as_deref().and_then(|d| d.get(0..10));
+            json!({
+                "status": "licensed",
+                "kind": match kind {
+                    LicensedKind::Lifetime => "lifetime",
+                    LicensedKind::Subscription { .. } => "subscription",
+                },
+                "email": s.customer_email,
+                "renews": renews,
+            })
         }
         LicenseStatus::GraceOffline { days_left } => {
-            format!("{{\"status\":\"grace_offline\",\"days_left\":{days_left}}}")
+            json!({"status": "grace_offline", "days_left": days_left})
         }
-        LicenseStatus::Expired => "{\"status\":\"expired\"}".into(),
-        LicenseStatus::Disabled => "{\"status\":\"disabled\"}".into(),
-        LicenseStatus::Locked => "{\"status\":\"locked\"}".into(),
-    }
+        LicenseStatus::Expired => json!({"status": "expired"}),
+        LicenseStatus::Disabled => json!({"status": "disabled"}),
+        LicenseStatus::Locked => json!({"status": "locked"}),
+    };
+    v.to_string()
 }
 
 fn plural(n: u64) -> &'static str {
