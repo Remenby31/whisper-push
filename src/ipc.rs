@@ -137,8 +137,56 @@ fn dispatch(req: Request) -> Response {
     }
 }
 
-/// Synthesize and play. Runs on the connection thread, so the caller's timeout
-/// covers the whole thing.
+/// At most this many utterances may be waiting. An agent in a loop should get
+/// an error, not build an unbounded backlog the user then has to sit through.
+const SPEECH_QUEUE_LIMIT: usize = 8;
+
+/// Queued work for the speech thread.
+struct Job {
+    speech: crate::tts::Speech,
+    variant: String,
+}
+
+static SPEECH_TX: std::sync::OnceLock<crossbeam_channel::Sender<Job>> = std::sync::OnceLock::new();
+
+/// One worker renders and plays, strictly in order.
+///
+/// Serialising matters now that `speak` returns before the audio does: two
+/// quick calls would otherwise open two output streams at once and talk over
+/// each other.
+fn speech_queue() -> &'static crossbeam_channel::Sender<Job> {
+    SPEECH_TX.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::bounded::<Job>(SPEECH_QUEUE_LIMIT);
+        std::thread::Builder::new()
+            .name("tts".into())
+            .spawn(move || {
+                for job in rx {
+                    match crate::tts::render(&job.speech, &job.variant) {
+                        // Errors here are ours (model load, inference, audio
+                        // device), not something the caller could have fixed —
+                        // and it has long since returned. Log and continue.
+                        Ok(audio) => {
+                            if let Err(e) =
+                                crate::audio::playback::play_pcm(&audio, crate::tts::SAMPLE_RATE)
+                            {
+                                warn!("TTS playback failed: {e}");
+                            }
+                        }
+                        Err(e) => warn!("TTS synthesis failed: {e}"),
+                    }
+                }
+            })
+            .ok();
+        tx
+    })
+}
+
+/// Validate, then hand off. Returns as soon as the utterance is accepted, so
+/// the agent isn't blocked for the length of the speech.
+///
+/// Everything the caller could act on is checked *before* returning — licence,
+/// unknown voice, missing espeak-ng, empty text — so making this async does not
+/// turn real errors into silence.
 fn speak(text: &str, voice: Option<&str>) -> Result<()> {
     // Entitlement is enforced here rather than in the proxy: the capability
     // lives in the daemon, and the daemon is the only thing that can be sure.
@@ -148,8 +196,18 @@ fn speak(text: &str, voice: Option<&str>) -> Result<()> {
     let cfg = crate::config::Config::load()?;
     let voice = voice.unwrap_or(&cfg.tts_voice);
 
-    let audio = crate::tts::synth(text, voice, &cfg.tts_model)?;
-    crate::audio::playback::play_pcm(&audio, crate::tts::SAMPLE_RATE)
+    let speech = crate::tts::prepare(text, voice)?;
+    speech_queue()
+        .try_send(Job {
+            speech,
+            variant: cfg.tts_model.clone(),
+        })
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Speech queue is full ({SPEECH_QUEUE_LIMIT} utterances still to play) — \
+                 wait for it to drain before speaking again."
+            )
+        })
 }
 
 // ─── Client side (used by the MCP proxy) ────────────────────────────────────

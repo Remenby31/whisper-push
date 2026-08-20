@@ -493,6 +493,27 @@ mod doctor {
             Err(e) => println!("  ({e})"),
         }
 
+        // Speech output. English needs nothing; every other Kokoro voice is
+        // phonemized by an external espeak-ng, so its absence is worth saying
+        // out loud here rather than only when a French `speak` call fails.
+        println!("\nSpeech output (TTS):");
+        println!(
+            "  Kokoro model:  {}",
+            if crate::tts::is_downloaded("model_q8f16") {
+                "ready"
+            } else {
+                "not downloaded (fetched on first use, 86 MB)"
+            }
+        );
+        println!(
+            "  espeak-ng:     {}",
+            if crate::tts::g2p::espeak_available() {
+                "found — non-English voices available"
+            } else {
+                "missing — English voices only (`brew install espeak-ng` for the rest)"
+            }
+        );
+
         // Model
         let model_path = crate::transcribe::model_path("ggml-large-v3-turbo-q5_0.bin");
         if model_path.exists() {

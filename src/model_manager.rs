@@ -91,6 +91,19 @@ pub fn print_status() {
             model.name, model.size_mb, model.description
         );
     }
+    // Kokoro is listed apart on purpose: `list_models()` is the *transcription*
+    // set the onboarding picker mirrors, and offering a TTS model there would
+    // be a category error. It still occupies disk, so `--models` should show it.
+    println!("\nSpeech output:");
+    let kokoro = if crate::tts::is_downloaded("model_q8f16") {
+        "✓"
+    } else {
+        "✗"
+    };
+    println!(
+        "  {kokoro} {:<35} {:>5}MB  {}",
+        "kokoro (model_q8f16)", 86, "Kokoro-82M — local TTS for the MCP `speak` tool"
+    );
 }
 
 fn whisper_model_path(filename: &str) -> PathBuf {

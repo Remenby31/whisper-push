@@ -123,13 +123,28 @@ fn with_session<T>(variant: &str, f: impl FnOnce(&mut Session) -> Result<T>) -> 
     f(guard.as_mut().expect("just populated"))
 }
 
-/// Synthesize `text` in `voice`, returning 24 kHz mono samples.
-pub fn synth(text: &str, voice: &str, variant: &str) -> Result<Vec<f32>> {
+/// A validated, phonemized utterance ready to render.
+///
+/// Splitting preparation from rendering is what lets the MCP tool return
+/// immediately *without* swallowing the errors worth reporting: everything a
+/// caller can actually fix — unknown voice, missing espeak-ng, empty text — is
+/// caught in [`prepare`], which is milliseconds. Only model loading and
+/// inference happen later, in the background.
+#[derive(Debug, Clone)]
+pub struct Speech {
+    tokens: Vec<i64>,
+    voice: String,
+    /// Kept for logging only.
+    chars: usize,
+}
+
+/// Validate and phonemize. Fast, and the only step that can fail for a reason
+/// the caller could act on.
+pub fn prepare(text: &str, voice: &str) -> Result<Speech> {
     let text = text.trim();
     if text.is_empty() {
         bail!("Nothing to speak");
     }
-
     let phonemes = g2p::phonemize(text, voice)?;
     let tokens = kokoro_en::get_token_ids(&phonemes, false);
     // get_token_ids brackets the phonemes with padding, so 2 means "no phonemes
@@ -137,6 +152,28 @@ pub fn synth(text: &str, voice: &str, variant: &str) -> Result<Vec<f32>> {
     if tokens.len() <= 2 {
         bail!("Text produced no usable phonemes");
     }
+    // Surface a bad voice name now rather than from a background thread.
+    let _ = load_voice(voice)?;
+    Ok(Speech {
+        tokens,
+        voice: voice.to_string(),
+        chars: text.len(),
+    })
+}
+
+/// Convenience for callers that want it all in one go (the `say` CLI).
+pub fn synth(text: &str, voice: &str, variant: &str) -> Result<Vec<f32>> {
+    render(&prepare(text, voice)?, variant)
+}
+
+/// Run the model. Slow: a cold session load plus inference.
+pub fn render(speech: &Speech, variant: &str) -> Result<Vec<f32>> {
+    let Speech {
+        tokens,
+        voice,
+        chars,
+    } = speech;
+    let (tokens, voice) = (tokens.clone(), voice.as_str());
 
     let pack = load_voice(voice)?;
     // The style row is chosen by token count: longer utterances get a different
@@ -160,8 +197,7 @@ pub fn synth(text: &str, voice: &str, variant: &str) -> Result<Vec<f32>> {
     })?;
 
     info!(
-        "Kokoro: {} chars → {:.1}s of audio in {:.2}s ({voice})",
-        text.len(),
+        "Kokoro: {chars} chars → {:.1}s of audio in {:.2}s ({voice})",
         audio.len() as f32 / SAMPLE_RATE as f32,
         t.elapsed().as_secs_f64()
     );

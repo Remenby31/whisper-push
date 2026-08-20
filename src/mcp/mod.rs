@@ -81,6 +81,10 @@ impl Speaker {
     /// one or two sentences and put the important part first. Do not read out
     /// code, file paths, or long lists — say what happened and leave the detail
     /// on screen. This does not capture a reply; it is one-way.
+    ///
+    /// Returns as soon as the utterance is accepted, not when it finishes
+    /// playing, so you can carry on working while it speaks. Consecutive calls
+    /// are queued and played in order rather than talked over each other.
     #[tool(name = "speak")]
     async fn speak(
         &self,
@@ -97,8 +101,11 @@ impl Speaker {
             .map_err(|e| ErrorData::internal_error(format!("speak task failed: {e}"), None))?;
 
         match result {
+            // "Queued", not "Spoke": the audio is still playing when we return,
+            // and telling the model otherwise would invite it to assume the
+            // user has already heard it.
             Ok(r) if r.ok => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "Spoke: {}",
+                "Speaking now: {}",
                 args.text
             ))])),
             Ok(r) => Ok(CallToolResult::error(vec![ContentBlock::text(

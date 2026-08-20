@@ -185,10 +185,7 @@ fn apply(only: &[String], dry_run: bool, add: bool) -> Result<Vec<Outcome>> {
 
 /// Copy the file aside once, the first time we modify it.
 fn backup_once(path: &Path) -> Result<()> {
-    let bak = path.with_extension(format!(
-        "{}.whisper-push.bak",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("")
-    ));
+    let bak = sidecar(path, ".whisper-push.bak");
     if !bak.exists() {
         std::fs::copy(path, &bak)
             .with_context(|| format!("Failed to back up {}", path.display()))?;
@@ -196,10 +193,21 @@ fn backup_once(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Sidecar path next to `path`, formed by *appending* a suffix.
+///
+/// `Path::with_extension` replaces the extension instead, which would map
+/// `mcp.json` and `mcp.toml` in the same directory onto one identical sidecar —
+/// two clients would then clobber each other's temp file mid-write.
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
 /// Temp file in the same directory, then rename — so a crash mid-write leaves
 /// the original intact rather than a truncated config.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
-    let tmp = path.with_extension("whisper-push.tmp");
+    let tmp = sidecar(path, ".whisper-push.tmp");
     std::fs::write(&tmp, contents)?;
     std::fs::rename(&tmp, path).with_context(|| format!("Failed to replace {}", path.display()))?;
     Ok(())
@@ -385,6 +393,27 @@ mod tests {
         assert!(!s.contains("whisper-push"), "{s}");
         assert!(s.contains("[mcp_servers.slack]"), "{s}");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn sidecars_of_same_stem_different_extension_do_not_collide() {
+        // `with_extension` would map both of these onto one path, so two
+        // clients writing concurrently would clobber each other's temp file.
+        let j = Path::new("/tmp/mcp.json");
+        let t = Path::new("/tmp/mcp.toml");
+        assert_ne!(
+            sidecar(j, ".whisper-push.tmp"),
+            sidecar(t, ".whisper-push.tmp")
+        );
+        assert_ne!(
+            sidecar(j, ".whisper-push.bak"),
+            sidecar(t, ".whisper-push.bak")
+        );
+        // And the sidecar keeps the original name intact.
+        assert_eq!(
+            sidecar(j, ".whisper-push.bak"),
+            Path::new("/tmp/mcp.json.whisper-push.bak")
+        );
     }
 
     #[test]
