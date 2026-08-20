@@ -169,9 +169,19 @@ fn apply(only: &[String], dry_run: bool, add: bool) -> Result<Vec<Outcome>> {
         if !client.installed() {
             continue;
         }
-        let changed = match client.format {
-            Format::Json => edit_json(client.path(), &bin, add, dry_run)?,
-            Format::Toml => edit_toml(client.path(), &bin, add, dry_run)?,
+        // Claude Code owns ~/.claude.json, writes it continuously while it
+        // runs, and stores far more than MCP config in it. A read-modify-write
+        // from us would race those writes, and a parse/serialize round-trip
+        // rewrites every float in the file to its own shortest representation
+        // (observed: costUSD 1041.9306795000007 -> 1041.930679500001). Its own
+        // CLI has neither problem, so use it whenever it is on PATH.
+        let changed = if client.id == "claude-code" && claude_cli_available() {
+            claude_cli(&bin, add, dry_run)?
+        } else {
+            match client.format {
+                Format::Json => edit_json(client.path(), &bin, add, dry_run)?,
+                Format::Toml => edit_toml(client.path(), &bin, add, dry_run)?,
+            }
         };
         out.push(Outcome {
             label: client.label,
@@ -181,6 +191,51 @@ fn apply(only: &[String], dry_run: bool, add: bool) -> Result<Vec<Outcome>> {
         });
     }
     Ok(out)
+}
+
+fn claude_cli_available() -> bool {
+    std::process::Command::new("claude")
+        .args(["mcp", "--help"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Register/unregister through Claude Code's own CLI at user scope.
+///
+/// Returns whether anything changed. `mcp remove` on an absent server exits
+/// non-zero, which we treat as "nothing to remove" rather than an error.
+fn claude_cli(bin: &str, add: bool, dry_run: bool) -> Result<bool> {
+    let listed = std::process::Command::new("claude")
+        .args(["mcp", "get", SERVER_NAME])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    // `mcp add` refuses to overwrite, so an update is remove-then-add.
+    let needs_change = if add { !listed } else { listed };
+    if !needs_change || dry_run {
+        return Ok(needs_change);
+    }
+
+    let out = if add {
+        std::process::Command::new("claude")
+            .args(["mcp", "add", "--scope", "user", SERVER_NAME, bin, "mcp"])
+            .output()
+    } else {
+        std::process::Command::new("claude")
+            .args(["mcp", "remove", "--scope", "user", SERVER_NAME])
+            .output()
+    }
+    .context("Failed to run the `claude` CLI")?;
+
+    if !out.status.success() {
+        bail!(
+            "`claude mcp` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(true)
 }
 
 /// Copy the file aside once, the first time we modify it.
