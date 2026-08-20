@@ -3,10 +3,23 @@
 //! Output-side gate only: `is_entitled()` is a cheap RwLock read + arithmetic on
 //! the hot path; the network (activate/validate/deactivate) runs off-thread or on
 //! explicit user action, never during dictation. Keep-honest-people-honest model
-//! (see the plan): no embedded secret, the verdict lives in a user-owned JSON.
+//! (see the plan): the verdict lives in a user-owned JSON.
+//!
+//! That JSON is HMAC-tagged (see `compute_mac`) so hand-editing it — setting
+//! `key_status: "active"` and a fresh `last_validated_ok` to mint 3 days of
+//! entitlement without ever contacting Lemon Squeezy — is rejected, and an
+//! untagged file claiming a key is forced back through the server (see
+//! `load_anchored`), so dropping the tag buys nothing either.
+//!
+//! This raises the bar against a text editor, nothing more: the salt below ships
+//! in a public repo, so anyone who reads the source can recompute a tag — or
+//! simply patch `gate()`. Client-side licensing in an open-source binary has no
+//! better ceiling; the tag exists so the *easy* path is closed.
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, UNIX_EPOCH};
@@ -87,6 +100,10 @@ pub struct LicenseState {
     last_validated_ok: u64,
     last_validation_attempt: u64,
     clock_high_water: u64,
+    /// HMAC-SHA256 over every field above, keyed to this device. Written by
+    /// `save`, checked by `load_anchored` / `maybe_reload`. `None` only in
+    /// pre-v2 files, which are grandfathered once (see `verify_mac`).
+    mac: Option<String>,
 }
 
 impl LicenseState {
@@ -197,7 +214,15 @@ fn maybe_reload() {
         LOADED_MTIME.store(disk, Ordering::Relaxed);
         if let Ok(content) = std::fs::read_to_string(license_path()) {
             if let Ok(fresh) = serde_json::from_str::<LicenseState>(&content) {
-                *write() = fresh;
+                // The external write we welcome is an activation by the CLI or
+                // the Subscription modal — both go through `save`, so both are
+                // tagged. An untagged/mistagged file here is a hand edit: keep
+                // the in-memory verdict rather than adopting it.
+                if verify_mac(&fresh) {
+                    *write() = fresh;
+                } else {
+                    tracing::warn!("license.json changed on disk but failed its tag; ignoring");
+                }
             }
         }
     }
@@ -670,7 +695,28 @@ fn load_anchored() -> LicenseState {
         }),
         Err(_) => LicenseState::default(),
     };
+    // A bad tag means the file was edited by hand. Treat it exactly like a
+    // corrupt file: keep the evidence, drop the claimed entitlement, and let
+    // earliest_launch re-derive the trial anchor from the install itself — so
+    // tampering never grants access AND never resets the trial.
+    if !verify_mac(&s) {
+        tracing::warn!("license.json failed its integrity tag; backing up to .bad, ignoring it");
+        let _ = std::fs::rename(&path, path.with_extension("json.bad"));
+        s = LicenseState::default();
+    }
     let t = now();
+    // An untagged file is grandfathered by `verify_mac` so the v2 upgrade does
+    // not wipe existing paid installs. That courtesy is also the obvious forgery
+    // route — drop `mac`, set `version: 1`, claim a key — so it does not extend
+    // to the *cached verdict*: an untagged file carrying a key must have that key
+    // re-confirmed by Lemon Squeezy before it entitles anything. Real customers
+    // revalidate silently on the next online tick; a forged key fails and stays
+    // locked. Costs a genuine offline customer one online check at upgrade time.
+    if s.mac.is_none() && s.license_key.is_some() {
+        tracing::info!("untagged license.json with a key; forcing server revalidation");
+        s.last_validated_ok = 0;
+        s.last_validation_attempt = 0;
+    }
     // Anchor the trial to the EARLIEST launch evidence so deleting license.json
     // alone doesn't reset it (.onboarding_done / data_dir survive).
     let anchor = earliest_launch(s.trial_started_at).unwrap_or(t);
@@ -683,8 +729,12 @@ fn load_anchored() -> LicenseState {
         s.clock_high_water = t;
         changed = true;
     }
-    if s.version == 0 {
-        s.version = 1;
+    // Force the tagged schema. Without this the upgrade would only ride along
+    // on some *other* field changing (in practice clock_high_water, which moves
+    // every load) — so a rolled-back clock could leave the file at v1, untagged,
+    // and therefore grandfathered by verify_mac indefinitely.
+    if s.version < STATE_VERSION {
+        s.version = STATE_VERSION;
         changed = true;
     }
     if changed {
@@ -710,13 +760,101 @@ fn earliest_launch(persisted: u64) -> Option<u64> {
     min
 }
 
+// ─── license.json integrity tag ─────────────────────────────────────────────
+
+/// Domain separator. Public (open-source repo) — see the module doc for why
+/// that is acceptable here.
+const MAC_SALT: &[u8] = b"whisper-push/license.json/v2";
+
+/// State schema version. `< 2` predates the integrity tag.
+const STATE_VERSION: u32 = 2;
+
+/// HMAC key: salt + a stable per-machine id, so a license.json lifted from one
+/// machine to another fails its tag instead of granting entitlement there.
+fn device_key() -> Vec<u8> {
+    let mut h = Sha256::new();
+    h.update(MAC_SALT);
+    h.update(machine_id().unwrap_or_default().as_bytes());
+    h.finalize().to_vec()
+}
+
+/// Stable hardware/install id. `None` degrades to a salt-only key — still a
+/// valid tag, just not machine-bound.
+fn machine_id() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        // ioreg prints `"IOPlatformUUID" = "AAAA-...."`; take the quoted value.
+        let out = run("ioreg", &["-rd1", "-c", "IOPlatformExpertDevice"])?;
+        let line = out.lines().find(|l| l.contains("IOPlatformUUID"))?;
+        let mut parts = line.split('"').filter(|p| !p.trim().is_empty());
+        parts.find(|p| p.contains("IOPlatformUUID"))?;
+        parts.find(|p| *p != " = ").map(str::to_string)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok())
+            .map(|s| s.trim().to_string())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let out = run(
+            "reg",
+            &[
+                "query",
+                r"HKLM\SOFTWARE\Microsoft\Cryptography",
+                "/v",
+                "MachineGuid",
+            ],
+        )?;
+        out.split_whitespace().last().map(str::to_string)
+    }
+}
+
+/// Tag over the state with `mac` cleared. Field order is the struct's
+/// declaration order, so serialization is deterministic.
+fn compute_mac(s: &LicenseState) -> String {
+    let mut bare = s.clone();
+    bare.mac = None;
+    let canon = serde_json::to_string(&bare).unwrap_or_default();
+    let mut m = <Hmac<Sha256>>::new_from_slice(&device_key()).expect("HMAC accepts any key length");
+    m.update(canon.as_bytes());
+    m.finalize()
+        .into_bytes()
+        .iter()
+        .fold(String::new(), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+}
+
+/// `true` if the state may be trusted *as a file*. A pre-v2 file (no tag) is
+/// accepted so existing paid installs are not wiped by the upgrade; a file
+/// carrying a *wrong* tag is rejected outright.
+///
+/// Passing here is not the same as being entitled: `load_anchored` additionally
+/// forces an untagged file's key through a server revalidation, so the
+/// strip-the-tag-and-claim-a-key forgery does not survive.
+fn verify_mac(s: &LicenseState) -> bool {
+    match &s.mac {
+        Some(tag) => *tag == compute_mac(s),
+        None => s.version < STATE_VERSION,
+    }
+}
+
 fn save(s: &LicenseState) {
     let path = license_path();
     if let Some(p) = path.parent() {
         let _ = std::fs::create_dir_all(p);
     }
     let tmp = path.with_extension("json.tmp");
-    if let Ok(content) = serde_json::to_string_pretty(s) {
+    // Always write at the current schema version, tagged.
+    let mut s = s.clone();
+    s.version = STATE_VERSION;
+    s.mac = Some(compute_mac(&s));
+    if let Ok(content) = serde_json::to_string_pretty(&s) {
         if std::fs::write(&tmp, content).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
             // Our own write — record the mtime so maybe_reload() doesn't bounce it.
             LOADED_MTIME.store(file_mtime(), Ordering::Relaxed);
@@ -925,5 +1063,109 @@ mod tests {
         let partial: LicenseState = serde_json::from_str(r#"{"trial_started_at":42}"#).unwrap();
         assert_eq!(partial.trial_started_at, 42);
         assert!(partial.license_key.is_none());
+    }
+}
+
+#[cfg(test)]
+mod mac_tests {
+    use super::*;
+
+    fn signed(mut s: LicenseState) -> LicenseState {
+        s.version = STATE_VERSION;
+        s.mac = Some(compute_mac(&s));
+        s
+    }
+
+    #[test]
+    fn round_trips_its_own_tag() {
+        let s = signed(LicenseState {
+            license_key: Some("ABC-123".into()),
+            last_validated_ok: 1_000_000,
+            ..Default::default()
+        });
+        assert!(verify_mac(&s));
+    }
+
+    #[test]
+    fn rejects_a_hand_edited_field() {
+        // The exact attack: mint entitlement by editing the cached verdict.
+        let mut s = signed(LicenseState {
+            trial_started_at: 1_000_000,
+            ..Default::default()
+        });
+        s.license_key = Some("forged".into());
+        s.key_status = Some(KeyStatus::Active);
+        s.last_validated_ok = 2_000_000;
+        assert!(!verify_mac(&s), "edited state must not keep a valid tag");
+    }
+
+    #[test]
+    fn rejects_a_tag_from_another_device() {
+        let s = signed(LicenseState {
+            license_key: Some("ABC-123".into()),
+            ..Default::default()
+        });
+        let mut lifted = s.clone();
+        lifted.mac = Some("00".repeat(32)); // tag computed elsewhere
+        assert!(!verify_mac(&lifted));
+    }
+
+    #[test]
+    fn grandfathers_untagged_pre_v2_files() {
+        // An existing paid install upgrading to v2 must not be wiped.
+        let legacy = LicenseState {
+            version: 1,
+            license_key: Some("ABC-123".into()),
+            mac: None,
+            ..Default::default()
+        };
+        assert!(verify_mac(&legacy));
+    }
+
+    #[test]
+    fn untagged_key_must_be_reconfirmed_by_the_server() {
+        // The forgery the grandfather clause would otherwise allow: drop `mac`,
+        // set version 1, claim an active lifetime key. verify_mac lets the file
+        // through, so the cached verdict must not be trusted on its own.
+        let forged = LicenseState {
+            version: 1,
+            mac: None,
+            license_key: Some("FORGED".into()),
+            key_status: Some(KeyStatus::Active),
+            product_kind: Some(ProductKind::Lifetime),
+            last_validated_ok: 2_000_000,
+            ..Default::default()
+        };
+        assert!(verify_mac(&forged), "untagged files are grandfathered");
+
+        // load_anchored zeroes last_validated_ok for exactly this shape…
+        let mut neutered = forged.clone();
+        neutered.last_validated_ok = 0;
+        neutered.last_validation_attempt = 0;
+        // …and evaluate() then refuses to entitle it.
+        assert_eq!(evaluate(&neutered, 2_000_100), LicenseStatus::Locked);
+    }
+
+    #[test]
+    fn requires_a_tag_once_at_v2() {
+        let untagged_v2 = LicenseState {
+            version: STATE_VERSION,
+            license_key: Some("ABC-123".into()),
+            mac: None,
+            ..Default::default()
+        };
+        assert!(!verify_mac(&untagged_v2));
+    }
+
+    #[test]
+    fn tag_is_not_part_of_its_own_input() {
+        // compute_mac must clear `mac` first, else signing would never converge.
+        let base = LicenseState {
+            trial_started_at: 7,
+            ..Default::default()
+        };
+        let once = signed(base);
+        let twice = signed(once.clone());
+        assert_eq!(once.mac, twice.mac);
     }
 }

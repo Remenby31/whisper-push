@@ -1,6 +1,6 @@
 [package]
 name = "whisper-push"
-version = "1.2.6"
+version = "1.2.7"
 edition = "2024"
 authors = ["Whisper Push contributors <hello@whisperpush.com>"]
 description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
@@ -103,6 +103,8 @@ anyhow = "1"
 whisper-push-dict = { path = "crates/whisper-push-dict" }
 # Acoustic dictionary: correct a word by its sound (MFCC+DTW), model-agnostic
 whisper-push-acoustic = { path = "crates/whisper-push-acoustic" }
+sha2 = "0.10"
+hmac = "0.12"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Metal is always the right whisper.cpp backend on Apple Silicon — enable it
