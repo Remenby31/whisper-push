@@ -344,3 +344,31 @@ fn play_samples(samples: &Arc<Vec<f32>>, lead_ms: u32) -> Result<()> {
 
     Ok(())
 }
+
+/// Play a finished mono buffer that is sampled at `sample_rate`, blocking until
+/// it finishes. Used for TTS output.
+///
+/// `play_samples` deliberately does *no* rate conversion — the bundled cue
+/// clips already match the device. Synthesized speech does not: Kokoro is
+/// 24 kHz and output devices are usually 48 kHz, so skipping the resample here
+/// would play every utterance at double speed. The device rate is only known
+/// once the output config is opened, hence the conversion lives here rather
+/// than in the caller.
+pub fn play_pcm(samples: &[f32], sample_rate: u32) -> Result<()> {
+    if samples.is_empty() {
+        return Ok(());
+    }
+    let selected = OUTPUT_DEVICE.read().map(|g| g.clone()).unwrap_or_default();
+    let device = output_device(&selected).ok_or_else(|| anyhow::anyhow!("No output device"))?;
+    let device_rate = device.default_output_config()?.sample_rate().0;
+
+    let converted = crate::audio::resample_buffer(samples, sample_rate, device_rate)?;
+    if device_rate != sample_rate {
+        tracing::debug!("TTS: resampled {sample_rate} Hz → {device_rate} Hz for playback");
+    }
+
+    // Keep the DAC awake for the duration, and reuse the shared player so the
+    // device-selection and lead-in behaviour stays identical to the cue sounds.
+    arm_keepwarm();
+    play_samples(&Arc::new(converted), 0)
+}

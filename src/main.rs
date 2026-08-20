@@ -11,7 +11,9 @@ mod enrich;
 mod hardware;
 mod history;
 mod hotkey;
+mod ipc;
 mod license;
+mod mcp;
 mod model_manager;
 mod notify;
 mod onboarding;
@@ -23,6 +25,7 @@ mod state;
 mod templates;
 mod transcribe;
 mod tray;
+mod tts;
 mod updater;
 mod util;
 
@@ -100,11 +103,52 @@ enum Commands {
     /// core with simulated dictation+edit pairs and asserts the right
     /// corrections are (or aren't) learned. Deterministic, no GUI, no human.
     CaptureSelfTest,
+    /// Speak text out loud with the local Kokoro TTS model. Same path the MCP
+    /// `speak` tool uses, minus the MCP layer — handy for checking a voice.
+    Say {
+        /// The text to speak.
+        text: String,
+        /// Kokoro voice name (e.g. `af_heart`, `bm_george`, `ff_siwis`).
+        /// Non-English voices require espeak-ng to be installed.
+        #[arg(long)]
+        voice: Option<String>,
+    },
     /// Manage the Lemon Squeezy license (activate, validate, status, …).
     License {
         #[command(subcommand)]
         action: LicenseAction,
     },
+    /// Run the MCP server on stdio, or register it with your MCP clients.
+    ///
+    /// With no subcommand this *is* the server — MCP clients spawn it; running
+    /// it by hand just waits on stdin.
+    Mcp {
+        #[command(subcommand)]
+        action: Option<McpAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpAction {
+    /// Register Whisper Push with every MCP client found on this machine.
+    Install {
+        /// Only these clients (repeatable): claude-code, mcp-json, codex,
+        /// claude-desktop, cursor, windsurf, vscode.
+        #[arg(long = "client")]
+        clients: Vec<String>,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove Whisper Push from every MCP client config.
+    Uninstall {
+        #[arg(long = "client")]
+        clients: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// List detected MCP clients and whether we're registered.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -227,6 +271,16 @@ fn main() -> Result<()> {
     if let Some(Commands::License { action }) = &cli.command {
         init_logging(false);
         return cli_license::run(action);
+    }
+    if let Some(Commands::Say { text, voice }) = &cli.command {
+        init_logging(false);
+        return cli_say::run(text, voice.as_deref());
+    }
+    if let Some(Commands::Mcp { action }) = &cli.command {
+        // No init_logging for the server itself: stdout is the MCP wire, and
+        // tracing's stderr writer would still race the handshake on some
+        // clients. The management subcommands print to stdout deliberately.
+        return cli_mcp::run(action.as_ref());
     }
 
     // Subcommands that don't need config: log to stderr only
@@ -910,6 +964,93 @@ mod cli_capture_selftest {
     }
 }
 
+/// `whisper-push say` — synthesize and play, in-process.
+///
+/// This is the TTS path without the daemon or MCP in the way, so a wrong voice,
+/// a missing espeak-ng or a botched resample shows up here first.
+mod cli_say {
+    use anyhow::Result;
+
+    pub fn run(text: &str, voice: Option<&str>) -> Result<()> {
+        let cfg = crate::config::Config::load()?;
+        let voice = voice.unwrap_or(&cfg.tts_voice);
+        crate::audio::playback::set_output_device(&cfg.output_device);
+
+        let audio = crate::tts::synth(text, voice, &cfg.tts_model)?;
+        crate::audio::playback::play_pcm(&audio, crate::tts::SAMPLE_RATE)?;
+        Ok(())
+    }
+}
+
+/// `whisper-push mcp [install|uninstall|status]`.
+mod cli_mcp {
+    use crate::mcp::install;
+    use anyhow::Result;
+
+    pub fn run(action: Option<&super::McpAction>) -> Result<()> {
+        match action {
+            // No subcommand: we ARE the server. Client spawns us on stdio.
+            None => crate::mcp::run(),
+            Some(super::McpAction::Status) => status(),
+            Some(super::McpAction::Install { clients, dry_run }) => {
+                report(install::install(clients, *dry_run)?, *dry_run, "Registered")
+            }
+            Some(super::McpAction::Uninstall { clients, dry_run }) => {
+                report(install::uninstall(clients, *dry_run)?, *dry_run, "Removed")
+            }
+        }
+    }
+
+    fn status() -> Result<()> {
+        let mut any = false;
+        for c in install::known_clients() {
+            if !c.installed() {
+                continue;
+            }
+            any = true;
+            println!(
+                "{}  {:<22} {}",
+                if install::is_registered(&c) {
+                    "✓"
+                } else {
+                    "·"
+                },
+                c.label,
+                c.path().display()
+            );
+        }
+        if !any {
+            println!("No MCP clients detected on this machine.");
+        }
+        Ok(())
+    }
+
+    fn report(outcomes: Vec<install::Outcome>, dry_run: bool, verb: &str) -> Result<()> {
+        if outcomes.is_empty() {
+            println!("No MCP clients detected on this machine — nothing to do.");
+            return Ok(());
+        }
+        let mut restart = Vec::new();
+        for o in &outcomes {
+            let what = if !o.changed {
+                "already up to date"
+            } else if dry_run {
+                "would change"
+            } else {
+                verb
+            };
+            println!("{:<22} {what}  ({})", o.label, o.path.display());
+            if o.needs_restart && !dry_run {
+                restart.push(o.label);
+            }
+        }
+        if !restart.is_empty() {
+            println!("\nRestart to pick it up: {}", restart.join(", "));
+        }
+        Ok(())
+    }
+}
+
 mod cli_license {
     use crate::LicenseAction;
     use crate::license::{self, ActivateOutcome, DeactivateOutcome, ValidateOutcome};
@@ -983,6 +1124,9 @@ mod app {
         crate::license::init();
         // Arm the acoustic dictionary (load fingerprints).
         crate::acoustic::init();
+        // Serve the local socket the MCP proxy speaks to, so agents can talk
+        // to the user out loud without loading their own copy of the TTS model.
+        crate::ipc::spawn();
         // Optional online enrichment (opt-in, default off).
         crate::enrich::set_enabled(cfg.online_enrichment);
 

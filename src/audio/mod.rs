@@ -197,6 +197,36 @@ pub fn create_resampler(device_sr: u32) -> Result<Option<Arc<Mutex<FftFixedIn<f3
     Ok(Some(Arc::new(Mutex::new(resampler))))
 }
 
+/// Resample a complete mono buffer from `from` Hz to `to` Hz.
+///
+/// The capture path resamples a live stream chunk by chunk; this is the
+/// playback direction — one finished buffer, converted in one call. TTS needs
+/// it because Kokoro emits 24 kHz while output devices are typically 48 kHz:
+/// handing the raw samples to the device plays them at double speed.
+pub fn resample_buffer(input: &[f32], from: u32, to: u32) -> Result<Vec<f32>> {
+    use rubato::Resampler;
+
+    if from == to || input.is_empty() {
+        return Ok(input.to_vec());
+    }
+    let mut rs = FftFixedIn::<f32>::new(from as usize, to as usize, RESAMPLE_CHUNK_SIZE, 1, 1)?;
+    let mut out =
+        Vec::with_capacity(input.len() * to as usize / from as usize + RESAMPLE_CHUNK_SIZE);
+
+    let mut pos = 0;
+    while pos < input.len() {
+        let need = rs.input_frames_next();
+        let end = (pos + need).min(input.len());
+        let mut chunk = input[pos..end].to_vec();
+        // The last chunk is short; zero-pad it so the FFT resampler still gets
+        // a full frame. The few trailing samples of silence are inaudible.
+        chunk.resize(need, 0.0);
+        out.extend_from_slice(&rs.process(&[chunk], None)?[0]);
+        pos = end;
+    }
+    Ok(out)
+}
+
 /// Downmix interleaved multi-channel audio to mono.
 pub fn downmix_to_mono(data: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {

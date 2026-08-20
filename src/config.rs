@@ -46,6 +46,14 @@ pub struct Config {
     /// is loaded; system sleep pauses it. Default on; turn off to save battery at
     /// the cost of a slow first dictation after each idle gap.
     pub keep_model_resident: bool,
+    /// Kokoro voice used by the MCP `speak` tool and `whisper-push say`. The
+    /// two-letter prefix picks the language (`af`/`am`/`bf`/`bm` = English and
+    /// need nothing installed; everything else needs espeak-ng).
+    pub tts_voice: String,
+    /// Kokoro ONNX variant to download. `model_q8f16` is 86 MB and CPU-only;
+    /// `model_fp16` (163 MB) or `model` (325 MB) trade download size for
+    /// quality and can use CoreML.
+    pub tts_model: String,
 }
 
 impl Default for Config {
@@ -67,6 +75,8 @@ impl Default for Config {
             online_enrichment: false,
             overlay_enabled: true,
             keep_model_resident: true,
+            tts_voice: crate::tts::DEFAULT_VOICE.into(),
+            tts_model: "model_q8f16".into(),
         }
     }
 }

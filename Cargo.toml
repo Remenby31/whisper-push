@@ -105,6 +105,12 @@ whisper-push-dict = { path = "crates/whisper-push-dict" }
 whisper-push-acoustic = { path = "crates/whisper-push-acoustic" }
 sha2 = "0.10"
 hmac = "0.12"
+kokoro-en = { version = "0.1.5", default-features = false }
+ort = "=2.0.0-rc.13"
+rmcp = { version = "3", features = ["server", "transport-io"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }
+toml_edit = "0.25.13"
+schemars = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Metal is always the right whisper.cpp backend on Apple Silicon — enable it
