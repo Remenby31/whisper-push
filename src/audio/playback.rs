@@ -265,7 +265,10 @@ fn decode_mono_f32(wav_data: &[u8]) -> Option<(Vec<f32>, u32)> {
     let reader = hound::WavReader::new(std::io::Cursor::new(wav_data)).ok()?;
     let spec = reader.spec();
     let samples: Vec<f32> = match spec.sample_format {
-        hound::SampleFormat::Float => reader.into_samples::<f32>().filter_map(|s| s.ok()).collect(),
+        hound::SampleFormat::Float => reader
+            .into_samples::<f32>()
+            .filter_map(|s| s.ok())
+            .collect(),
         hound::SampleFormat::Int => reader
             .into_samples::<i16>()
             .filter_map(|s| s.ok())

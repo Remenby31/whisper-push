@@ -1,6 +1,6 @@
-use anyhow::Result;
 #[cfg(target_os = "macos")]
 use anyhow::Context;
+use anyhow::Result;
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -32,10 +32,7 @@ pub fn download_and_install(url: &str) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = url; // the macOS asset URL isn't consumable by a non-macOS installer
-        let releases = format!(
-            "https://github.com/{}/releases/latest",
-            super::GITHUB_REPO
-        );
+        let releases = format!("https://github.com/{}/releases/latest", super::GITHUB_REPO);
         open_url(&releases);
         anyhow::bail!(
             "Auto-update isn't available on this platform yet — opened the latest \

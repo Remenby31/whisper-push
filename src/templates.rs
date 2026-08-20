@@ -165,7 +165,11 @@ pub fn ensure_file() -> PathBuf {
 /// The trigger phrases, in order.
 pub fn triggers() -> Vec<String> {
     ensure_loaded();
-    TEMPLATES.lock_safe().iter().map(|(t, _)| t.clone()).collect()
+    TEMPLATES
+        .lock_safe()
+        .iter()
+        .map(|(t, _)| t.clone())
+        .collect()
 }
 
 /// Number of templates.

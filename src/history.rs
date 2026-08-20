@@ -30,7 +30,9 @@ pub fn file_path() -> PathBuf {
 
 /// Flatten a (possibly multi-line) entry to one round-trippable line.
 fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\r', "").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('\r', "")
+        .replace('\n', "\\n")
 }
 
 /// Inverse of [`escape`].

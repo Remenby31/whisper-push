@@ -1970,7 +1970,11 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let recent = crate::history::recent();
     let mut items = Vec::new();
     if recent.is_empty() {
-        let ph = MenuItem::new("  (empty \u{2014} your dictations will appear here)", false, None);
+        let ph = MenuItem::new(
+            "  (empty \u{2014} your dictations will appear here)",
+            false,
+            None,
+        );
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;
@@ -1978,7 +1982,10 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     for text in recent.iter().take(MAX) {
         let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if preview.chars().count() > PREVIEW {
-            preview = format!("{}\u{2026}", preview.chars().take(PREVIEW).collect::<String>());
+            preview = format!(
+                "{}\u{2026}",
+                preview.chars().take(PREVIEW).collect::<String>()
+            );
         }
         let it = MenuItem::new(&format!("  {preview}"), true, None);
         let _ = submenu.append(&it);
@@ -1994,7 +2001,11 @@ fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let triggers = crate::templates::triggers();
     let mut items = Vec::new();
     if triggers.is_empty() {
-        let ph = MenuItem::new("  (none yet \u{2014} use Add Template\u{2026})", false, None);
+        let ph = MenuItem::new(
+            "  (none yet \u{2014} use Add Template\u{2026})",
+            false,
+            None,
+        );
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;
@@ -2031,9 +2042,10 @@ fn add_template_dialog() {
     if trigger.is_empty() {
         return;
     }
-    let Some(content) =
-        osascript_input(&format!("Text to paste when you say \u{201c}{trigger}\u{201d}:"), "")
-    else {
+    let Some(content) = osascript_input(
+        &format!("Text to paste when you say \u{201c}{trigger}\u{201d}:"),
+        "",
+    ) else {
         return;
     };
     match crate::templates::add(&trigger, &content) {
