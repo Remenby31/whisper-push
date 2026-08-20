@@ -63,6 +63,14 @@ pub enum Event {
     /// Trailing tray-icon refresh: re-apply the current state's icon on the main
     /// thread after a coalesced burst (see `tray::set_tray_icon`).
     RefreshTrayIcon,
+    /// Mid-recording microphone health probe, self-scheduled by the pipeline.
+    /// The u64 is a generation counter: checks scheduled for a recording that
+    /// already ended (or was superseded) carry a stale gen and are ignored.
+    MicHealthCheck(u64),
+    /// The input was auto-switched to a working mic (its name) after a dead one
+    /// was detected — retitle the Input submenu so it shows what's actually
+    /// recording (checkmarks stay on the saved config).
+    InputSwitched(String),
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
     /// A new version is available (version, download_url)

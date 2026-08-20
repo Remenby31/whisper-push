@@ -128,6 +128,21 @@ impl AudioCapture {
         &self.device_name
     }
 
+    /// Peak amplitude captured so far, read live without stopping the stream —
+    /// powers the mid-recording dead-mic health check and the fallback probe.
+    pub fn live_peak(&self) -> f32 {
+        self.buffer
+            .lock_safe()
+            .iter()
+            .map(|s| s.abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    /// Samples (16 kHz mono) captured so far, read live.
+    pub fn live_len(&self) -> usize {
+        self.buffer.lock_safe().len()
+    }
+
     /// Stop capture and return the recorded audio as 16kHz mono f32.
     pub fn stop(mut self) -> Vec<f32> {
         // Explicitly pause before drop — on macOS, dropping a cpal Stream

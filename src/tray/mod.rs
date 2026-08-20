@@ -3,6 +3,7 @@ use crate::state::{AppState, Event, State};
 use crate::util::LockSafe;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -1265,6 +1266,15 @@ impl App {
                 flush_tray_icon(&self.tray);
             }
 
+            Event::InputSwitched(ref name) => {
+                // A dead mic was auto-replaced: show the live device in the
+                // submenu title. Checkmarks are left alone — they reflect the
+                // *saved* config, and an explicit user pick (handler above)
+                // resets the title via the plain `device_title`.
+                mi.input_submenu
+                    .set_text(format!("{} (auto-switched)", device_title("Input", name)));
+            }
+
             Event::StateChanged(s) => {
                 self.state.set(s);
                 set_tray_icon(&self.tray, s); // also refreshes the tooltip
@@ -1490,6 +1500,10 @@ fn pipeline_loop(
     // Everything here runs on this one thread — no Arc/Mutex/atomics needed.
     let mut recording = false;
     let mut capture: Option<crate::audio::capture::AudioCapture> = None;
+    // Generation counter for mid-recording mic health checks: bumped when a
+    // recording commits (and on a mid-recording input swap), so a check that
+    // arrives late — for a recording that already ended — is ignored as stale.
+    let mut mic_check_gen: u64 = 0;
 
     loop {
         // recv() is the one place the loop ends (channel closed at shutdown).
@@ -1510,6 +1524,7 @@ fn pipeline_loop(
                 &self_tx,
                 &mut recording,
                 &mut capture,
+                &mut mic_check_gen,
             )
         }))
         .is_err()
@@ -1570,9 +1585,29 @@ fn hold_gate(rx: &Receiver<Event>, self_tx: &Sender<Event>, delay: f64) -> bool 
     false
 }
 
+/// Delay before the first mid-recording mic health probe — long enough for a
+/// slow (Bluetooth) mic to open its link and start delivering on a healthy one.
+const MIC_CHECK_DELAY: Duration = Duration::from_millis(1200);
+/// Extra grace when a check finds too few samples to judge the peak yet.
+const MIC_CHECK_RETRY_DELAY: Duration = Duration::from_millis(700);
+/// Minimum captured audio (~0.9 s at 16 kHz) before a health check trusts the
+/// peak — under this the stream may simply still be warming up.
+const MIC_CHECK_MIN_SAMPLES: usize = crate::audio::SAMPLE_RATE as usize * 9 / 10;
+
+/// Send `MicHealthCheck(generation)` back into the pipeline channel after
+/// `delay`, from a detached thread (the pipeline thread must keep draining).
+fn schedule_mic_check(self_tx: &Sender<Event>, generation: u64, delay: Duration) {
+    let tx = self_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let _ = tx.send(Event::MicHealthCheck(generation));
+    });
+}
+
 /// Handle one pipeline event. Split out of `pipeline_loop` so each event runs
 /// inside a `catch_unwind` at the call site — a panic here is contained and the
 /// loop resets to idle rather than the worker thread dying.
+#[allow(clippy::too_many_arguments)]
 fn handle_pipeline_event(
     event: Event,
     rx: &Receiver<Event>,
@@ -1581,6 +1616,7 @@ fn handle_pipeline_event(
     self_tx: &Sender<Event>,
     recording: &mut bool,
     capture: &mut Option<crate::audio::capture::AudioCapture>,
+    mic_check_gen: &mut u64,
 ) {
     match event {
         Event::HotkeyDown => {
@@ -1645,6 +1681,11 @@ fn handle_pipeline_event(
             notify_ui(ui_tx, Event::ShowOverlay);
             *capture = Some(cap);
             *recording = true;
+            // Arm the mid-recording dead-mic check: if this mic turns out to be
+            // flatline we swap it while the user is still speaking (see the
+            // MicHealthCheck arm), salvaging the dictation instead of losing it.
+            *mic_check_gen += 1;
+            schedule_mic_check(self_tx, *mic_check_gen, MIC_CHECK_DELAY);
             notify_ui(ui_tx, Event::StateChanged(State::Recording));
             // Harvest on-screen names off the pipeline thread so the AX reads
             // can't add latency between key-up and transcription (#7).
@@ -1662,7 +1703,7 @@ fn handle_pipeline_event(
             }
             *recording = false;
             notify_ui(ui_tx, Event::StateChanged(State::Processing));
-            stop_and_transcribe(config, capture);
+            stop_and_transcribe(config, capture, ui_tx);
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
 
@@ -1682,6 +1723,9 @@ fn handle_pipeline_event(
                     Ok(cap) => {
                         *capture = Some(cap);
                         *recording = true;
+                        // Same mid-recording dead-mic rescue as the hold path.
+                        *mic_check_gen += 1;
+                        schedule_mic_check(self_tx, *mic_check_gen, MIC_CHECK_DELAY);
                         notify_ui(ui_tx, Event::StateChanged(State::Recording));
                         if config.lock_safe().sound_feedback {
                             crate::audio::playback::play_sound("start");
@@ -1703,7 +1747,7 @@ fn handle_pipeline_event(
             } else {
                 *recording = false;
                 notify_ui(ui_tx, Event::StateChanged(State::Processing));
-                stop_and_transcribe(config, capture);
+                stop_and_transcribe(config, capture, ui_tx);
                 notify_ui(ui_tx, Event::StateChanged(State::Idle));
             }
         }
@@ -1761,6 +1805,51 @@ fn handle_pipeline_event(
 
             // Back to idle — hotkeys work again
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
+        }
+
+        Event::MicHealthCheck(generation) => {
+            // Stale (a newer recording started) or the recording already ended.
+            if generation != *mic_check_gen || !*recording {
+                return;
+            }
+            let Some(cap) = capture.as_ref() else { return };
+            if cap.live_len() < MIC_CHECK_MIN_SAMPLES {
+                // Too little audio to judge the peak — Bluetooth mics can be
+                // slow to deliver first samples. Look again shortly, same gen.
+                schedule_mic_check(self_tx, generation, MIC_CHECK_RETRY_DELAY);
+                return;
+            }
+            if cap.live_peak() >= crate::audio::DEAD_MIC_PEAK {
+                return; // signal present — the mic is healthy
+            }
+            // Dead mid-recording: swap to a verified-working mic NOW so the rest
+            // of the utterance is salvaged instead of lost. cpal streams are
+            // `!Send`, so the swap must happen here on the pipeline thread.
+            let dead = cap.device_name().to_string();
+            warn!("No signal from '{dead}' mid-recording — looking for a working mic");
+            match crate::audio::best_working_mic(&dead) {
+                Some(next) => match crate::audio::capture::AudioCapture::start(&next) {
+                    Ok(new_cap) => {
+                        // Replacing the capture drops the old one → its stream closes.
+                        *capture = Some(new_cap);
+                        crate::audio::set_input_override(&next);
+                        info!("Mid-recording input switch: '{dead}' → '{next}'");
+                        crate::notify::app(&format!(
+                            "“{dead}” went silent — now recording on “{next}”. \
+                             Please restart your sentence."
+                        ));
+                        notify_ui(ui_tx, Event::InputSwitched(next));
+                        // Watch the replacement too (fresh generation).
+                        *mic_check_gen += 1;
+                        schedule_mic_check(self_tx, *mic_check_gen, MIC_CHECK_DELAY);
+                    }
+                    // Couldn't open the replacement / none available: keep the
+                    // current stream; the post-hoc path in stop_and_transcribe
+                    // still recovers at key-up.
+                    Err(e) => warn!("Couldn't switch to '{next}' mid-recording: {e}"),
+                },
+                None => warn!("No replacement mic for dead '{dead}' — deferring to key-up"),
+            }
         }
 
         _ => {}
@@ -1911,10 +2000,52 @@ fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
     }
 }
 
+/// The "every mic is dead" notification fires at most once per silent stretch —
+/// set when shown, re-armed by the next recording with real signal (see
+/// `stop_and_transcribe`) so a fixed permission doesn't leave it muted forever.
+static SYSTEMIC_MIC_NOTIFIED: AtomicBool = AtomicBool::new(false);
+
+/// Every usable input has failed — almost always a denied Microphone permission,
+/// not N broken devices in a row. Point the user at the fix.
+fn notify_systemic_mic_failure() {
+    if SYSTEMIC_MIC_NOTIFIED.swap(true, Ordering::Relaxed) {
+        return; // already told this silent stretch
+    }
+    let body = "No microphone is delivering any audio — this usually means Whisper Push \
+                is missing the Microphone permission. Open Settings and enable it, then dictate again.";
+    #[cfg(target_os = "macos")]
+    crate::notify::app_action(body, "Open Settings", || {
+        crate::permissions::open_settings("Privacy_Microphone")
+    });
+    #[cfg(not(target_os = "macos"))]
+    crate::notify::app(body);
+}
+
+/// Dead-mic recovery choke point: find a verified replacement for `dead`, make
+/// it the session input, retitle the Input submenu, and recap to the user —
+/// `what_happened` already names the device and duration (e.g. `No sound from
+/// “X” (2.3 s recorded)`). Escalates to the systemic notification when no
+/// candidate exists. Probes devices (~1–2 s worst case) — run it off the
+/// pipeline thread when a transcription is waiting.
+fn recover_dead_mic(what_happened: &str, dead: &str, ui_tx: &Sender<Event>) {
+    match crate::audio::best_working_mic(dead) {
+        Some(next) => {
+            crate::audio::set_input_override(&next);
+            warn!("Input auto-switch: '{dead}' → '{next}'");
+            crate::notify::app(&format!(
+                "{what_happened} — switched to “{next}”. Press your key and dictate again."
+            ));
+            notify_ui(ui_tx, Event::InputSwitched(next));
+        }
+        None => notify_systemic_mic_failure(),
+    }
+}
+
 /// Stop capture, transcribe audio, and paste result.
 fn stop_and_transcribe(
     config: &Arc<Mutex<Config>>,
     capture: &mut Option<crate::audio::capture::AudioCapture>,
+    ui_tx: &Sender<Event>,
 ) {
     let cfg = config.lock_safe().clone();
     if cfg.sound_feedback {
@@ -1927,10 +2058,24 @@ fn stop_and_transcribe(
     let device_lost = cap.as_ref().is_some_and(|c| c.device_lost());
     let used_device = cap.as_ref().map(|c| c.device_name().to_string());
     let audio = cap.map(|c| c.stop()).unwrap_or_default();
+    let secs = audio.len() as f32 / crate::audio::SAMPLE_RATE as f32;
 
     if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
         if device_lost {
             crate::notify::app("Recording stopped — the microphone disconnected.");
+            // Line up a verified replacement in the background so the NEXT press
+            // just works. Probing takes ~1–2 s — never on this thread, where the
+            // user may already be re-pressing the key.
+            if let Some(dead) = used_device {
+                let ui_tx = ui_tx.clone();
+                std::thread::spawn(move || {
+                    recover_dead_mic(
+                        &format!("“{dead}” disconnected ({secs:.1} s captured)"),
+                        &dead,
+                        &ui_tx,
+                    )
+                });
+            }
         }
         info!("Too short, skipping");
         return;
@@ -1939,28 +2084,27 @@ fn stop_and_transcribe(
     // Auto-fallback: enough audio was captured but it's flatline silence — the
     // signature of a connected-but-not-working mic (AirPods whose mic link never
     // opened, a muted USB interface), not a quiet room, which always has some
-    // ambient peak. We can't recover this utterance, but switch the live input
-    // to a known-good mic (built-in if the lid's open, else any other) so the
-    // next press just works.
+    // ambient peak. This utterance is unrecoverable (the mid-recording health
+    // check only rescues holds longer than its delay), but switch the live input
+    // to a probe-verified mic so the next press just works.
     let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
     if peak < crate::audio::DEAD_MIC_PEAK {
-        if let Some(dead) = used_device {
-            if let Some(next) = crate::audio::next_working_mic(&dead) {
-                crate::audio::set_input_override(&next);
-                warn!("No signal from '{dead}' (peak={peak:.6}) — switching input to '{next}'");
-                crate::notify::app(&format!(
-                    "No sound from {dead} — switched to {next}. Press your shortcut again."
-                ));
-                return;
-            }
+        if let Some(dead) = used_device.as_deref() {
+            warn!("No signal from '{dead}' (peak={peak:.6})");
+            recover_dead_mic(
+                &format!("No sound from “{dead}” ({secs:.1} s recorded)"),
+                dead,
+                ui_tx,
+            );
+        } else {
+            notify_systemic_mic_failure();
         }
-        // Every input is silent → systemic (likely Microphone permission). Fall
-        // through; the empty transcription is harmless and the log shows why.
-    } else {
-        // Good signal — forget any earlier dead-mic memory so devices that
-        // recover become eligible again.
-        crate::audio::clear_dead_mics();
+        return; // nothing to transcribe — the audio is flatline
     }
+    // Good signal — forget any earlier dead-mic memory so devices that recover
+    // become eligible again, and re-arm the systemic notification.
+    crate::audio::clear_dead_mics();
+    SYSTEMIC_MIC_NOTIFIED.store(false, Ordering::Relaxed);
 
     let rms = crate::util::rms(&audio);
     let backend = crate::model_manager::resolve_backend(&cfg.model);
@@ -1979,8 +2123,12 @@ fn stop_and_transcribe(
     // Panics are already caught inside transcribe_with_backend (the choke point)
     // and returned as Err, so no extra catch_unwind is needed here.
     let result = crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend);
+    // Did we actually produce text? Drives the wording of the device-lost recap
+    // below, so it never claims "transcribed" when nothing came out.
+    let mut transcribed = false;
     match result {
         Ok(text) if !text.is_empty() => {
+            transcribed = true;
             // Record the run so the user can find/re-copy it (History submenu +
             // history.txt). Records what was *recognised*, not the expansion.
             crate::history::record(&text);
@@ -1999,10 +2147,42 @@ fn stop_and_transcribe(
             }
             // No per-dictation notification (noise).
         }
-        Ok(_) => info!("No speech detected"),
+        Ok(_) => {
+            info!("No speech detected");
+            // Empty text from a *quiet* recording is worth explaining; a decent
+            // RMS means the user likely just said nothing — stay silent then.
+            // (When the device dropped, the disconnect recap below covers it.)
+            if !device_lost && rms < crate::audio::LOW_SIGNAL_RMS {
+                if let Some(dev) = used_device.as_deref() {
+                    crate::notify::app(&format!(
+                        "Heard {secs:.1} s from “{dev}” but it was too quiet to transcribe — \
+                         speak closer to the mic or pick another one in the menu."
+                    ));
+                }
+            }
+        }
         Err(e) => {
             tracing::error!("Transcription: {e}");
             crate::notify::app(&format!("Error: {e}"));
+        }
+    }
+
+    // The mic died partway through: recap what actually happened so a truncated
+    // (or missing) paste isn't a mystery. Word it by whether text came out.
+    if device_lost {
+        if let Some(dev) = used_device.as_deref() {
+            let msg = if transcribed {
+                format!(
+                    "“{dev}” disconnected mid-dictation — transcribed the {secs:.1} s \
+                     captured before the drop."
+                )
+            } else {
+                format!(
+                    "“{dev}” disconnected mid-dictation — too little was captured to \
+                     transcribe. Reconnect it or pick another mic in the menu."
+                )
+            };
+            crate::notify::app(&msg);
         }
     }
 }
