@@ -219,6 +219,15 @@ pub fn start_capture(tx: Sender<Event>) {
     info!("Hotkey capture armed — waiting for a key combo");
 }
 
+/// Disarm capture (the user clicked the menu item again, or nothing was pressed
+/// in time). Safe to call when not capturing.
+pub fn cancel_capture() {
+    CAPTURING.store(false, Ordering::SeqCst);
+    *CAPTURE_PENDING_MOD.lock_safe() = None;
+    *CAPTURE_TX.lock_safe() = None;
+    info!("Hotkey capture cancelled");
+}
+
 /// Tap a modifier => hold hotkey on it. Press modifier(s)+key => toggle hotkey.
 /// Returns Some((hotkey, mode)) once a combo is recognised.
 fn try_capture(event_type: u32, key_code: i64, flags: u64) -> Option<(String, String)> {

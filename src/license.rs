@@ -235,6 +235,13 @@ fn write() -> RwLockWriteGuard<'static, LicenseState> {
 }
 
 /// Arm state + kick a background revalidation if a key is due. Never blocks.
+/// mtime of license.json, or 0. A cheap change detector for the UI: the modal
+/// (a separate process) activates and deactivates by rewriting this file, and
+/// the tray owns the menu, so the menu has to notice. One `stat`.
+pub fn disk_revision() -> u64 {
+    file_mtime()
+}
+
 /// Load license.json (anchoring the trial on first run). No network — safe for
 /// the CLI, whose process exits right after printing. The daemon adds
 /// `start_background_revalidation` on top.
@@ -246,8 +253,15 @@ pub fn init() {
 /// (offline), so a customer in the offline grace window is re-confirmed within
 /// the hour of the network coming back rather than after REVALIDATE_EVERY.
 const REVALIDATE_RETRY: u64 = 55 * 60;
-/// Cadence of the daemon's background check (cheap: one lock read per tick).
-const REVALIDATE_POLL: Duration = Duration::from_secs(3600);
+/// How often the daemon re-stats license.json. The modal and the `license` CLI
+/// both activate/deactivate by rewriting that file *from another process*,
+/// while the tray owns the menu — without this, the menu keeps claiming
+/// "Trial expired" after a successful activation until something else redraws
+/// it. One `stat` per tick.
+const DISK_POLL: Duration = Duration::from_secs(1);
+/// How often that same loop considers an online re-check (cheap: usually a lock
+/// read that says "not due").
+const REVALIDATE_EVERY_TICKS: u32 = 3600;
 
 /// A key is stored and its server verdict is older than REVALIDATE_EVERY (and
 /// we haven't just tried). Also true right after the v2 upgrade, where
@@ -271,19 +285,41 @@ pub fn revalidate_if_due() -> bool {
     true
 }
 
-/// Daemon only: keep the cached verdict fresh for the whole run — a check at
-/// startup, then hourly whenever one is due. Without this a daemon that simply
-/// stays up slides from Licensed to GraceOffline after 3 days and locks a paying
-/// customer after 14, while online the whole time (nothing re-validated between
-/// restarts). Each completed check refreshes the tray's license items.
-pub fn start_background_revalidation() {
+/// Daemon only: keep the world in sync with license.json for the whole run.
+///
+/// Two jobs, one thread because they share the same "did the verdict change?"
+/// follow-up:
+///  * **disk** — notice activations and deactivations performed by another
+///    process (the license modal, `whisper-push license activate`) and refresh
+///    the menu, every [`DISK_POLL`].
+///  * **server** — re-confirm the cached verdict when it is due. Without it a
+///    daemon that simply stays up slides from Licensed to GraceOffline after 3
+///    days and locks a paying customer after 14, while online the whole time.
+///
+/// The online check blocks for up to `HTTP_TIMEOUT`, which stalls the disk poll
+/// for that long at most once an hour — a delay nobody can perceive on a menu.
+pub fn start_background_sync() {
     std::thread::Builder::new()
-        .name("license-revalidate".into())
-        .spawn(|| loop {
-            if revalidate_if_due() {
-                crate::tray::post(crate::state::Event::LicenseChanged);
+        .name("license-sync".into())
+        .spawn(|| {
+            let mut seen = disk_revision();
+            let mut ticks = REVALIDATE_EVERY_TICKS; // check once at startup
+            loop {
+                if ticks >= REVALIDATE_EVERY_TICKS {
+                    ticks = 0;
+                    if revalidate_if_due() {
+                        seen = disk_revision(); // our own write, not someone else's
+                        crate::tray::post(crate::state::Event::LicenseChanged);
+                    }
+                }
+                let rev = disk_revision();
+                if rev != seen {
+                    seen = rev;
+                    crate::tray::post(crate::state::Event::LicenseChanged);
+                }
+                ticks += 1;
+                std::thread::sleep(DISK_POLL);
             }
-            std::thread::sleep(REVALIDATE_POLL);
         })
         .ok();
 }
@@ -672,6 +708,10 @@ pub fn status_json() -> String {
                 },
                 "email": s.customer_email,
                 "renews": renews,
+                // The user's own key, so they can copy it onto another device
+                // without digging through their purchase email. Local-only: it
+                // already sits in license.json next to this binary.
+                "key": s.license_key,
             })
         }
         LicenseStatus::GraceOffline { days_left } => {

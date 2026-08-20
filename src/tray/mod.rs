@@ -108,6 +108,29 @@ enum UserEvent {
     App(Event),
 }
 
+/// Top-of-menu call to action: sell when there's no licence, manage when there
+/// is. Both open the same window, so there is one way in either way.
+fn unlock_label(licensed: bool) -> &'static str {
+    if licensed {
+        "\u{2726} Manage License\u{2026}"
+    } else {
+        "\u{2726} Unlock Whisper Push\u{2026}"
+    }
+}
+
+/// How long "Set Custom Hotkey…" stays armed before giving up, so the menu
+/// never sits in "Press your shortcut now…" forever.
+const HOTKEY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Resting label of the custom-hotkey item: the binding when there is one (it
+/// then also carries the checkmark), otherwise the call to action.
+fn custom_hotkey_label(current: Option<String>) -> String {
+    match current {
+        Some(disp) => format!("Custom: {disp}"),
+        None => "Set Custom Hotkey\u{2026}".to_string(),
+    }
+}
+
 /// Suffix of the update-item text for "newer release, but no asset for this
 /// platform". `Event::UpdateStatus` carries only display text, so the
 /// `UpdateStatus` arm recognizes this exact suffix to arm
@@ -128,6 +151,10 @@ struct App {
     // Releases page to open on update-item click when a newer release has no
     // asset for this platform. Mutually exclusive with `pending_update`.
     pending_release_page: Option<String>,
+    // "Set Custom Hotkey…" is armed and waiting for a combo. The generation
+    // counter lets a timeout tell its own capture from a later one.
+    capturing: bool,
+    capture_gen: u64,
 }
 
 struct MenuItems {
@@ -151,6 +178,10 @@ struct MenuItems {
     hotkey_ids: Vec<(String, String, String)>,
     hotkey_items: Vec<(CheckMenuItem, String, String)>,
     hotkey_submenu: Submenu,
+    /// One item doing three jobs, so a custom binding is visible in the same
+    /// list as the presets: "Set Custom Hotkey…" when idle, "Press your shortcut
+    /// now…" while armed, and a *checked* "Custom: ⌘⇧D" once one is bound.
+    custom_hotkey_item: Option<CheckMenuItem>,
     custom_hotkey_id: String,
     input_ids: Vec<(String, String)>,
     input_device_items: Vec<(CheckMenuItem, String)>,
@@ -225,6 +256,28 @@ impl App {
             menu_items: None,
             pending_update: None,
             pending_release_page: None,
+            capturing: false,
+            capture_gen: 0,
+        }
+    }
+
+    /// Disarm capture and put the menu item back to its resting label (the
+    /// current custom binding, if any). The one exit from capture mode.
+    fn end_hotkey_capture(&mut self) {
+        crate::hotkey::cancel_capture();
+        self.capturing = false;
+        self.capture_gen += 1;
+        let cfg = self.config.lock_safe().clone();
+        let is_custom = !HOTKEY_PRESETS
+            .iter()
+            .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
+        if let Some(mi) = self.menu_items.as_ref() {
+            if let Some(it) = &mi.custom_hotkey_item {
+                it.set_text(custom_hotkey_label(is_custom.then(|| {
+                    format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
+                })));
+                it.set_checked(is_custom);
+            }
         }
     }
 
@@ -260,14 +313,27 @@ impl App {
         // exists on macOS. Offer it there; elsewhere the presets cover it and the
         // item would be a dead end (no HotkeyCaptured ever arrives) — so hide it.
         #[cfg(target_os = "macos")]
-        let custom_hotkey_id = {
+        let (custom_hotkey_item, custom_hotkey_id) = {
             let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
-            let custom_hotkey_item = MenuItem::new("Set Custom Hotkey\u{2026}", true, None);
-            let _ = hotkey_submenu.append(&custom_hotkey_item);
-            custom_hotkey_item.id().0.clone()
+            // A binding that matches no preset is a custom one: show it here,
+            // checked, so the menu always says what is actually bound.
+            let is_custom = !HOTKEY_PRESETS
+                .iter()
+                .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
+            let item = CheckMenuItem::new(
+                custom_hotkey_label(is_custom.then(|| {
+                    format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
+                })),
+                true,
+                is_custom,
+                None,
+            );
+            let _ = hotkey_submenu.append(&item);
+            let id = item.id().0.clone();
+            (Some(item), id)
         };
         #[cfg(not(target_os = "macos"))]
-        let custom_hotkey_id = String::new();
+        let (custom_hotkey_item, custom_hotkey_id) = (None, String::new());
 
         // Permissions (computed once here; reused for the Permissions section).
         let perms = crate::permissions::check_all();
@@ -486,11 +552,13 @@ impl App {
         // CTA that opens the PLANS directly — leading with purchase, not key entry.
         // Activating an existing key stays available inside that modal ("I already
         // have a license key") and in the License submenu. Retired once licensed.
+        // Always built, in BOTH states: the menu is created once, and a user who
+        // deactivates mid-session would otherwise be left with no way back to
+        // the paywall until the app restarts. `refresh_license_submenu` retitles
+        // the pair as the state moves.
         let st = crate::license::status();
         let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
-        let (trial_label, unlock_item, unlock_id) = if licensed {
-            (None, None, String::new())
-        } else {
+        let (trial_label, unlock_item, unlock_id) = {
             use crate::license::LicenseStatus as LS;
             let urgency = match st {
                 LS::Trial { days_left } => format!(
@@ -504,10 +572,10 @@ impl App {
                     if days_left == 1 { "" } else { "s" }
                 ),
                 LS::Disabled => "License inactive".into(),
-                LS::Licensed(_) => String::new(),
+                LS::Licensed(_) => "\u{2713} License active".into(),
             };
             let label = MenuItem::new(&urgency, false, None);
-            let unlock = MenuItem::new("\u{2726} Unlock Whisper Push\u{2026}", true, None);
+            let unlock = MenuItem::new(unlock_label(licensed), true, None);
             let uid = unlock.id().0.clone();
             let _ = menu.append(&label);
             let _ = menu.append(&unlock);
@@ -615,6 +683,7 @@ impl App {
             hotkey_ids,
             hotkey_items,
             hotkey_submenu,
+            custom_hotkey_item,
             custom_hotkey_id,
             input_ids,
             input_device_items,
@@ -729,8 +798,8 @@ impl App {
         });
         mi.license_activate_item.set_enabled(!licensed);
         mi.license_deactivate_item.set_enabled(licensed);
-        // The buy-forward top block (built only when unlicensed at startup):
-        // retire it once a key is active, restore it if the license goes away.
+        // The top block flips between selling and managing — never disappears,
+        // so deactivating mid-session leaves an obvious way back.
         if let Some(lbl) = &mi.trial_label {
             lbl.set_text(if licensed {
                 "\u{2713} License active".to_string()
@@ -739,12 +808,7 @@ impl App {
             });
         }
         if let Some(it) = &mi.unlock_item {
-            it.set_enabled(!licensed);
-            it.set_text(if licensed {
-                ""
-            } else {
-                "\u{2726} Unlock Whisper Push\u{2026}"
-            });
+            it.set_text(unlock_label(licensed));
         }
     }
 
@@ -755,11 +819,21 @@ impl App {
     /// refreshes the menu from the (possibly rewritten) license.json. Dev builds
     /// without the helper bundle fall back to a native key dialog.
     fn open_license_window(&self, start_activate: bool) {
+        // Hand foreground activation to the helper FIRST, from here: this runs on
+        // the main thread (it is called out of the event loop) and the yield is
+        // main-thread-only. Doing it inside the worker below silently did
+        // nothing, and the modal opened without keyboard focus.
+        crate::onboarding::yield_activation_to_wizard();
         let tx = self.state.tx.clone();
         std::thread::Builder::new()
             .name("license-window".into())
             .spawn(move || {
-                if crate::onboarding::run_license_window(start_activate) {
+                // No file watching here: `license::start_background_sync` polls
+                // license.json for the whole run, so an activation or
+                // deactivation done *inside* the modal retitles the menu while
+                // the window is still open — and the CLI path is covered too.
+                let opened = crate::onboarding::run_license_window(start_activate);
+                if opened {
                     let _ = tx.send(Event::LicenseChanged);
                 } else {
                     license_activate_dialog(tx);
@@ -1075,11 +1149,32 @@ impl App {
                         return;
                     }
                 }
-                if id == &mi.custom_hotkey_id {
+                if !mi.custom_hotkey_id.is_empty() && id == &mi.custom_hotkey_id {
+                    if self.capturing {
+                        self.end_hotkey_capture(); // clicked again = cancel
+                        return;
+                    }
                     crate::hotkey::start_capture(self.state.tx.clone());
+                    self.capturing = true;
+                    self.capture_gen += 1;
+                    // The prompt goes in the MENU: the notification below rides
+                    // on the deprecated NSUserNotification path, which recent
+                    // macOS often delivers invisibly — the item looked dead.
+                    if let Some(it) = &mi.custom_hotkey_item {
+                        it.set_text(
+                            "\u{2328} Press your shortcut now\u{2026} (click to cancel)",
+                        );
+                        it.set_checked(false);
+                    }
                     crate::notify::app(
                         "Press your shortcut now: tap a modifier (e.g. Right \u{2318}) to hold, or a combo like \u{2318}\u{21e7}D to toggle.",
                     );
+                    // Don't stay armed forever if they walk away.
+                    let (tx, generation) = (self.state.tx.clone(), self.capture_gen);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(HOTKEY_CAPTURE_TIMEOUT);
+                        let _ = tx.send(Event::HotkeyCaptureTimeout(generation));
+                    });
                     return;
                 }
                 for (item_id, name) in &mi.input_ids {
@@ -1177,14 +1272,34 @@ impl App {
                     c.hotkey_mode = mode.clone();
                     let _ = c.save();
                 }
+                self.capturing = false;
+                self.capture_gen += 1; // any pending timeout is now stale
                 // Tap already rebound the live listener; just sync the UI.
+                let mut matched_preset = false;
                 for (item, hk, m) in &mi.hotkey_items {
-                    item.set_checked(hk == &hotkey && m == &mode);
+                    let on = hk == &hotkey && m == &mode;
+                    matched_preset |= on;
+                    item.set_checked(on);
                 }
                 let disp = format_hotkey_display(&hotkey, &mode);
+                // A combo that is none of the presets now appears in the list as
+                // a checked "Custom: …" entry, instead of vanishing into the
+                // submenu title.
+                if let Some(it) = &mi.custom_hotkey_item {
+                    it.set_text(custom_hotkey_label((!matched_preset).then(|| disp.clone())));
+                    it.set_checked(!matched_preset);
+                }
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
                 crate::notify::app(&format!("Custom hotkey set: {disp}"));
+            }
+
+            Event::HotkeyCaptureTimeout(generation) => {
+                // Stale (a newer capture started, or one already completed).
+                if generation == self.capture_gen && self.capturing {
+                    self.end_hotkey_capture();
+                    crate::notify::app("No shortcut captured \u{2014} nothing changed.");
+                }
             }
 
             Event::PromptPermissions => {

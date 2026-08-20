@@ -989,7 +989,7 @@ mod app {
         crate::dictionary::init(cfg.dictionary_enabled);
         // Arm licensing (load license.json, anchor trial, keep the verdict fresh).
         crate::license::init();
-        crate::license::start_background_revalidation();
+        crate::license::start_background_sync();
         // Arm the acoustic dictionary (load fingerprints).
         crate::acoustic::init();
         // Optional online enrichment (opt-in, default off).

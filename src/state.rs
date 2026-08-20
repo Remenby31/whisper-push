@@ -76,6 +76,10 @@ pub enum Event {
     /// was detected — retitle the Input submenu so it shows what's actually
     /// recording (checkmarks stay on the saved config).
     InputSwitched(String),
+    /// The hotkey capture armed by "Set Custom Hotkey…" ran out of time. The
+    /// u64 is a generation counter, so a timeout belonging to an earlier,
+    /// already-finished capture can't cancel the one running now.
+    HotkeyCaptureTimeout(u64),
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
     /// A new version is available (version, download_url)

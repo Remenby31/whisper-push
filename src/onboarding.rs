@@ -105,7 +105,7 @@ pub const WIZARD_BUNDLE_ID: &str = "com.whisper-push.onboarding";
 /// dead until the user clicks into it). Yielding from our side is the sanctioned
 /// fix; it must run on the main thread, so callers off it just skip (best effort).
 #[cfg(target_os = "macos")]
-fn yield_activation_to_wizard() {
+pub fn yield_activation_to_wizard() {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::NSString;
@@ -116,7 +116,10 @@ fn yield_activation_to_wizard() {
                 WIZARD_BUNDLE_ID,
             ));
         }
-        None => info!("license window: not on the main thread, skipping activation yield"),
+        None => tracing::warn!(
+            "license window: activation yield called off the main thread — the \
+             modal will open without keyboard focus"
+        ),
     }
 }
 
@@ -143,7 +146,9 @@ pub fn run_license_window(start_activate: bool) -> bool {
     }
     args.push("--daemon-path".into());
     args.push(daemon.to_string_lossy().into_owned());
-    yield_activation_to_wizard();
+    // NB: the activation yield must already have happened — it only works on the
+    // main thread and this function is called from a worker (see
+    // `tray::App::open_license_window`, which yields before spawning).
     // Launch the wizard's .app through LaunchServices (`open`) instead of exec'ing
     // the binary directly. A GUI process *spawned by our menu-bar accessory* is
     // denied foreground activation by macOS and opens behind everything — the
@@ -193,6 +198,9 @@ pub fn run_license_window(start_activate: bool) -> bool {
 pub fn run_license_window(_start_activate: bool) -> bool {
     false
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn yield_activation_to_wizard() {}
 
 /// Locate the wizard binary in its sub-bundle:
 ///   <.app>/Contents/Library/Helpers/Onboarding.app/Contents/MacOS/Onboarding

@@ -37,3 +37,9 @@ pub fn start_capture(tx: Sender<Event>) {
     #[cfg(target_os = "macos")]
     macos::start_capture(tx);
 }
+
+/// Disarm capture — the user cancelled, or nothing was pressed in time.
+pub fn cancel_capture() {
+    #[cfg(target_os = "macos")]
+    macos::cancel_capture();
+}

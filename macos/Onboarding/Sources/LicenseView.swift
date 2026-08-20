@@ -43,6 +43,7 @@ struct LicenseView: View {
     /// snapshot taken at launch is the truth.
     @State private var refreshed: LicenseSnapshot??
     @FocusState private var keyFocused: Bool
+    @State private var revealKey = false
 
     /// The screen to show: the user's pick, else what the license implies.
     private var mode: Mode {
@@ -226,16 +227,9 @@ struct LicenseView: View {
                     // One-click paste: works even when keyboard focus is flaky
                     // (the modal is spawned by a background agent and macOS may
                     // refuse to make it the active app).
-                    Button { if let s = Self.clipboardKey(strict: false) { key = s } } label: {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.brandGreen)
-                            .frame(width: 28, height: 24)
-                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white))
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.brandGreen.opacity(0.2), lineWidth: 1))
+                    IconButton(glyph: .clipboardPaste, help: "Paste from clipboard") {
+                        if let s = Self.clipboardKey(strict: false) { key = s }
                     }
-                    .buttonStyle(.plain)
-                    .help("Paste from clipboard")
                 }
                 .frame(maxWidth: 340)
                 .padding(.top, 14)
@@ -280,13 +274,31 @@ struct LicenseView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color.brandGreen.opacity(0.65))
                 }
-                Text("Up to 5 devices · manage billing from your purchase email")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.brandGreen.opacity(0.5))
             }
             .multilineTextAlignment(.center)
             .padding(.horizontal, 36)
-            .padding(.top, 14)
+            .padding(.top, 12)
+
+            // The key itself, so activating a second device doesn't mean digging
+            // through the purchase email. Masked by default — it's the one thing
+            // on this screen worth hiding from a screen-share or a screenshot;
+            // click it to reveal, or copy it without ever showing it.
+            if let k = info?.key, !k.isEmpty {
+                HStack(spacing: 2) {
+                    Text(revealKey ? k : Self.masked(k))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Color.brandGreen.opacity(0.75))
+                        .textSelection(.enabled)
+                        .onTapGesture { revealKey.toggle() }
+                        .help(revealKey ? "Click to hide" : "Click to reveal")
+                    IconButton(glyph: .copy, size: 14, help: "Copy license key") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(k, forType: .string)
+                        message = "License key copied."
+                    }
+                }
+                .padding(.top, 12)
+            }
 
             if let message {
                 Text(message).font(.system(size: 12, weight: .medium))
@@ -294,16 +306,46 @@ struct LicenseView: View {
                     .padding(.horizontal, 36).padding(.top, 14)
             }
 
+            // Self-serve billing: Lemon Squeezy's customer portal covers invoices,
+            // payment method and cancellation, and lists the license keys. It
+            // signs the customer in with an emailed magic link, so all they need
+            // is the address shown above — not the original purchase email.
+            Button { openBillingPortal() } label: {
+                Text(info?.kind == "subscription"
+                     ? "Manage subscription & invoices \u{2197}"
+                     : "Invoices & purchase details \u{2197}")
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(Color.brandGreen)
+            .padding(.top, 18)
+            .help("Opens \(Self.billingPortal) in your browser")
+
             Button(action: deactivate) { Text(busy ? "Deactivating…" : "Deactivate this device") }
-                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.brandGreen.opacity(0.8))
+                .buttonStyle(.plain).font(.system(size: 12))
+                .foregroundStyle(Color.brandGreen.opacity(0.55))
                 .disabled(busy)
-                .padding(.top, 22)
+                .padding(.top, 10)
                 .help("Frees one of your device slots; you can re-activate anytime.")
 
             Spacer()
             doneButton.padding(.bottom, 18)
         }
+    }
+
+    /// Lemon Squeezy's hosted customer portal for this store.
+    static let billingPortal = "https://whisperpush.lemonsqueezy.com/billing"
+
+    private func openBillingPortal() {
+        if let url = URL(string: Self.billingPortal) { NSWorkspace.shared.open(url) }
+    }
+
+    /// `C281261E-••••-••••-••••-••••••••C7C4` — enough to recognise which key it
+    /// is, not enough to use it.
+    static func masked(_ key: String) -> String {
+        guard key.count > 12 else { return String(repeating: "\u{2022}", count: key.count) }
+        let head = key.prefix(8), tail = key.suffix(4)
+        return "\(head)-\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}-\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\(tail)"
     }
 
     private var planLabel: String {

@@ -131,7 +131,8 @@ class OnboardingState: ObservableObject {
         return LicenseSnapshot(status: status,
                                kind: obj["kind"] as? String ?? "",
                                email: obj["email"] as? String,
-                               renews: obj["renews"] as? String)
+                               renews: obj["renews"] as? String,
+                               key: obj["key"] as? String)
     }
 
     static func totalRAMGB() -> Double {
@@ -239,6 +240,7 @@ struct LicenseSnapshot: Equatable {
     var kind: String      // lifetime | subscription (empty unless licensed)
     var email: String?    // purchase email, for "Licensed to …"
     var renews: String?   // YYYY-MM-DD, subscriptions only
+    var key: String?      // the license key itself, to copy onto another device
 
     var isLicensed: Bool { status == "licensed" }
 }
