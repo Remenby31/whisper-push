@@ -433,14 +433,16 @@ impl App {
         let template_reload_id = template_reload_item.id().0.clone();
 
         // History submenu (recent dictations). Clicking an entry copies it.
+        // Entries come first (inserted right after the header on refresh);
+        // the file/clear actions sit at the bottom.
         let history_submenu = Submenu::new("History", true);
-        let history_open_item = MenuItem::new("Open history.txt\u{2026}", true, None);
-        let history_clear_item = MenuItem::new("Clear History", true, None);
-        let _ = history_submenu.append(&history_open_item);
-        let _ = history_submenu.append(&history_clear_item);
-        let _ = history_submenu.append(&PredefinedMenuItem::separator());
         let _ = history_submenu.append(&MenuItem::new("Recent (click to copy):", false, None));
         let history_entry_items = populate_history_entries(&history_submenu);
+        let history_open_item = MenuItem::new("Open history.txt\u{2026}", true, None);
+        let history_clear_item = MenuItem::new("Clear History", true, None);
+        let _ = history_submenu.append(&PredefinedMenuItem::separator());
+        let _ = history_submenu.append(&history_open_item);
+        let _ = history_submenu.append(&history_clear_item);
         let history_open_id = history_open_item.id().0.clone();
         let history_clear_id = history_clear_item.id().0.clone();
 
@@ -511,14 +513,15 @@ impl App {
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
-        // Feature dropdowns (kept compact).
+        // Daily-use group first, then configuration dropdowns.
+        let _ = menu.append(&history_submenu);
+        let _ = menu.append(&dict_submenu);
+        let _ = menu.append(&templates_submenu);
+        let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&hotkey_submenu);
         let _ = menu.append(&backend_submenu);
         let _ = menu.append(&input_submenu);
         let _ = menu.append(&output_submenu);
-        let _ = menu.append(&dict_submenu);
-        let _ = menu.append(&templates_submenu);
-        let _ = menu.append(&history_submenu);
         let _ = menu.append(&license_submenu);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
@@ -1967,6 +1970,10 @@ fn open_path(path: &std::path::Path) {
 fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     const MAX: usize = 12;
     const PREVIEW: usize = 48;
+    // Entries live between the header (index 0) and the trailing separator +
+    // actions, so they're inserted right after the header — refresh removes the
+    // old entries and re-inserts here without touching the stable items.
+    let mut pos = 1;
     let recent = crate::history::recent();
     let mut items = Vec::new();
     if recent.is_empty() {
@@ -1975,7 +1982,7 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
             false,
             None,
         );
-        let _ = submenu.append(&ph);
+        let _ = submenu.insert(&ph, pos);
         items.push((ph, String::new()));
         return items;
     }
@@ -1988,7 +1995,8 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
             );
         }
         let it = MenuItem::new(&format!("  {preview}"), true, None);
-        let _ = submenu.append(&it);
+        let _ = submenu.insert(&it, pos);
+        pos += 1;
         items.push((it, text.clone()));
     }
     items
