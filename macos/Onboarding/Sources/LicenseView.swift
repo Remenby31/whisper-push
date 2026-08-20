@@ -28,21 +28,34 @@ struct LicenseView: View {
     private enum Plan { case monthly, lifetime }
     private enum Mode: Equatable { case choose, checkout(String), activate, licensed }
 
-    /// What the daemon reports about the current license (`license status`).
-    struct LicenseInfo: Equatable {
-        var kind: String      // "lifetime" | "subscription"
-        var email: String?
-        var renews: String?   // YYYY-MM-DD for subscriptions
-    }
-
-    @State private var mode: Mode = .choose
+    /// User-driven screen. `nil` = "whatever the launch state implies" (see
+    /// `mode`), so the first frame is already the right screen: resolving it
+    /// asynchronously after appearing made the paywall flash before the licensed
+    /// screen, and that view swap could fire the incoming button's action by
+    /// itself — the modal closed a few seconds after opening.
+    @State private var pickedMode: Mode?
     @State private var plan: Plan = .monthly
     @State private var key = ""
     @State private var busy = false
     @State private var message: String?
     @State private var activated = false
-    @State private var info: LicenseInfo?
+    /// Set only after an activation/deactivation in this window; otherwise the
+    /// snapshot taken at launch is the truth.
+    @State private var refreshed: LicenseSnapshot??
     @FocusState private var keyFocused: Bool
+
+    /// The screen to show: the user's pick, else what the license implies.
+    private var mode: Mode {
+        if let pickedMode { return pickedMode }
+        if state.startActivate { return .activate }
+        return info?.isLicensed == true ? .licensed : .choose
+    }
+
+    /// Current license: the post-action refresh if one happened, else launch.
+    private var info: LicenseSnapshot? {
+        if case let .some(v) = refreshed { return v }
+        return state.license
+    }
 
     var body: some View {
         Group {
@@ -66,16 +79,10 @@ struct LicenseView: View {
             if newMode == .activate { prefillFromClipboard() }
         }
         .onDisappear { state.expandedForCheckout = false }
-        .onAppear {
-            // Menu → "Enter License Key…" opens straight on the key screen.
-            if state.startActivate {
-                mode = .activate
-                prefillFromClipboard()
-            }
-            // An already-licensed user must never land on the paywall: ask the
-            // daemon and switch to the manage screen (cheap local read).
-            refreshLicenseInfo()
-        }
+        // No license lookup here: `state.license` was read before this window
+        // existed, so `mode` is already correct on the first frame — a licensed
+        // user never sees the paywall flash.
+        .onAppear { if mode == .activate { prefillFromClipboard() } }
     }
 
     // MARK: Paywall
@@ -101,14 +108,14 @@ struct LicenseView: View {
             .frame(maxWidth: 380)
             .padding(.top, 18)
 
-            Button { mode = .checkout(plan == .monthly ? checkoutMonthly : checkoutLifetime) } label: {
+            Button { pickedMode = .checkout(plan == .monthly ? checkoutMonthly : checkoutLifetime) } label: {
                 Text("Continue")
             }
             .buttonStyle(BrandPrimaryButtonStyle(enabled: true))
             .padding(.horizontal, 70)
             .padding(.top, 18)
 
-            Button("I already have a license key") { message = nil; mode = .activate }
+            Button("I already have a license key") { message = nil; pickedMode = .activate }
                 .buttonStyle(.plain)
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.brandGreen.opacity(0.8))
@@ -160,7 +167,7 @@ struct LicenseView: View {
     private func checkoutView(_ url: String) -> some View {
         VStack(spacing: 0) {
             HStack {
-                Button { mode = .choose } label: { Label("Back", systemImage: "chevron.left").labelStyle(.titleAndIcon) }
+                Button { pickedMode = .choose } label: { Label("Back", systemImage: "chevron.left").labelStyle(.titleAndIcon) }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Color.brandGreen)
                 Spacer()
                 HStack(spacing: 4) {
@@ -177,18 +184,18 @@ struct LicenseView: View {
             CheckoutView(url: URL(string: "\(url)?\(checkoutOptions)")!) { foundKey, _, success in
                 if let foundKey, !busy, !activated {
                     // Key captured → activate automatically, no copy/paste.
-                    mode = .activate
+                    pickedMode = .activate
                     runActivation(key: foundKey)
                 } else if success, !activated {
                     message = "Payment received — paste the license key from your email."
-                    mode = .activate
+                    pickedMode = .activate
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.brandGreen.opacity(0.12), lineWidth: 1))
             .padding(.horizontal, 14).padding(.bottom, 10)
 
-            Button("Already paid? Enter your key →") { mode = .activate }
+            Button("Already paid? Enter your key →") { pickedMode = .activate }
                 .buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.brandGreen.opacity(0.75))
                 .padding(.bottom, 12)
@@ -246,7 +253,7 @@ struct LicenseView: View {
                 Button(action: activate) { Text(busy ? "Activating…" : "Activate") }
                     .buttonStyle(BrandPrimaryButtonStyle(enabled: canActivate)).disabled(!canActivate)
                     .padding(.horizontal, 80).padding(.top, 16)
-                Button("Buy a license") { message = nil; mode = .choose }
+                Button("Buy a license") { message = nil; pickedMode = .choose }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.brandGreen.opacity(0.8)).padding(.top, 10)
             }
@@ -372,7 +379,7 @@ struct LicenseView: View {
                 busy = false; activated = ok
                 message = ok ? "Your license is active — thank you!"
                              : (err ?? "Couldn't activate — check the key above.")
-                if ok { refreshLicenseInfo(switchMode: false) }
+                if ok { refreshLicenseInfo() }
             }
         }
     }
@@ -385,9 +392,9 @@ struct LicenseView: View {
             DispatchQueue.main.async {
                 busy = false
                 if ok {
-                    info = nil
+                    refreshed = .some(nil) // no license any more
                     message = "This device has been deactivated."
-                    mode = .choose
+                    pickedMode = .choose
                 } else {
                     message = "Couldn't reach the server — check your connection and retry."
                 }
@@ -395,23 +402,20 @@ struct LicenseView: View {
         }
     }
 
-    /// Ask the daemon for the license state; a licensed user gets the manage
-    /// screen instead of the paywall (unless they explicitly asked for the key
-    /// screen, or we're mid-activation).
-    private func refreshLicenseInfo(switchMode: Bool = true) {
+    /// Re-read the license after an action of ours changed it (activation).
+    /// Never called on appear — the launch snapshot covers that, and swapping
+    /// the view under the user is what made the window close itself.
+    private func refreshLicenseInfo() {
         guard let path = daemonBinary else { return }
         DispatchQueue.global().async {
             let obj = Self.runDaemonJSON(path: path, ["license", "status"])
-            let licensed = (obj?["status"] as? String) == "licensed"
-            let parsed = licensed ? LicenseInfo(kind: (obj?["kind"] as? String) ?? "",
-                                                email: obj?["email"] as? String,
-                                                renews: obj?["renews"] as? String) : nil
-            DispatchQueue.main.async {
-                info = parsed
-                if switchMode, licensed, !state.startActivate, mode == .choose {
-                    mode = .licensed
-                }
+            let snap = (obj?["status"] as? String).map { st in
+                LicenseSnapshot(status: st,
+                                kind: obj?["kind"] as? String ?? "",
+                                email: obj?["email"] as? String,
+                                renews: obj?["renews"] as? String)
             }
+            DispatchQueue.main.async { refreshed = .some(snap) }
         }
     }
 

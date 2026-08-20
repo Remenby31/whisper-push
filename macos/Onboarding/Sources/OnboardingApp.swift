@@ -14,7 +14,7 @@ import AppKit
 ///    and nothing appeared — "Unlock…" / "I already have a license key" looked
 ///    dead until the orphan was killed. Last window closed ⇒ we quit.
 @MainActor
-final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
+final class OnboardingAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state = OnboardingState()
     private var window: NSWindow?
 
@@ -46,11 +46,18 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The wizard is a one-window app: closing it (red button, ⌘W) means
-    /// "I'm done" — never a windowless process lingering in the Dock that
-    /// swallows the next launch.
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+    /// The wizard is a one-window app: closing it (red button, ⌘W) means "I'm
+    /// done" — never a windowless process lingering in the Dock that swallows
+    /// the next launch (the daemon's `open -W` would just poke it and nothing
+    /// would appear).
+    ///
+    /// This is deliberately bound to OUR window rather than
+    /// `applicationShouldTerminateAfterLastWindowClosed`: that delegate answers
+    /// for *any* window, and the SwiftUI scene machinery opens and closes one of
+    /// its own during launch — which quit the app ~2 s after it appeared.
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        NSApplication.shared.terminate(nil)
     }
 
     /// Dock click / second `open` while running: show the window we have.
@@ -77,6 +84,7 @@ final class OnboardingAppDelegate: NSObject, NSApplicationDelegate {
         w.isMovableByWindowBackground = true
         w.isReleasedWhenClosed = false
         w.contentView = hosting
+        w.delegate = self // see windowWillClose: closing this window ends the app
         if isPaymentPopup {
             // Elevate to a floating popup so it stays on top even after the
             // user clicks back into another app, and follow them onto whatever

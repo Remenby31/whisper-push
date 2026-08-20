@@ -222,9 +222,27 @@ Enhancements layered on top of the existing modules — no new architectural pie
   up slid Licensed → GraceOffline (3 d) → Locked (14 d) while online. CLI `license
   status` revalidates *synchronously* when due (never a pending check left behind — an
   orphaned one rewrote license.json with `last_validated_ok=0` ⇒ "locked").
+- **Never quarantine an untagged license.json.** `verify_mac` returning
+  `s.version < STATE_VERSION` for untagged files looked tighter and silently ate
+  a paying customer's key: a **pre-HMAC** binary (an older daemon still running
+  through an in-app update) rewrites the file as `version: 2` with the `mac`
+  field dropped — its struct has no such field. The next start then quarantined
+  it to `license.json.bad` and reset to trial. Untagged ⇒ accepted; safety comes
+  from `load_anchored` forcing that key back through Lemon Squeezy. Reproduced
+  live on 2026-08-21 (Marceau's own lifetime key was wiped by it).
+- **The modal reads the license synchronously before the window exists**
+  (`OnboardingState.license`, one ~20 ms `license status` subprocess) so
+  `LicenseView` renders its final screen on the first frame. Resolving it
+  asynchronously in `.onAppear` made a licensed user watch the paywall flash
+  before the licensed screen.
 - **Testing the helper locally:** an **ad-hoc-signed** copy of Onboarding.app with the
   real bundle id shows no window on macOS 26 — test the bare binary or an unsigned
-  bundle; the Dev-ID-signed release is unaffected. GUI tests steal focus: keep them short.
+  bundle; the Dev-ID-signed release is unaffected. GUI tests steal focus and pop
+  windows on the user's screen: launch ONE at a time, kill it right after, and
+  never loop — a window closing "by itself" mid-test is usually the human
+  clicking it away, not a bug (that mistake cost an hour of chasing a phantom).
+  `pkill` without `-9` may not have finished before the next query: a stale
+  instance answers System Events and looks like the new one on the wrong screen.
 
 ## Adaptive dictation (learned word correction)
 

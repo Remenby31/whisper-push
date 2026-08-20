@@ -880,7 +880,19 @@ fn compute_mac(s: &LicenseState) -> String {
 fn verify_mac(s: &LicenseState) -> bool {
     match &s.mac {
         Some(tag) => *tag == compute_mac(s),
-        None => s.version < STATE_VERSION,
+        // Untagged ⇒ accepted, whatever `version` says. Requiring
+        // `version < STATE_VERSION` here ("once you're at v2 you must carry a
+        // tag") looks tighter and is actually a licence-eating bug: a *pre-HMAC*
+        // binary writing this file legitimately produces v2-without-tag — it
+        // deserializes a v2 file into a struct that has no `mac` field, then
+        // saves it back with `version: 2` and the tag silently dropped. That is
+        // exactly what an in-app update does while the old daemon outlives the
+        // new bundle, and the next start would quarantine a paying customer's
+        // key. The check bought no security either: a forger drops the tag AND
+        // writes `version: 1` just as easily. What actually protects us is that
+        // an untagged file is never trusted on its own — `load_anchored` sends
+        // its key back through Lemon Squeezy before it entitles anything.
+        None => true,
     }
 }
 
@@ -1187,14 +1199,28 @@ mod mac_tests {
     }
 
     #[test]
-    fn requires_a_tag_once_at_v2() {
+    fn untagged_v2_file_is_grandfathered_not_quarantined() {
+        // Regression: a pre-HMAC binary (an older daemon still running through
+        // an in-app update) rewrites the file with `version: 2` and no `mac`,
+        // because its struct has no such field. Rejecting that shape quarantined
+        // the file and wiped a paying customer's key on the next start. It must
+        // be accepted — `load_anchored` still forces the key back through the
+        // server, so nothing is entitled on the file's word alone.
         let untagged_v2 = LicenseState {
             version: STATE_VERSION,
             license_key: Some("ABC-123".into()),
             mac: None,
             ..Default::default()
         };
-        assert!(!verify_mac(&untagged_v2));
+        assert!(verify_mac(&untagged_v2));
+
+        // …and the cached verdict it carries is neutered exactly like the v1 case.
+        let mut neutered = untagged_v2.clone();
+        neutered.key_status = Some(KeyStatus::Active);
+        neutered.product_kind = Some(ProductKind::Lifetime);
+        neutered.last_validated_ok = 0;
+        neutered.last_validation_attempt = 0;
+        assert_eq!(evaluate(&neutered, 2_000_100), LicenseStatus::Locked);
     }
 
     #[test]
