@@ -107,6 +107,12 @@ enum UserEvent {
     App(Event),
 }
 
+/// Suffix of the update-item text for "newer release, but no asset for this
+/// platform". `Event::UpdateStatus` carries only display text, so the
+/// `UpdateStatus` arm recognizes this exact suffix to arm
+/// `pending_release_page` (click then opens the releases page).
+const OPEN_RELEASES_HINT: &str = "open download page";
+
 /// The application struct that implements winit's ApplicationHandler.
 struct App {
     state: AppState,
@@ -118,6 +124,9 @@ struct App {
     menu_items: Option<MenuItems>,
     // Pending update info (version, download_url)
     pending_update: Option<(String, String)>,
+    // Releases page to open on update-item click when a newer release has no
+    // asset for this platform. Mutually exclusive with `pending_update`.
+    pending_release_page: Option<String>,
 }
 
 struct MenuItems {
@@ -207,6 +216,7 @@ impl App {
             pipeline_tx: None,
             menu_items: None,
             pending_update: None,
+            pending_release_page: None,
         }
     }
 
@@ -820,7 +830,11 @@ impl App {
                     return;
                 }
                 if id == &mi.update_id {
-                    if let Some((version, url)) = self.pending_update.clone() {
+                    if let Some(page) = self.pending_release_page.take() {
+                        open_path(std::path::Path::new(&page));
+                        // UpdateFailed("") is the one reset path for the item.
+                        let _ = self.state.tx.send(Event::UpdateFailed(String::new()));
+                    } else if let Some((version, url)) = self.pending_update.clone() {
                         mi.update_item
                             .set_text(&format!("Downloading v{version}\u{2026}"));
                         mi.update_item.set_enabled(false);
@@ -842,18 +856,41 @@ impl App {
                         let tx = self.state.tx.clone();
                         std::thread::Builder::new()
                             .name("update-manual-check".into())
-                            .spawn(move || match crate::updater::check_for_update() {
-                                Ok(Some((version, url))) => {
-                                    let _ = tx.send(Event::UpdateAvailable(version, url));
-                                }
-                                Ok(None) => {
-                                    crate::notify::app("You\u{2019}re on the latest version.");
-                                    let _ = tx.send(Event::UpdateFailed(String::new()));
-                                }
-                                Err(e) => {
-                                    tracing::error!("Update check failed: {e}");
-                                    crate::notify::app(&format!("Update check failed: {e}"));
-                                    let _ = tx.send(Event::UpdateFailed(e.to_string()));
+                            .spawn(move || {
+                                use crate::updater::UpdateCheck;
+                                match crate::updater::check_for_update() {
+                                    Ok(UpdateCheck::Available { version, url }) => {
+                                        let _ = tx.send(Event::UpdateAvailable(version, url));
+                                    }
+                                    Ok(UpdateCheck::UpToDate) => {
+                                        let v = env!("CARGO_PKG_VERSION");
+                                        crate::notify::app(&format!(
+                                            "You are on the latest version (v{v})."
+                                        ));
+                                        // Show the result in the menu too — the
+                                        // notification can be silently invisible —
+                                        // then reset the item after a beat.
+                                        let _ = tx.send(Event::UpdateStatus(format!(
+                                            "\u{2713} Up to date (v{v})"
+                                        )));
+                                        std::thread::sleep(std::time::Duration::from_secs(8));
+                                        let _ = tx.send(Event::UpdateFailed(String::new()));
+                                    }
+                                    Ok(UpdateCheck::NoAsset { version }) => {
+                                        crate::notify::app(&format!(
+                                            "v{version} is out, but the update package for \
+                                             this platform wasn't found in the release. Use \
+                                             the menu to open the download page."
+                                        ));
+                                        let _ = tx.send(Event::UpdateStatus(format!(
+                                            "\u{2b06} v{version} available \u{2014} {OPEN_RELEASES_HINT}"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Update check failed: {e}");
+                                        crate::notify::app(&format!("Update check failed: {e}"));
+                                        let _ = tx.send(Event::UpdateFailed(e.to_string()));
+                                    }
                                 }
                             })
                             .ok();
@@ -1187,6 +1224,9 @@ impl App {
                     .set_text(&format!("\u{2b06} Update to v{version}"));
                 mi.update_item.set_enabled(true);
                 self.pending_update = Some((version.clone(), url.clone()));
+                // An installable update supersedes any "open the releases page"
+                // state — the two click behaviours must never both be armed.
+                self.pending_release_page = None;
                 if self.config.lock_safe().notifications {
                     crate::notify::app(&format!(
                         "Version {version} available! Click the menu to update."
@@ -1195,9 +1235,26 @@ impl App {
                 info!("Update available: v{version}");
             }
 
+            Event::UpdateStatus(ref text) => {
+                // Reliable, in-menu feedback for a manual check — the toast route
+                // (deprecated NSUserNotification) can be delivered invisibly.
+                mi.update_item.set_text(text);
+                mi.update_item.set_enabled(true);
+                if text.ends_with(OPEN_RELEASES_HINT) {
+                    // "Newer release, no asset for this platform" → clicking the
+                    // item opens the releases page instead of downloading.
+                    self.pending_release_page = Some(crate::updater::releases_page());
+                    self.pending_update = None;
+                } else {
+                    self.pending_release_page = None;
+                }
+            }
+
             Event::UpdateFailed(ref msg) => {
                 mi.update_item.set_text("Check for Updates\u{2026}");
                 mi.update_item.set_enabled(true);
+                // The one reset path for the item — clear both click behaviours.
+                self.pending_release_page = None;
                 if !msg.is_empty() {
                     warn!("Update failed: {msg}");
                 }

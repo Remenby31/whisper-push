@@ -67,6 +67,10 @@ pub enum Event {
     LoadModel(String),
     /// A new version is available (version, download_url)
     UpdateAvailable(String, String),
+    /// Show a manual-check result as the update menu item's text — the menu is
+    /// reliable feedback where notifications (deprecated NSUserNotification)
+    /// can be silently invisible.
+    UpdateStatus(String),
     /// Update download/install failed (error message)
     UpdateFailed(String),
     /// Request quit

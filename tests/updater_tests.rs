@@ -2,25 +2,35 @@
 
 // ── Parse a realistic GitHub API response ──────────────────────
 
+#[cfg(target_os = "macos")]
 #[test]
 fn test_parse_real_github_api_structure() {
+    use whisper_push::updater::UpdateCheck;
     let json = include_str!("fixtures/github_release.json");
-    let result = whisper_push::updater::parse_release_json(json).unwrap();
-    // v99.0.0 is always newer than the current version
-    let (version, url) = result.expect("should find an update");
-    assert_eq!(version, "99.0.0");
-    assert!(url.contains("Whisper-Push-macOS-arm64.zip"));
+    // v99.0.0 is always newer than the current version, and the fixture ships the
+    // macOS asset — so on macOS this resolves to an installable update.
+    match whisper_push::updater::parse_release_json(json).unwrap() {
+        UpdateCheck::Available { version, url } => {
+            assert_eq!(version, "99.0.0");
+            assert!(url.contains("Whisper-Push-macOS-arm64.zip"));
+        }
+        other => panic!("expected Available, got {other:?}"),
+    }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn test_parse_release_finds_correct_platform_asset() {
+    use whisper_push::updater::UpdateCheck;
     let json = include_str!("fixtures/github_release.json");
-    let (_, url) = whisper_push::updater::parse_release_json(json)
-        .unwrap()
-        .unwrap();
-    // On macOS, should pick the ZIP not the DMG
-    assert!(url.ends_with(".zip"), "expected ZIP URL, got: {url}");
-    assert!(!url.ends_with(".dmg"));
+    match whisper_push::updater::parse_release_json(json).unwrap() {
+        UpdateCheck::Available { url, .. } => {
+            // On macOS, should pick the ZIP not the DMG
+            assert!(url.ends_with(".zip"), "expected ZIP URL, got: {url}");
+            assert!(!url.ends_with(".dmg"));
+        }
+        other => panic!("expected Available, got {other:?}"),
+    }
 }
 
 // ── Version comparison edge cases ──────────────────────────────

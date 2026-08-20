@@ -167,8 +167,10 @@ fn test_version_comparison_v_prefix() {
 
 // ── Updater: parse release JSON ────────────────────────────────
 
+#[cfg(target_os = "macos")]
 #[test]
 fn test_parse_release_update_available() {
+    use whisper_push::updater::UpdateCheck;
     let json = r#"{
         "tag_name": "v99.0.0",
         "assets": [{
@@ -176,23 +178,25 @@ fn test_parse_release_update_available() {
             "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/Whisper-Push-macOS-arm64.zip"
         }]
     }"#;
-    let result = whisper_push::updater::parse_release_json(json)
-        .unwrap()
-        .unwrap();
-    assert_eq!(result.0, "99.0.0");
-    assert!(result.1.contains("macOS-arm64.zip"));
+    match whisper_push::updater::parse_release_json(json).unwrap() {
+        UpdateCheck::Available { version, url } => {
+            assert_eq!(version, "99.0.0");
+            assert!(url.contains("macOS-arm64.zip"));
+        }
+        other => panic!("expected Available, got {other:?}"),
+    }
 }
 
 #[test]
 fn test_parse_release_no_update() {
+    use whisper_push::updater::UpdateCheck;
     let json = format!(
         r#"{{ "tag_name": "v{}", "assets": [] }}"#,
         env!("CARGO_PKG_VERSION")
     );
-    assert!(
-        whisper_push::updater::parse_release_json(&json)
-            .unwrap()
-            .is_none()
+    assert_eq!(
+        whisper_push::updater::parse_release_json(&json).unwrap(),
+        UpdateCheck::UpToDate
     );
 }
 
