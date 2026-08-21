@@ -266,10 +266,11 @@ struct MenuItems {
     /// "Subscribe…" while unlicensed / "Manage License…" once a key is active.
     license_subscription_item: MenuItem,
     license_subscription_id: String,
-    /// "Enter License Key…" — straight to the key screen; disabled once licensed.
+    /// "Enter License Key…" — straight to the key screen; only present while
+    /// unlicensed (once you have a key there is nothing to enter).
     license_activate_item: MenuItem,
     license_activate_id: String,
-    /// "Deactivate this device…" — only meaningful (enabled) while licensed.
+    /// "Deactivate this device…" — only present while licensed.
     license_deactivate_item: MenuItem,
     license_deactivate_id: String,
     /// Buy-forward CTA, in the menu only while unlicensed. It carries its own
@@ -514,6 +515,9 @@ impl App {
         // License submenu (Lemon Squeezy). All state/text comes from license.rs.
         // Items are created once; `refresh_license_submenu` retitles/enables
         // them as the state moves between trial ↔ licensed (both directions).
+        // Only the actions that apply are in this submenu at any time — an item
+        // greyed out because it can't apply is noise (you can't "enter a key"
+        // when you already have one). `sync_license_submenu` swaps them.
         let license_submenu = Submenu::new(&crate::license::submenu_title(), true);
         let license_status_item = MenuItem::new(&crate::license::status_text(), false, None);
         let license_subscription_item = MenuItem::new("Subscribe\u{2026}", true, None);
@@ -521,10 +525,6 @@ impl App {
         let license_deactivate_item = MenuItem::new("Deactivate this device\u{2026}", true, None);
         let _ = license_submenu.append(&license_status_item);
         let _ = license_submenu.append(&PredefinedMenuItem::separator());
-        let _ = license_submenu.append(&license_subscription_item);
-        let _ = license_submenu.append(&license_activate_item);
-        let _ = license_submenu.append(&PredefinedMenuItem::separator());
-        let _ = license_submenu.append(&license_deactivate_item);
         let license_subscription_id = license_subscription_item.id().0.clone();
         let license_activate_id = license_activate_item.id().0.clone();
         let license_deactivate_id = license_deactivate_item.id().0.clone();
@@ -786,8 +786,19 @@ impl App {
         } else {
             "Subscribe\u{2026}"
         });
-        mi.license_activate_item.set_enabled(!licensed);
-        mi.license_deactivate_item.set_enabled(licensed);
+        // Licensed → [Manage License…, Deactivate this device…]
+        // Unlicensed → [Subscribe…, Enter License Key…]
+        // Never both sets with half of them greyed out.
+        let sub = &mi.license_submenu;
+        let _ = sub.remove(&mi.license_subscription_item);
+        let _ = sub.remove(&mi.license_activate_item);
+        let _ = sub.remove(&mi.license_deactivate_item);
+        let _ = sub.append(&mi.license_subscription_item);
+        let _ = sub.append(if licensed {
+            &mi.license_deactivate_item
+        } else {
+            &mi.license_activate_item
+        });
         mi.unlock_item.set_text(unlock_label(&st));
         self.sync_menu_head();
     }

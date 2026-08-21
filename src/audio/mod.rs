@@ -5,6 +5,7 @@ pub mod stream;
 
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait};
+use crate::util::run_with_timeout;
 use rubato::FftFixedIn;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -38,26 +39,77 @@ const DEVICE_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
 /// stalled CoreAudio enumeration can't wedge the caller (notably tray startup).
+/// Every audio device's name, unclassified. `devices()` reads the device list
+/// and each name and nothing else — unlike `input_devices()`/`output_devices()`,
+/// which ask every device for its supported stream formats to classify it, and
+/// **that** is the call that hangs: a format query blocks indefinitely on a mic
+/// when the Microphone permission is missing, on a stale device (a display
+/// unplugged mid-session) and on some virtual drivers. Measured on a real Mac:
+/// `devices()` named all five devices in microseconds while `input_devices()`
+/// never returned.
+fn all_device_names() -> Vec<String> {
+    run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+        cpal::default_host()
+            .devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
+/// stalled CoreAudio can't freeze the menu.
+///
+/// Falls back to the unclassified list when classification stalls, so the picker
+/// is never reduced to "Auto": a user whose pinned mic disappeared needs to
+/// choose another one, and that is exactly the situation where the classifying
+/// call hangs. The fallback can offer an output-only device as an input; picking
+/// one simply fails to open and `find_input_device` falls back to the default,
+/// which beats offering nothing.
 pub fn list_devices() -> Result<Vec<String>> {
-    crate::util::run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+    if let Some(v) = run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
         cpal::default_host()
             .input_devices()
             .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
             .unwrap_or_default()
-    })
-    .ok_or_else(|| anyhow::anyhow!("input device enumeration timed out (CoreAudio stalled)"))
+    }) {
+        if !v.is_empty() {
+            return Ok(v);
+        }
+    }
+    let all = all_device_names();
+    if all.is_empty() {
+        anyhow::bail!("input device enumeration timed out (CoreAudio stalled)");
+    }
+    tracing::warn!(
+        "input device classification stalled — listing all {} device(s) unfiltered",
+        all.len()
+    );
+    Ok(all)
 }
 
 /// List available output audio devices (used for sound-feedback playback).
-/// Bounded by `DEVICE_ENUM_TIMEOUT` for the same reason as `list_devices`.
+/// Same bounded-then-unfiltered strategy as `list_devices`.
 pub fn list_output_devices() -> Result<Vec<String>> {
-    crate::util::run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+    if let Some(v) = run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
         cpal::default_host()
             .output_devices()
             .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
             .unwrap_or_default()
-    })
-    .ok_or_else(|| anyhow::anyhow!("output device enumeration timed out (CoreAudio stalled)"))
+    }) {
+        if !v.is_empty() {
+            return Ok(v);
+        }
+    }
+    let all = all_device_names();
+    if all.is_empty() {
+        anyhow::bail!("output device enumeration timed out (CoreAudio stalled)");
+    }
+    tracing::warn!(
+        "output device classification stalled — listing all {} device(s) unfiltered",
+        all.len()
+    );
+    Ok(all)
 }
 
 /// Find an input device by name ("auto" = default).
@@ -67,7 +119,10 @@ pub fn find_input_device(name: &str) -> Result<cpal::Device> {
         host.default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No input device found"))
     } else {
-        host.input_devices()?
+        // `devices()`, not `input_devices()`: the latter classifies by querying
+        // stream formats and can hang forever (see `all_device_names`), which on
+        // this path would mean a dictation that never starts.
+        host.devices()?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
             .or_else(|| {
                 // The pinned device is gone (unplugged headset, disconnected

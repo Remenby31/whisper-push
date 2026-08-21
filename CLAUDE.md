@@ -118,6 +118,16 @@ make dmg     # create distributable DMG
 ## Pièges
 
 - **cpal macOS**: native sample rate is 44.1/48kHz, not 16kHz → rubato resampling required
+- **cpal `input_devices()`/`output_devices()` can hang forever**: they classify by
+  asking every device for its supported stream formats, and that query blocks on
+  a mic when the **Microphone permission is missing**, on a device that vanished
+  mid-session (an unplugged display), and on some virtual drivers (Teams Audio).
+  Measured: `devices()` named all 5 devices in µs while `input_devices()` never
+  returned. So (1) the pickers fall back to the **unclassified** `devices()` list
+  rather than showing only "Auto" — a user whose mic disappeared must still be
+  able to choose one, and that is exactly when classification stalls; (2)
+  `find_input_device` / playback's `output_device` use `devices()` too, because
+  they run on the record/playback path where a hang means no dictation at all.
 - **whisper-rs build**: requires cmake for whisper.cpp compilation
 - **macOS keyboard CGEventTap**: needs **Accessibility AND Input Monitoring** (kTCCServiceListenEvent). Accessibility alone is not enough — the tap silently receives nothing. The app checks both via `IOHIDCheckAccess` and requests them via `IOHIDRequestAccess`. The tap must be born *after* the grants → `permissions::guided_setup()` restarts the daemon (`launchctl kickstart -k`) once everything is granted.
 - **Ad-hoc TCC reset**: every rebuild changes the binary's cdhash, so macOS invalidates the TCC grants. `guided_setup` is what makes the re-grant tolerable — it opens the right panes, polls, and auto-restarts. A real Developer ID would stop the resets entirely.
@@ -210,6 +220,10 @@ Enhancements layered on top of the existing modules — no new architectural pie
   every license or state change. **Once licensed the head is empty** — managing
   a license happens in the License submenu, and a second entry point on top was
   just clutter.
+- **The License submenu shows only the actions that apply** — licensed:
+  `Manage License… / Deactivate this device…`; unlicensed: `Subscribe… /
+  Enter License Key…`. Swapped by `refresh_license_submenu` (remove + append),
+  never both sets with half of them greyed out.
 - **One way in.** Every entry point (top-level "✦ Unlock…", License ▸ Subscribe…/Manage
   License…, License ▸ Enter License Key…, the blocked-dictation notification →
   `Event::OpenLicenseWindow`) goes through `tray::App::open_license_window`, on the main
