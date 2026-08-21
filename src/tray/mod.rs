@@ -319,6 +319,9 @@ impl App {
     }
 
     fn create_tray(&mut self) {
+        // Before anything is drawn: a device pinned in the config that no longer
+        // exists must not stay pinned (see `reconcile_device_pins`).
+        self.reconcile_device_pins();
         let cfg = self.config.lock_safe().clone();
 
         // Build menu
@@ -801,6 +804,45 @@ impl App {
         });
         mi.unlock_item.set_text(unlock_label(&st));
         self.sync_menu_head();
+    }
+
+    /// Fall back to Auto for any device pinned in the config that is no longer
+    /// present.
+    ///
+    /// A stale pin is a lie the whole UI then repeats: nothing is ticked in the
+    /// picker (the pinned name has no row), the submenu is titled after a device
+    /// that is gone, and recording quietly uses the system default anyway
+    /// (`find_input_device` falls back). Switching to Auto makes the menu agree
+    /// with what actually happens, and the user can re-pick once the device is
+    /// back. Only acts on a list we actually got: when enumeration fails
+    /// entirely we keep the pin rather than throw a preference away over a
+    /// CoreAudio stall.
+    fn reconcile_device_pins(&mut self) {
+        let (input, output) = {
+            let c = self.config.lock_safe();
+            (c.input_device.clone(), c.output_device.clone())
+        };
+        let gone = |pinned: &str, list: Vec<String>| {
+            pinned != "auto" && !list.is_empty() && !list.iter().any(|n| n == pinned)
+        };
+        let drop_input = gone(&input, crate::audio::list_devices().unwrap_or_default());
+        let drop_output = gone(&output, crate::audio::list_output_devices().unwrap_or_default());
+        if !drop_input && !drop_output {
+            return;
+        }
+        let mut c = self.config.lock_safe();
+        if drop_input {
+            warn!("Input device '{input}' is no longer present \u{2014} falling back to Auto");
+            c.input_device = "auto".into();
+            // A pin the user no longer has can't outrank the auto-fallback.
+            crate::audio::set_input_override("");
+        }
+        if drop_output {
+            warn!("Output device '{output}' is no longer present \u{2014} falling back to Auto");
+            c.output_device = "auto".into();
+        }
+        let _ = c.save();
+        crate::audio::playback::set_output_device(&c.output_device);
     }
 
     /// Put exactly the head items that carry information into the menu, in
