@@ -662,20 +662,20 @@ pub fn status_text() -> String {
         LicenseStatus::Trial { days_left } => {
             format!("Trial: {days_left} day{} left", plural(days_left))
         }
-        LicenseStatus::Licensed(LicensedKind::Lifetime) => "Licensed \u{2014} Lifetime".into(),
+        LicenseStatus::Licensed(LicensedKind::Lifetime) => "Licensed: Lifetime".into(),
         LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
             match read().expires_at_raw.as_deref().and_then(|s| s.get(0..10)) {
-                Some(d) => format!("Licensed \u{2014} renews {d}"),
-                None => "Licensed \u{2014} Monthly".into(),
+                Some(d) => format!("Licensed: renews {d}"),
+                None => "Licensed: Monthly".into(),
             }
         }
         LicenseStatus::GraceOffline { days_left } => format!(
-            "Offline \u{2014} {days_left} day{} to reconnect",
+            "Offline: {days_left} day{} to reconnect",
             plural(days_left)
         ),
-        LicenseStatus::Expired => "Subscription expired \u{2014} renew".into(),
+        LicenseStatus::Expired => "Subscription expired: renew".into(),
         LicenseStatus::Disabled => "License inactive".into(),
-        LicenseStatus::Locked => "Trial expired \u{2014} activate".into(),
+        LicenseStatus::Locked => "Trial expired: activate".into(),
     }
 }
 
@@ -684,7 +684,7 @@ pub fn submenu_title() -> String {
     match status() {
         LicenseStatus::Licensed(_) => "License \u{2713}".into(),
         LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => {
-            "License \u{2014} Trial".into()
+            "License: Trial".into()
         }
         _ => "\u{26a0} License".into(),
     }

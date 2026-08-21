@@ -76,27 +76,27 @@ fn device_title(label: &str, value: &str) -> String {
 // single-key presets only.
 #[cfg(target_os = "macos")]
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
-    ("Hold \u{2014} Control", "ctrl", "hold"),
-    ("Hold \u{2014} Right Control", "rctrl", "hold"),
-    ("Hold \u{2014} Right Command", "rcmd", "hold"),
-    ("Hold \u{2014} Right Option", "ralt", "hold"),
+    ("Hold: Control", "ctrl", "hold"),
+    ("Hold: Right Control", "rctrl", "hold"),
+    ("Hold: Right Command", "rcmd", "hold"),
+    ("Hold: Right Option", "ralt", "hold"),
     (
-        "Toggle \u{2014} \u{2318}\u{21e7}Space",
+        "Toggle: \u{2318}\u{21e7}Space",
         "cmd+shift+space",
         "toggle",
     ),
     (
-        "Toggle \u{2014} \u{2303}\u{21e7}Space",
+        "Toggle: \u{2303}\u{21e7}Space",
         "ctrl+shift+space",
         "toggle",
     ),
 ];
 #[cfg(not(target_os = "macos"))]
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
-    ("Hold \u{2014} Control", "ctrl", "hold"),
-    ("Hold \u{2014} Right Control", "rctrl", "hold"),
-    ("Hold \u{2014} Right Alt", "ralt", "hold"),
-    ("Hold \u{2014} Right Super", "rcmd", "hold"),
+    ("Hold: Control", "ctrl", "hold"),
+    ("Hold: Right Control", "rctrl", "hold"),
+    ("Hold: Right Alt", "ralt", "hold"),
+    ("Hold: Right Super", "rcmd", "hold"),
 ];
 
 /// User events forwarded into winit's event loop.
@@ -116,28 +116,28 @@ fn perms_title(status: &crate::permissions::PermissionStatus) -> String {
         "Permissions \u{2713}".into()
     } else {
         format!(
-            "\u{26a0} Permissions \u{2014} {} to grant",
+            "\u{26a0} Permissions: {} to grant",
             status.missing_count()
         )
     }
 }
 
 /// The top-of-menu call to action, wording included. Everything the old greyed
-/// "Trial — 3 days left" line said is folded in here, because a line you cannot
+/// "Trial | 3 days left" line said is folded in here, because a line you cannot
 /// click is decoration: one item, clickable, that states the situation and what
 /// pressing it does.
 fn unlock_label(status: &crate::license::LicenseStatus) -> String {
     use crate::license::LicenseStatus as LS;
     match status {
         LS::Trial { days_left } => format!(
-            "\u{2726} Unlock Whisper Push \u{2014} {days_left} day{} left",
+            "\u{2726} Unlock Whisper Push \u{2502} {days_left} day{} left",
             if *days_left == 1 { "" } else { "s" }
         ),
-        LS::Locked => "\u{2726} Trial ended \u{2014} Unlock Whisper Push\u{2026}".into(),
-        LS::Expired => "\u{2726} Subscription expired \u{2014} Renew\u{2026}".into(),
-        LS::Disabled => "\u{2726} License inactive \u{2014} Fix now\u{2026}".into(),
+        LS::Locked => "\u{2726} Trial ended \u{2502} Unlock Whisper Push\u{2026}".into(),
+        LS::Expired => "\u{2726} Subscription expired \u{2502} Renew\u{2026}".into(),
+        LS::Disabled => "\u{2726} License inactive \u{2502} Fix now\u{2026}".into(),
         LS::GraceOffline { days_left } => format!(
-            "\u{2726} Offline \u{2014} reconnect within {days_left} day{}",
+            "\u{2726} Offline \u{2502} reconnect within {days_left} day{}",
             if *days_left == 1 { "" } else { "s" }
         ),
         // Licensed: the head is empty, this text is never shown.
@@ -274,7 +274,7 @@ struct MenuItems {
     license_deactivate_item: MenuItem,
     license_deactivate_id: String,
     /// Buy-forward CTA, in the menu only while unlicensed. It carries its own
-    /// urgency ("Unlock Whisper Push — 3 days left"), so there is no second,
+    /// urgency ("Unlock Whisper Push | 3 days left"), so there is no second,
     /// greyed-out line saying the same thing; once licensed it goes away
     /// entirely and the License submenu is the one place to manage it.
     unlock_item: MenuItem,
@@ -327,7 +327,7 @@ impl App {
         let status_text = if is_ready {
             format!("Whisper Push ({disp})")
         } else {
-            "Whisper Push \u{2014} \u{231b} Loading model\u{2026}".into()
+            "Whisper Push: \u{231b} Loading model\u{2026}".into()
         };
         let status_item = MenuItem::new(&status_text, false, None);
 
@@ -399,7 +399,7 @@ impl App {
         if perms.microphone == crate::permissions::PermState::Denied {
             let _ = input_submenu.append(&PredefinedMenuItem::separator());
             let _ = input_submenu.append(&MenuItem::new(
-                "\u{26a0} Microphone denied \u{2014} grant to record",
+                "\u{26a0} Microphone denied: grant to record",
                 false,
                 None,
             ));
@@ -451,17 +451,17 @@ impl App {
 
         // Permissions (perms already computed above for the input picker gate)
         let mic_label = format!(
-            "{} Microphone \u{2014} {}",
+            "{} Microphone \u{2502} {}",
             perms.microphone.symbol(),
             perms.microphone.label()
         );
         let acc_label = format!(
-            "{} Accessibility \u{2014} {}",
+            "{} Accessibility \u{2502} {}",
             perms.accessibility.symbol(),
             perms.accessibility.label()
         );
         let input_mon_label = format!(
-            "{} Input Monitoring \u{2014} {}",
+            "{} Input Monitoring \u{2502} {}",
             perms.input_monitoring.symbol(),
             perms.input_monitoring.label()
         );
@@ -578,7 +578,7 @@ impl App {
 
         // While unlicensed (trial included), a BUY-FORWARD CTA is pinned to the
         // VERY TOP of the menu: one clickable line carrying its own urgency
-        // ("Unlock Whisper Push — 3 days left") that opens the PLANS directly —
+        // ("Unlock Whisper Push | 3 days left") that opens the PLANS directly —
         // leading with purchase, not key entry. Entering an existing key stays
         // available inside that modal and in the License submenu. It is inserted
         // by `sync_menu_head`, not appended here, so it can come and go: once
@@ -1045,7 +1045,7 @@ impl App {
                                              the menu to open the download page."
                                         ));
                                         let _ = tx.send(Event::UpdateStatus(format!(
-                                            "\u{2b06} v{version} available \u{2014} {OPEN_RELEASES_HINT}"
+                                            "\u{2b06} v{version} available \u{2502} {OPEN_RELEASES_HINT}"
                                         )));
                                     }
                                     Err(e) => {
@@ -1353,17 +1353,17 @@ impl App {
                 let status = crate::permissions::check_all();
                 if let Some(mi) = &self.menu_items {
                     let mic_label = format!(
-                        "{} Microphone \u{2014} {}",
+                        "{} Microphone \u{2502} {}",
                         status.microphone.symbol(),
                         status.microphone.label()
                     );
                     let acc_label = format!(
-                        "{} Accessibility \u{2014} {}",
+                        "{} Accessibility \u{2502} {}",
                         status.accessibility.symbol(),
                         status.accessibility.label()
                     );
                     let input_mon_label = format!(
-                        "{} Input Monitoring \u{2014} {}",
+                        "{} Input Monitoring \u{2502} {}",
                         status.input_monitoring.symbol(),
                         status.input_monitoring.label()
                     );
@@ -2143,22 +2143,22 @@ fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
         State::Loading => (
             GlyphStyle::Template(BUSY_OPACITY),
             true,
-            "Whisper Push \u{2014} Loading model\u{2026}",
+            "Whisper Push: Loading model\u{2026}",
         ),
         State::Processing => (
             GlyphStyle::Template(BUSY_OPACITY),
             true,
-            "Whisper Push \u{2014} Transcribing\u{2026}",
+            "Whisper Push: Transcribing\u{2026}",
         ),
         State::Recording => (
             GlyphStyle::Tint(TINT_RECORDING),
             false,
-            "Whisper Push \u{2014} Recording",
+            "Whisper Push: Recording",
         ),
         State::Idle => (
             GlyphStyle::Template(255),
             true,
-            "Whisper Push \u{2014} Ready",
+            "Whisper Push: Ready",
         ),
     };
     if let Some(tray) = tray {
@@ -2398,7 +2398,7 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let mut items = Vec::new();
     if recent.is_empty() {
         let ph = MenuItem::new(
-            "  (empty \u{2014} your dictations will appear here)",
+            "  (empty: your dictations will appear here)",
             false,
             None,
         );
@@ -2430,7 +2430,7 @@ fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let mut items = Vec::new();
     if triggers.is_empty() {
         let ph = MenuItem::new(
-            "  (none yet \u{2014} use Add Template\u{2026})",
+            "  (none yet: use Add Template\u{2026})",
             false,
             None,
         );
@@ -2581,7 +2581,7 @@ fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let mut items = Vec::new();
     if entries.is_empty() {
         let ph = MenuItem::new(
-            "  (empty \u{2014} your corrections will appear here)",
+            "  (empty: your corrections will appear here)",
             false,
             None,
         );

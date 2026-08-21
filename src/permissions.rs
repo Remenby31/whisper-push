@@ -148,8 +148,8 @@ impl PermState {
     pub fn label(&self) -> &'static str {
         match self {
             PermState::Granted => "Granted",
-            PermState::Denied => "Denied — click to open Settings",
-            PermState::NotRequested => "Not requested — click to open Settings",
+            PermState::Denied => "Denied \u{2502} click to open Settings",
+            PermState::NotRequested => "Not requested \u{2502} click to open Settings",
             PermState::Unknown => "Unknown",
         }
     }
