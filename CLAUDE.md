@@ -200,6 +200,16 @@ Enhancements layered on top of the existing modules — no new architectural pie
   (`license status` JSON carries `email` + `renews`). CLI `--email` is accepted and
   ignored (older helpers). The Swift activate screen has ONE field: auto-focused,
   Return submits, prefilled from the clipboard when it holds a UUID, plus a paste button.
+- **Nothing greyed-out at the top of the menu.** An item you cannot click is
+  decoration, and each one duplicated a clickable item below it. The buy CTA
+  carries its own urgency (`✦ Unlock Whisper Push — 3 days left`) instead of
+  sitting under a greyed "Trial — 3 days left"; the permissions count lives in
+  the submenu title (`⚠ Permissions — 3 to grant`); the state line
+  (`Whisper Push (Hold ⌃)`) is inserted only while loading/recording/processing.
+  `sync_menu_head` rebuilds that head (remove-all then insert-what-applies) on
+  every license or state change. **Once licensed the head is empty** — managing
+  a license happens in the License submenu, and a second entry point on top was
+  just clutter.
 - **One way in.** Every entry point (top-level "✦ Unlock…", License ▸ Subscribe…/Manage
   License…, License ▸ Enter License Key…, the blocked-dictation notification →
   `Event::OpenLicenseWindow`) goes through `tray::App::open_license_window`, on the main

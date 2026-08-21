@@ -108,13 +108,40 @@ enum UserEvent {
     App(Event),
 }
 
-/// Top-of-menu call to action: sell when there's no licence, manage when there
-/// is. Both open the same window, so there is one way in either way.
-fn unlock_label(licensed: bool) -> &'static str {
-    if licensed {
-        "\u{2726} Manage License\u{2026}"
+/// Permissions submenu title. Carries the count itself, so the greyed
+/// "⚠ N permission(s) missing" line that used to sit above it — unclickable and
+/// saying the same thing — is gone.
+fn perms_title(status: &crate::permissions::PermissionStatus) -> String {
+    if status.all_granted() {
+        "Permissions \u{2713}".into()
     } else {
-        "\u{2726} Unlock Whisper Push\u{2026}"
+        format!(
+            "\u{26a0} Permissions \u{2014} {} to grant",
+            status.missing_count()
+        )
+    }
+}
+
+/// The top-of-menu call to action, wording included. Everything the old greyed
+/// "Trial — 3 days left" line said is folded in here, because a line you cannot
+/// click is decoration: one item, clickable, that states the situation and what
+/// pressing it does.
+fn unlock_label(status: &crate::license::LicenseStatus) -> String {
+    use crate::license::LicenseStatus as LS;
+    match status {
+        LS::Trial { days_left } => format!(
+            "\u{2726} Unlock Whisper Push \u{2014} {days_left} day{} left",
+            if *days_left == 1 { "" } else { "s" }
+        ),
+        LS::Locked => "\u{2726} Trial ended \u{2014} Unlock Whisper Push\u{2026}".into(),
+        LS::Expired => "\u{2726} Subscription expired \u{2014} Renew\u{2026}".into(),
+        LS::Disabled => "\u{2726} License inactive \u{2014} Fix now\u{2026}".into(),
+        LS::GraceOffline { days_left } => format!(
+            "\u{2726} Offline \u{2014} reconnect within {days_left} day{}",
+            if *days_left == 1 { "" } else { "s" }
+        ),
+        // Licensed: the head is empty, this text is never shown.
+        LS::Licensed(_) => "\u{2726} Manage License\u{2026}".into(),
     }
 }
 
@@ -158,7 +185,15 @@ struct App {
 }
 
 struct MenuItems {
+    /// The root menu, kept so the head (CTA / status line) can be inserted and
+    /// removed as state changes — a greyed-out line nobody can click is noise,
+    /// so we show nothing rather than something dead.
+    menu: Menu,
+    /// Non-clickable state line. Only in the menu while it says something the
+    /// clickable items don't already: loading, recording, transcribing.
     status_item: MenuItem,
+    /// Separator under the head; in the menu only when the head has content.
+    head_separator: PredefinedMenuItem,
     #[allow(dead_code)]
     notifications_item: CheckMenuItem,
     #[allow(dead_code)]
@@ -193,7 +228,7 @@ struct MenuItems {
     acc_perm_item: MenuItem,
     input_mon_perm_item: MenuItem,
     perms_submenu: Submenu,
-    warn_item: Option<MenuItem>,
+
     mic_perm_id: String,
     acc_perm_id: String,
     input_mon_perm_id: String,
@@ -237,10 +272,11 @@ struct MenuItems {
     /// "Deactivate this device…" — only meaningful (enabled) while licensed.
     license_deactivate_item: MenuItem,
     license_deactivate_id: String,
-    /// Buy-forward top block, present only while unlicensed: an urgency status
-    /// line + an "Unlock" CTA. `unlock_id` is empty when the block isn't shown.
-    trial_label: Option<MenuItem>,
-    unlock_item: Option<MenuItem>,
+    /// Buy-forward CTA, in the menu only while unlicensed. It carries its own
+    /// urgency ("Unlock Whisper Push — 3 days left"), so there is no second,
+    /// greyed-out line saying the same thing; once licensed it goes away
+    /// entirely and the License submenu is the one place to manage it.
+    unlock_item: MenuItem,
     unlock_id: String,
 }
 
@@ -431,14 +467,7 @@ impl App {
         let mic_perm_item = MenuItem::new(&mic_label, true, None);
         let acc_perm_item = MenuItem::new(&acc_label, true, None);
         let input_mon_perm_item = MenuItem::new(&input_mon_label, true, None);
-        let perms_submenu = Submenu::new(
-            if perms.all_granted() {
-                "Permissions \u{2713}"
-            } else {
-                "\u{26a0} Permissions"
-            },
-            true,
-        );
+        let perms_submenu = Submenu::new(perms_title(&perms), true);
         let _ = perms_submenu.append(&mic_perm_item);
         let _ = perms_submenu.append(&acc_perm_item);
         let _ = perms_submenu.append(&input_mon_perm_item);
@@ -547,58 +576,21 @@ impl App {
         // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
 
-        // While unlicensed (trial included), pin a BUY-FORWARD block to the VERY
-        // TOP of the menu: an urgency line (days left / trial ended) + an "Unlock"
-        // CTA that opens the PLANS directly — leading with purchase, not key entry.
-        // Activating an existing key stays available inside that modal ("I already
-        // have a license key") and in the License submenu. Retired once licensed.
-        // Always built, in BOTH states: the menu is created once, and a user who
-        // deactivates mid-session would otherwise be left with no way back to
-        // the paywall until the app restarts. `refresh_license_submenu` retitles
-        // the pair as the state moves.
-        let st = crate::license::status();
-        let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
-        let (trial_label, unlock_item, unlock_id) = {
-            use crate::license::LicenseStatus as LS;
-            let urgency = match st {
-                LS::Trial { days_left } => format!(
-                    "\u{23f3} Trial \u{2014} {days_left} day{} left",
-                    if days_left == 1 { "" } else { "s" }
-                ),
-                LS::Locked => "Trial ended".into(),
-                LS::Expired => "Subscription expired".into(),
-                LS::GraceOffline { days_left } => format!(
-                    "Offline \u{2014} reconnect within {days_left} day{}",
-                    if days_left == 1 { "" } else { "s" }
-                ),
-                LS::Disabled => "License inactive".into(),
-                LS::Licensed(_) => "\u{2713} License active".into(),
-            };
-            let label = MenuItem::new(&urgency, false, None);
-            let unlock = MenuItem::new(unlock_label(licensed), true, None);
-            let uid = unlock.id().0.clone();
-            let _ = menu.append(&label);
-            let _ = menu.append(&unlock);
-            let _ = menu.append(&PredefinedMenuItem::separator());
-            (Some(label), Some(unlock), uid)
-        };
+        // While unlicensed (trial included), a BUY-FORWARD CTA is pinned to the
+        // VERY TOP of the menu: one clickable line carrying its own urgency
+        // ("Unlock Whisper Push — 3 days left") that opens the PLANS directly —
+        // leading with purchase, not key entry. Entering an existing key stays
+        // available inside that modal and in the License submenu. It is inserted
+        // by `sync_menu_head`, not appended here, so it can come and go: once
+        // licensed there is nothing at the top at all.
+        let unlock_item = MenuItem::new(unlock_label(&crate::license::status()), true, None);
+        let unlock_id = unlock_item.id().0.clone();
+        let head_separator = PredefinedMenuItem::separator();
 
-        let _ = menu.append(&status_item);
-        let warn_item = if !perms.all_granted() {
-            let w = MenuItem::new(
-                &format!("\u{26a0} {} permission(s) missing", perms.missing_count()),
-                false,
-                None,
-            );
-            let _ = menu.append(&w);
-            Some(w)
-        } else {
-            None
-        };
         // Permissions submenu — only shown when something is actually missing
-        // (when everything's granted it's just noise).
+        // (when everything's granted it's just noise). Its title carries the
+        // count, so no separate warning line is needed.
         if !perms.all_granted() {
-            let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&perms_submenu);
         }
 
@@ -652,7 +644,6 @@ impl App {
             acc_perm_item,
             input_mon_perm_item,
             perms_submenu,
-            warn_item,
             model_items,
             update_item,
             report_item,
@@ -673,10 +664,11 @@ impl App {
             license_activate_id,
             license_deactivate_item,
             license_deactivate_id,
-            trial_label,
             unlock_item,
             unlock_id,
+            menu: menu.clone(),
             status_item,
+            head_separator,
             notifications_item,
             sound_item,
             debug_item,
@@ -784,10 +776,8 @@ impl App {
     /// BOTH directions (activation, deactivation, expiry), cheap, no rebuild.
     fn refresh_license_submenu(&mut self) {
         let Some(mi) = self.menu_items.as_ref() else { return };
-        let licensed = matches!(
-            crate::license::status(),
-            crate::license::LicenseStatus::Licensed(_)
-        );
+        let st = crate::license::status();
+        let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
         mi.license_status_item
             .set_text(crate::license::status_text());
         mi.license_submenu.set_text(crate::license::submenu_title());
@@ -798,17 +788,45 @@ impl App {
         });
         mi.license_activate_item.set_enabled(!licensed);
         mi.license_deactivate_item.set_enabled(licensed);
-        // The top block flips between selling and managing — never disappears,
-        // so deactivating mid-session leaves an obvious way back.
-        if let Some(lbl) = &mi.trial_label {
-            lbl.set_text(if licensed {
-                "\u{2713} License active".to_string()
-            } else {
-                crate::license::status_text()
-            });
+        mi.unlock_item.set_text(unlock_label(&st));
+        self.sync_menu_head();
+    }
+
+    /// Put exactly the head items that carry information into the menu, in
+    /// order, and take out the ones that don't.
+    ///
+    /// The rule: **nothing at the top that you cannot click**. The buy CTA is
+    /// there only while unlicensed (once licensed, managing happens in the
+    /// License submenu — a second entry point at the top was just clutter), and
+    /// the state line only while the app is doing something the rest of the menu
+    /// doesn't already say. When both are gone the separator goes too, so the
+    /// menu opens straight onto its real contents.
+    fn sync_menu_head(&mut self) {
+        let Some(mi) = self.menu_items.as_ref() else { return };
+        let licensed = matches!(
+            crate::license::status(),
+            crate::license::LicenseStatus::Licensed(_)
+        );
+        let busy = self.state.current() != State::Idle;
+
+        // Remove first (harmless if absent), then re-insert what applies: the
+        // order of a menu is its indices, so rebuilding the head wholesale is
+        // simpler and less error-prone than patching positions.
+        let _ = mi.menu.remove(&mi.unlock_item);
+        let _ = mi.menu.remove(&mi.status_item);
+        let _ = mi.menu.remove(&mi.head_separator);
+
+        let mut at = 0;
+        if !licensed {
+            let _ = mi.menu.insert(&mi.unlock_item, at);
+            at += 1;
         }
-        if let Some(it) = &mi.unlock_item {
-            it.set_text(unlock_label(licensed));
+        if busy {
+            let _ = mi.menu.insert(&mi.status_item, at);
+            at += 1;
+        }
+        if at > 0 {
+            let _ = mi.menu.insert(&mi.head_separator, at);
         }
     }
 
@@ -868,6 +886,7 @@ impl App {
                     &self.state.config.hotkey_mode,
                 );
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
+                self.sync_menu_head(); // no longer loading → the state line goes
                 set_tray_icon(&self.tray, State::Idle);
                 if self.config.lock_safe().notifications {
                     crate::notify::app("Model loaded and ready!");
@@ -1348,21 +1367,7 @@ impl App {
                     mi.input_mon_perm_item.set_enabled(
                         status.input_monitoring != crate::permissions::PermState::Granted,
                     );
-                    mi.perms_submenu.set_text(if status.all_granted() {
-                        "Permissions \u{2713}"
-                    } else {
-                        "\u{26a0} Permissions"
-                    });
-                    if let Some(ref w) = mi.warn_item {
-                        if status.all_granted() {
-                            w.set_text("\u{2713} All permissions granted");
-                        } else {
-                            w.set_text(&format!(
-                                "\u{26a0} {} permission(s) missing",
-                                status.missing_count()
-                            ));
-                        }
-                    }
+                    mi.perms_submenu.set_text(perms_title(&status));
                 }
                 info!(
                     "Permissions refreshed: mic={:?} acc={:?}",
@@ -1435,6 +1440,7 @@ impl App {
 
             Event::StateChanged(s) => {
                 self.state.set(s);
+                self.sync_menu_head(); // busy ⇄ idle decides the state line
                 set_tray_icon(&self.tray, s); // also refreshes the tooltip
                 crate::overlay::set_state(match s {
                     State::Processing => crate::overlay::OverlayState::Processing,
