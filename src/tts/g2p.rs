@@ -62,9 +62,20 @@ pub fn espeak_available() -> bool {
 }
 
 fn espeak_bin() -> Option<&'static str> {
-    // Homebrew installs `espeak-ng`; some distros only ship `espeak`, whose
-    // --ipa output is compatible.
-    ["espeak-ng", "espeak"].into_iter().find(|bin| {
+    // GUI apps launched by macOS launchd inherit only the system PATH, so a
+    // Homebrew binary is invisible unless we also probe its absolute path.
+    // Some Linux distros only ship `espeak`, whose --ipa output is compatible.
+    [
+        "espeak-ng",
+        "espeak",
+        "/opt/homebrew/bin/espeak-ng",
+        "/usr/local/bin/espeak-ng",
+        "/opt/local/bin/espeak-ng",
+        "/usr/bin/espeak-ng",
+        "/usr/bin/espeak",
+    ]
+    .into_iter()
+    .find(|bin| {
         std::process::Command::new(bin)
             .arg("--version")
             .output()
@@ -160,5 +171,13 @@ mod tests {
         let err = phonemize("Bonjour", "ff_siwis").unwrap_err().to_string();
         assert!(err.contains("espeak-ng"), "{err}");
         assert!(err.contains("brew install"), "{err}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_homebrew_espeak_outside_launchd_path() {
+        if std::path::Path::new("/opt/homebrew/bin/espeak-ng").exists() {
+            assert!(espeak_available());
+        }
     }
 }

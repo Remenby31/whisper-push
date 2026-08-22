@@ -132,7 +132,10 @@ fn with_session<T>(variant: &str, f: impl FnOnce(&mut Session) -> Result<T>) -> 
 /// inference happen later, in the background.
 #[derive(Debug, Clone)]
 pub struct Speech {
-    tokens: Vec<i64>,
+    /// Kokoro's ALBERT encoder has a 512-token context. Each chunk contains at
+    /// most 510 phoneme tokens plus the two boundary tokens added by the
+    /// tokenizer.
+    token_chunks: Vec<Vec<i64>>,
     voice: String,
     /// Kept for logging only.
     chars: usize,
@@ -146,19 +149,28 @@ pub fn prepare(text: &str, voice: &str) -> Result<Speech> {
         bail!("Nothing to speak");
     }
     let phonemes = g2p::phonemize(text, voice)?;
-    let tokens = kokoro_en::get_token_ids(&phonemes, false);
-    // get_token_ids brackets the phonemes with padding, so 2 means "no phonemes
-    // survived" — speaking that would emit a click, not silence.
-    if tokens.len() <= 2 {
+    let token_chunks = tokenize_phonemes(&phonemes);
+    if token_chunks.is_empty() {
         bail!("Text produced no usable phonemes");
     }
     // Surface a bad voice name now rather than from a background thread.
     let _ = load_voice(voice)?;
     Ok(Speech {
-        tokens,
+        token_chunks,
         voice: voice.to_string(),
         chars: text.len(),
     })
+}
+
+/// Split before tokenization so each ONNX call stays within Kokoro's
+/// 512-position encoder limit. The two boundary tokens are added afterwards.
+fn tokenize_phonemes(phonemes: &str) -> Vec<Vec<i64>> {
+    kokoro_en::chunk_phonemes(phonemes, kokoro_en::MAX_PHONEME_CHARS)
+        .into_iter()
+        .map(|chunk| kokoro_en::get_token_ids(&chunk, false))
+        // A two-token result contains only the start/end padding.
+        .filter(|tokens| tokens.len() > 2)
+        .collect()
 }
 
 /// Convenience for callers that want it all in one go (the `say` CLI).
@@ -169,31 +181,35 @@ pub fn synth(text: &str, voice: &str, variant: &str) -> Result<Vec<f32>> {
 /// Run the model. Slow: a cold session load plus inference.
 pub fn render(speech: &Speech, variant: &str) -> Result<Vec<f32>> {
     let Speech {
-        tokens,
+        token_chunks,
         voice,
         chars,
     } = speech;
-    let (tokens, voice) = (tokens.clone(), voice.as_str());
+    let (token_chunks, voice) = (token_chunks.clone(), voice.as_str());
 
     let pack = load_voice(voice)?;
-    // The style row is chosen by token count: longer utterances get a different
-    // prosody vector. Clamp rather than index out of bounds on a long sentence.
-    let idx = (tokens.len() - 1).min(pack.len().saturating_sub(1));
-    let style = pack
-        .get(idx)
-        .ok_or_else(|| anyhow::anyhow!("Voice '{voice}' has no style vectors"))?
-        .clone();
-
-    let n = tokens.len();
     let t = std::time::Instant::now();
     let audio = with_session(variant, |session| {
-        let outputs = session.run(ort::inputs![
-            "input_ids" => Tensor::from_array(([1_usize, n], tokens))?,
-            "style" => Tensor::from_array(([1_usize, style.len()], style))?,
-            "speed" => Tensor::from_array(([1_usize], vec![1.0_f32]))?,
-        ])?;
-        let (_, wav) = outputs["waveform"].try_extract_tensor::<f32>()?;
-        Ok(wav.to_vec())
+        let mut audio = Vec::new();
+        for tokens in token_chunks {
+            // The style row is chosen by token count: longer utterances get a
+            // different prosody vector. Clamp for malformed/short voice packs.
+            let idx = (tokens.len() - 1).min(pack.len().saturating_sub(1));
+            let style = pack
+                .get(idx)
+                .ok_or_else(|| anyhow::anyhow!("Voice '{voice}' has no style vectors"))?
+                .clone();
+
+            let n = tokens.len();
+            let outputs = session.run(ort::inputs![
+                "input_ids" => Tensor::from_array(([1_usize, n], tokens))?,
+                "style" => Tensor::from_array(([1_usize, style.len()], style))?,
+                "speed" => Tensor::from_array(([1_usize], vec![1.0_f32]))?,
+            ])?;
+            let (_, wav) = outputs["waveform"].try_extract_tensor::<f32>()?;
+            audio.extend_from_slice(wav);
+        }
+        Ok(audio)
     })?;
 
     info!(
@@ -225,5 +241,20 @@ mod tests {
     fn unknown_voice_fails_before_any_download() {
         // phonemizer_for rejects it, so we never reach the network.
         assert!(synth("hello", "qq_nobody", "model_q8f16").is_err());
+    }
+
+    #[test]
+    fn long_phoneme_sequences_are_chunked_below_the_model_limit() {
+        let phonemes = std::iter::repeat_n("həlˈoʊ", 120)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let chunks = tokenize_phonemes(&phonemes);
+
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|tokens| tokens.len() <= kokoro_en::MAX_PHONEME_CHARS + 2)
+        );
     }
 }
