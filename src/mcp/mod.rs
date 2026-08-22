@@ -94,18 +94,16 @@ impl Speaker {
             text: args.text.clone(),
             voice: args.voice,
         };
-        // The socket call blocks (synthesis + playback), so keep it off the
-        // async reactor.
+        // Unix socket I/O is blocking, so keep it off the async reactor.
         let result = tokio::task::spawn_blocking(move || ipc::request(&req))
             .await
             .map_err(|e| ErrorData::internal_error(format!("speak task failed: {e}"), None))?;
 
         match result {
-            // "Queued", not "Spoke": the audio is still playing when we return,
-            // and telling the model otherwise would invite it to assume the
-            // user has already heard it.
+            // The utterance may be behind another one, so describe acceptance
+            // accurately rather than claiming playback has already started.
             Ok(r) if r.ok => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "Speaking now: {}",
+                "Queued for speech: {}",
                 args.text
             ))])),
             Ok(r) => Ok(CallToolResult::error(vec![ContentBlock::text(

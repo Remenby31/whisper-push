@@ -15,8 +15,9 @@ pub mod g2p;
 use anyhow::{Context, Result, bail};
 use ort::session::Session;
 use ort::value::Tensor;
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::info;
 
 /// Kokoro always emits 24 kHz mono. The output device is rarely 24 kHz, so
@@ -31,6 +32,13 @@ const STYLE_DIM: usize = 256;
 
 /// The loaded session, kept for the process lifetime once built.
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+type VoicePack = Vec<Vec<f32>>;
+
+/// Parsed voice packs are immutable and shared by queued utterances. Without
+/// this cache every `speak` call read and decoded the same 510 KiB file twice:
+/// once during validation and once again during rendering.
+static VOICE_CACHE: OnceLock<Mutex<HashMap<String, Arc<VoicePack>>>> = OnceLock::new();
 
 fn kokoro_dir() -> PathBuf {
     crate::config::data_dir().join("models").join("kokoro")
@@ -76,7 +84,7 @@ fn ensure_file(remote: &str, local: &str) -> Result<PathBuf> {
 ///
 /// The `.bin` files are a bare little-endian f32 dump of `[frames, 256]` — no
 /// header, so the frame count is just the file length.
-fn load_voice(voice: &str) -> Result<Vec<Vec<f32>>> {
+fn load_voice(voice: &str) -> Result<Arc<VoicePack>> {
     if !voice
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -84,6 +92,17 @@ fn load_voice(voice: &str) -> Result<Vec<Vec<f32>>> {
         // The name goes into a URL and a path; keep it boring.
         bail!("Invalid voice name '{voice}'");
     }
+
+    let cache = VOICE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(pack) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(voice)
+        .cloned()
+    {
+        return Ok(pack);
+    }
+
     let path = ensure_file(&format!("voices/{voice}.bin"), &format!("{voice}.bin"))?;
     let bytes = std::fs::read(&path)?;
 
@@ -94,15 +113,23 @@ fn load_voice(voice: &str) -> Result<Vec<Vec<f32>>> {
             bytes.len()
         );
     }
-    Ok(bytes
-        .chunks_exact(row)
-        .map(|frame| {
-            frame
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                .collect()
-        })
-        .collect())
+    let pack: Arc<VoicePack> = Arc::new(
+        bytes
+            .chunks_exact(row)
+            .map(|frame| {
+                frame
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .collect()
+            })
+            .collect(),
+    );
+
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(cache
+        .entry(voice.to_string())
+        .or_insert_with(|| pack.clone())
+        .clone())
 }
 
 /// Build the session once. CPU only, deliberately: the default `model_q8f16`
@@ -130,13 +157,14 @@ fn with_session<T>(variant: &str, f: impl FnOnce(&mut Session) -> Result<T>) -> 
 /// caller can actually fix — unknown voice, missing espeak-ng, empty text — is
 /// caught in [`prepare`], which is milliseconds. Only model loading and
 /// inference happen later, in the background.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Speech {
     /// Kokoro's ALBERT encoder has a 512-token context. Each chunk contains at
     /// most 510 phoneme tokens plus the two boundary tokens added by the
     /// tokenizer.
     token_chunks: Vec<Vec<i64>>,
     voice: String,
+    voice_pack: Arc<VoicePack>,
     /// Kept for logging only.
     chars: usize,
 }
@@ -154,10 +182,11 @@ pub fn prepare(text: &str, voice: &str) -> Result<Speech> {
         bail!("Text produced no usable phonemes");
     }
     // Surface a bad voice name now rather than from a background thread.
-    let _ = load_voice(voice)?;
+    let voice_pack = load_voice(voice)?;
     Ok(Speech {
         token_chunks,
         voice: voice.to_string(),
+        voice_pack,
         chars: text.len(),
     })
 }
@@ -183,19 +212,19 @@ pub fn render(speech: &Speech, variant: &str) -> Result<Vec<f32>> {
     let Speech {
         token_chunks,
         voice,
+        voice_pack,
         chars,
     } = speech;
     let (token_chunks, voice) = (token_chunks.clone(), voice.as_str());
 
-    let pack = load_voice(voice)?;
     let t = std::time::Instant::now();
     let audio = with_session(variant, |session| {
         let mut audio = Vec::new();
         for tokens in token_chunks {
             // The style row is chosen by token count: longer utterances get a
             // different prosody vector. Clamp for malformed/short voice packs.
-            let idx = (tokens.len() - 1).min(pack.len().saturating_sub(1));
-            let style = pack
+            let idx = (tokens.len() - 1).min(voice_pack.len().saturating_sub(1));
+            let style = voice_pack
                 .get(idx)
                 .ok_or_else(|| anyhow::anyhow!("Voice '{voice}' has no style vectors"))?
                 .clone();

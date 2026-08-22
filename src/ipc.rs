@@ -137,8 +137,9 @@ fn dispatch(req: Request) -> Response {
     }
 }
 
-/// At most this many utterances may be waiting. An agent in a loop should get
-/// an error, not build an unbounded backlog the user then has to sit through.
+/// At most this many utterances may wait for rendering. An agent in a loop
+/// should get an error, not build an unbounded backlog the user then has to sit
+/// through.
 const SPEECH_QUEUE_LIMIT: usize = 8;
 
 /// Queued work for the speech thread.
@@ -147,38 +148,157 @@ struct Job {
     variant: String,
 }
 
-static SPEECH_TX: std::sync::OnceLock<crossbeam_channel::Sender<Job>> = std::sync::OnceLock::new();
+static SPEECH_TX: std::sync::OnceLock<Result<crossbeam_channel::Sender<Job>, String>> =
+    std::sync::OnceLock::new();
 
-/// One worker renders and plays, strictly in order.
+/// Build a two-stage ordered pipeline.
 ///
-/// Serialising matters now that `speak` returns before the audio does: two
-/// quick calls would otherwise open two output streams at once and talk over
-/// each other.
-fn speech_queue() -> &'static crossbeam_channel::Sender<Job> {
-    SPEECH_TX.get_or_init(|| {
-        let (tx, rx) = crossbeam_channel::bounded::<Job>(SPEECH_QUEUE_LIMIT);
-        std::thread::Builder::new()
-            .name("tts".into())
-            .spawn(move || {
-                for job in rx {
-                    match crate::tts::render(&job.speech, &job.variant) {
-                        // Errors here are ours (model load, inference, audio
-                        // device), not something the caller could have fixed —
-                        // and it has long since returned. Log and continue.
-                        Ok(audio) => {
-                            if let Err(e) =
-                                crate::audio::playback::play_pcm(&audio, crate::tts::SAMPLE_RATE)
-                            {
-                                warn!("TTS playback failed: {e}");
-                            }
-                        }
-                        Err(e) => warn!("TTS synthesis failed: {e}"),
-                    }
+/// The renderer is serial because the ONNX session is shared. Playback has its
+/// own serial worker so the renderer can synthesize utterance N+1 while N is
+/// audible. The zero-capacity handoff intentionally allows exactly one rendered
+/// utterance ahead: more would only retain large PCM buffers in memory.
+fn spawn_ordered_pipeline<J, A>(
+    queue_limit: usize,
+    render: impl Fn(J) -> Result<A> + Send + 'static,
+    play: impl Fn(A) -> Result<()> + Send + 'static,
+) -> std::io::Result<crossbeam_channel::Sender<J>>
+where
+    J: Send + 'static,
+    A: Send + 'static,
+{
+    let (job_tx, job_rx) = crossbeam_channel::bounded::<J>(queue_limit);
+    let (audio_tx, audio_rx) = crossbeam_channel::bounded::<A>(0);
+
+    std::thread::Builder::new()
+        .name("tts-playback".into())
+        .spawn(move || {
+            for audio in audio_rx {
+                if let Err(e) = play(audio) {
+                    warn!("TTS playback failed: {e}");
                 }
+            }
+        })?;
+
+    std::thread::Builder::new()
+        .name("tts-render".into())
+        .spawn(move || {
+            for job in job_rx {
+                match render(job) {
+                    Ok(audio) => {
+                        // Rendezvous with the playback worker. While it plays
+                        // this item, the loop immediately starts rendering the
+                        // next one; if that finishes early, it waits here with
+                        // just one completed buffer in memory.
+                        if audio_tx.send(audio).is_err() {
+                            warn!("TTS playback worker stopped");
+                            break;
+                        }
+                    }
+                    // These failures happen after the MCP call has returned, so
+                    // log them and keep the queue moving.
+                    Err(e) => warn!("TTS synthesis failed: {e}"),
+                }
+            }
+        })?;
+
+    Ok(job_tx)
+}
+
+fn speech_queue() -> Result<&'static crossbeam_channel::Sender<Job>> {
+    match SPEECH_TX.get_or_init(|| {
+        spawn_ordered_pipeline(
+            SPEECH_QUEUE_LIMIT,
+            |job: Job| crate::tts::render(&job.speech, &job.variant),
+            |audio| crate::audio::playback::play_pcm(&audio, crate::tts::SAMPLE_RATE),
+        )
+        .map_err(|e| format!("Failed to start TTS workers: {e}"))
+    }) {
+        Ok(tx) => Ok(tx),
+        Err(e) => bail!(e.clone()),
+    }
+}
+
+fn enqueue(job: Job) -> Result<()> {
+    match speech_queue()?.try_send(job) {
+        Ok(()) => Ok(()),
+        Err(crossbeam_channel::TrySendError::Full(_)) => bail!(
+            "Speech queue is full ({SPEECH_QUEUE_LIMIT} utterances are waiting for synthesis) — \
+             wait for it to drain before speaking again."
+        ),
+        Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+            bail!("Speech workers are unavailable — restart Whisper Push and try again.")
+        }
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Event {
+        Render(usize),
+        PlayStart(usize),
+        PlayEnd(usize),
+    }
+
+    #[test]
+    fn renders_the_next_item_during_current_playback_and_keeps_order() {
+        let (events_tx, events_rx) = crossbeam_channel::unbounded();
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+
+        let render_events = events_tx.clone();
+        let play_events = events_tx;
+        let tx = spawn_ordered_pipeline(
+            4,
+            move |id| {
+                render_events.send(Event::Render(id)).unwrap();
+                Ok(id)
+            },
+            move |id| {
+                play_events.send(Event::PlayStart(id)).unwrap();
+                if id == 1 {
+                    release_rx.recv().unwrap();
+                }
+                play_events.send(Event::PlayEnd(id)).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        tx.send(1).unwrap();
+        tx.send(2).unwrap();
+
+        // Playback 1 is deliberately blocked. Rendering 2 must still complete
+        // before we release it, proving the two stages overlap.
+        let mut events = Vec::new();
+        while !(events.contains(&Event::PlayStart(1)) && events.contains(&Event::Render(2))) {
+            events.push(
+                events_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("pipeline stalled before rendering ahead"),
+            );
+        }
+        assert!(!events.contains(&Event::PlayEnd(1)));
+
+        release_tx.send(()).unwrap();
+        while !events.contains(&Event::PlayEnd(2)) {
+            events.push(
+                events_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("pipeline stalled during ordered playback"),
+            );
+        }
+
+        let starts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::PlayStart(id) => Some(*id),
+                _ => None,
             })
-            .ok();
-        tx
-    })
+            .collect();
+        assert_eq!(starts, vec![1, 2]);
+    }
 }
 
 /// Validate, then hand off. Returns as soon as the utterance is accepted, so
@@ -197,17 +317,10 @@ fn speak(text: &str, voice: Option<&str>) -> Result<()> {
     let voice = voice.unwrap_or(&cfg.tts_voice);
 
     let speech = crate::tts::prepare(text, voice)?;
-    speech_queue()
-        .try_send(Job {
-            speech,
-            variant: cfg.tts_model.clone(),
-        })
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Speech queue is full ({SPEECH_QUEUE_LIMIT} utterances still to play) — \
-                 wait for it to drain before speaking again."
-            )
-        })
+    enqueue(Job {
+        speech,
+        variant: cfg.tts_model.clone(),
+    })
 }
 
 // ─── Client side (used by the MCP proxy) ────────────────────────────────────
