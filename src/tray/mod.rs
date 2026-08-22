@@ -118,6 +118,9 @@ struct App {
     menu_items: Option<MenuItems>,
     // Pending update info (version, download_url)
     pending_update: Option<(String, String)>,
+    /// Independent overlay sources. Recording wins if input and TTS overlap.
+    overlay_recording: bool,
+    tts_speaking: bool,
 }
 
 struct MenuItems {
@@ -196,6 +199,55 @@ struct MenuItems {
     unlock_id: String,
 }
 
+fn desired_overlay_state(
+    recording: bool,
+    speaking: bool,
+    app_state: State,
+) -> crate::overlay::OverlayState {
+    if recording {
+        crate::overlay::OverlayState::Recording
+    } else if speaking {
+        crate::overlay::OverlayState::Speaking
+    } else if app_state == State::Processing {
+        crate::overlay::OverlayState::Processing
+    } else {
+        crate::overlay::OverlayState::Idle
+    }
+}
+
+#[cfg(test)]
+mod overlay_state_tests {
+    use super::*;
+
+    #[test]
+    fn recording_visual_wins_over_simultaneous_tts() {
+        assert_eq!(
+            desired_overlay_state(true, true, State::Recording),
+            crate::overlay::OverlayState::Recording
+        );
+    }
+
+    #[test]
+    fn tts_visual_returns_after_recording_finishes() {
+        assert_eq!(
+            desired_overlay_state(false, true, State::Processing),
+            crate::overlay::OverlayState::Speaking
+        );
+    }
+
+    #[test]
+    fn idle_and_processing_keep_their_existing_behavior_without_audio() {
+        assert_eq!(
+            desired_overlay_state(false, false, State::Idle),
+            crate::overlay::OverlayState::Idle
+        );
+        assert_eq!(
+            desired_overlay_state(false, false, State::Processing),
+            crate::overlay::OverlayState::Processing
+        );
+    }
+}
+
 impl App {
     fn new(state: AppState, rx: Receiver<Event>) -> Self {
         let config = Arc::new(Mutex::new(state.config.clone()));
@@ -207,7 +259,18 @@ impl App {
             pipeline_tx: None,
             menu_items: None,
             pending_update: None,
+            overlay_recording: false,
+            tts_speaking: false,
         }
+    }
+
+    fn refresh_overlay(&self) {
+        let state = desired_overlay_state(
+            self.overlay_recording,
+            self.tts_speaking,
+            self.state.current(),
+        );
+        crate::overlay::set_state(state);
     }
 
     fn create_tray(&mut self) {
@@ -1072,17 +1135,28 @@ impl App {
                 // played at each trigger point, never here, to avoid doubling.
                 self.state.set(State::Recording);
                 set_tray_icon(&self.tray, State::Recording);
-                crate::overlay::set_state(crate::overlay::OverlayState::Recording);
+                self.overlay_recording = true;
+                self.refresh_overlay();
             }
 
             // Pill-only events (the tray icon stays on StateChanged). ShowOverlay
             // fires on key-down so the pill appears with the start sound, ahead of
             // the hold-delay gate + mic open; HideOverlay covers the early exits.
             Event::ShowOverlay => {
-                crate::overlay::set_state(crate::overlay::OverlayState::Recording);
+                self.overlay_recording = true;
+                self.refresh_overlay();
             }
             Event::HideOverlay => {
-                crate::overlay::set_state(crate::overlay::OverlayState::Idle);
+                self.overlay_recording = false;
+                self.refresh_overlay();
+            }
+            Event::TtsPlaybackStarted => {
+                self.tts_speaking = true;
+                self.refresh_overlay();
+            }
+            Event::TtsPlaybackFinished => {
+                self.tts_speaking = false;
+                self.refresh_overlay();
             }
 
             Event::HotkeyCaptured(hotkey, mode) => {
@@ -1208,10 +1282,8 @@ impl App {
             Event::StateChanged(s) => {
                 self.state.set(s);
                 set_tray_icon(&self.tray, s); // also refreshes the tooltip
-                crate::overlay::set_state(match s {
-                    State::Processing => crate::overlay::OverlayState::Processing,
-                    _ => crate::overlay::OverlayState::Idle, // Idle / Loading
-                });
+                self.overlay_recording = false;
+                self.refresh_overlay();
             }
 
             _ => {}
@@ -1738,6 +1810,22 @@ static TRAY_TX: OnceLock<Sender<Event>> = OnceLock::new();
 /// got stranded by a dropped key-up — the watchdog itself is spawned before the
 /// pipeline exists, so it can't be handed the sender directly.
 static PIPELINE_TX: OnceLock<Sender<Event>> = OnceLock::new();
+
+/// Notify the main thread that synthesized audio started/stopped. Playback runs
+/// on its own worker, while AppKit overlay mutations must remain on the main
+/// thread, so this crosses the existing UI event channel and wakes the run loop.
+pub(crate) fn set_tts_overlay_active(active: bool) {
+    if let Some(tx) = TRAY_TX.get() {
+        notify_ui(
+            tx,
+            if active {
+                Event::TtsPlaybackStarted
+            } else {
+                Event::TtsPlaybackFinished
+            },
+        );
+    }
+}
 
 fn schedule_tray_flush(after: Duration) {
     if let Some(tx) = TRAY_TX.get() {

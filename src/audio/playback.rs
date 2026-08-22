@@ -96,7 +96,7 @@ pub fn play_sound(name: &str) {
     let name = name.to_string();
     std::thread::spawn(move || {
         if let Some(samples) = decoded_samples(&name) {
-            if let Err(e) = play_samples(&samples, lead_ms) {
+            if let Err(e) = play_samples(&samples, lead_ms, false) {
                 warn!("Sound playback error: {e}");
             }
         }
@@ -293,7 +293,7 @@ fn normalize(mut samples: Vec<f32>, target: f32) -> Vec<f32> {
 
 /// Play already-decoded mono samples on the selected (or default) output device,
 /// preceded by `lead_ms` of silence (0 when the device is warm).
-fn play_samples(samples: &Arc<Vec<f32>>, lead_ms: u32) -> Result<()> {
+fn play_samples(samples: &Arc<Vec<f32>>, lead_ms: u32, meter_speech: bool) -> Result<()> {
     let selected = OUTPUT_DEVICE.read().map(|g| g.clone()).unwrap_or_default();
     let device = output_device(&selected).ok_or_else(|| anyhow::anyhow!("No output device"))?;
 
@@ -314,6 +314,8 @@ fn play_samples(samples: &Arc<Vec<f32>>, lead_ms: u32) -> Result<()> {
     let stream = device.build_output_stream(
         &config.into(),
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            let mut sum_sq = 0.0_f32;
+            let mut metered_frames = 0_usize;
             for frame in output.chunks_mut(channels) {
                 let idx = pos_clone.fetch_add(1, Ordering::Relaxed);
                 let v = if idx >= total {
@@ -324,9 +326,16 @@ fn play_samples(samples: &Arc<Vec<f32>>, lead_ms: u32) -> Result<()> {
                 } else {
                     samples[idx - lead_frames]
                 };
+                if meter_speech {
+                    sum_sq += v * v;
+                    metered_frames += 1;
+                }
                 for slot in frame.iter_mut() {
                     *slot = v;
                 }
+            }
+            if meter_speech && metered_frames > 0 {
+                crate::overlay::feed_speech_level((sum_sq / metered_frames as f32).sqrt());
             }
         },
         |err| warn!("Playback error: {err}"),
@@ -370,5 +379,9 @@ pub fn play_pcm(samples: &[f32], sample_rate: u32) -> Result<()> {
     // Keep the DAC awake for the duration, and reuse the shared player so the
     // device-selection and lead-in behaviour stays identical to the cue sounds.
     arm_keepwarm();
-    play_samples(&Arc::new(converted), 0)
+    crate::tray::set_tts_overlay_active(true);
+    let result = play_samples(&Arc::new(converted), 0, true);
+    crate::overlay::feed_speech_level(0.0);
+    crate::tray::set_tts_overlay_active(false);
+    result
 }

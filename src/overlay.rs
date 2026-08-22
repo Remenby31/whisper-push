@@ -1,16 +1,17 @@
-//! Floating "listening" pill (Wispr-Flow style).
+//! Floating audio-activity pill (Wispr-Flow style).
 //!
 //! A small, fully-rounded pill pinned to the bottom-centre of the screen, just
 //! above the Dock, whose citron bars react to the live mic level while
-//! recording — a discreet "you're being heard" cue. macOS only; a no-op
-//! elsewhere. Visual tunables live as consts in the macOS impl so the look is
-//! easy to iterate.
+//! recording and to synthesized output while Whisper Push speaks. macOS only;
+//! a no-op elsewhere. Visual tunables live as consts in the macOS impl so the
+//! look is easy to iterate.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-/// Latest mic RMS as f32 bits. Written by the audio capture thread (cheap,
-/// lock-free), read ~60 fps by the pill's animation tick on the main thread.
-static LEVEL: AtomicU32 = AtomicU32::new(0);
+/// Latest mic/output RMS as f32 bits. Written by their real-time audio callbacks
+/// (cheap, lock-free), read ~60 fps by the pill on the main thread.
+static MIC_LEVEL: AtomicU32 = AtomicU32::new(0);
+static SPEECH_LEVEL: AtomicU32 = AtomicU32::new(0);
 /// User toggle (config `overlay_enabled`).
 static ENABLED: AtomicBool = AtomicBool::new(true);
 
@@ -21,19 +22,30 @@ pub enum OverlayState {
     Idle,
     /// Recording — animated citron waveform.
     Recording,
+    /// Whisper Push is speaking — citron waveform driven by output audio.
+    Speaking,
     /// Transcribing — subtle "thinking" pulse.
     Processing,
 }
 
 /// Report the current mic level (0.0–~1.0). Called from the capture callback.
 pub fn feed_level(rms: f32) {
-    LEVEL.store(rms.to_bits(), Ordering::Relaxed);
+    MIC_LEVEL.store(rms.to_bits(), Ordering::Relaxed);
 }
 
-/// The smoothed level the animation should target right now.
+/// Report the current synthesized-speech level. Called from the output callback.
+pub fn feed_speech_level(rms: f32) {
+    SPEECH_LEVEL.store(rms.to_bits(), Ordering::Relaxed);
+}
+
+/// The raw level the animation should target for the active mode.
 #[allow(dead_code)]
-fn level() -> f32 {
-    f32::from_bits(LEVEL.load(Ordering::Relaxed))
+fn level(state: OverlayState) -> f32 {
+    let bits = match state {
+        OverlayState::Speaking => SPEECH_LEVEL.load(Ordering::Relaxed),
+        _ => MIC_LEVEL.load(Ordering::Relaxed),
+    };
+    f32::from_bits(bits)
 }
 
 fn is_enabled() -> bool {
@@ -93,7 +105,8 @@ mod macos {
     const DEFAULT_DOCK: f64 = 70.0; // assumed Dock height when it auto-hides
     const PAD_V: f64 = 4.0; // vertical inset inside the pill (smaller = taller bars)
     const BAR_MIN: f64 = 0.16; // idle bar height (fraction of usable height)
-    const GAIN: f64 = 28.0; // mic RMS → amplitude
+    const MIC_GAIN: f64 = 28.0; // mic RMS → amplitude
+    const SPEECH_GAIN: f64 = 8.0; // synthesized PCM is much hotter than mic RMS
     const AMP_CURVE: f64 = 0.6; // <1 compresses: normal speech already fills the bars
     const APPEAR_EASE: f64 = 0.34; // scale in/out speed (per 60 fps frame)
     const FPS: f64 = 60.0;
@@ -229,7 +242,7 @@ mod macos {
             }
             p.state = state;
             match state {
-                OverlayState::Recording => {
+                OverlayState::Recording | OverlayState::Speaking => {
                     // Scale in on the start sound.
                     reposition(p, mtm);
                     p.target = 1.0;
@@ -340,13 +353,29 @@ mod macos {
 
             // Compressed amplitude: a power curve (<1) lifts low/normal speech so
             // the bars are lively without shouting; quiet ≠ flat, loud saturates.
-            p.phase += 0.22;
-            let amp = (level() as f64 * GAIN).clamp(0.0, 1.0).powf(AMP_CURVE);
+            p.phase += if p.state == OverlayState::Speaking {
+                0.28
+            } else {
+                0.22
+            };
+            let gain = if p.state == OverlayState::Speaking {
+                SPEECH_GAIN
+            } else {
+                MIC_GAIN
+            };
+            let amp = (level(p.state) as f64 * gain)
+                .clamp(0.0, 1.0)
+                .powf(AMP_CURVE);
             let usable = (PILL_H - 2.0 * PAD_V) * s;
             let center = (BAR_COUNT as f64 - 1.0) / 2.0;
             for i in 0..p.bars.len() {
                 let prox = 1.0 - (i as f64 - center).abs() / (center + 1.0); // centre taller
-                let wobble = 0.6 + 0.4 * (p.phase + i as f64 * 0.9).sin();
+                let phase_offset = if p.state == OverlayState::Speaking {
+                    -(i as f64) * 0.75 // output wave travels left → right
+                } else {
+                    i as f64 * 0.9
+                };
+                let wobble = 0.6 + 0.4 * (p.phase + phase_offset).sin();
                 let target = (BAR_MIN + (1.0 - BAR_MIN) * amp * (0.55 + 0.45 * prox) * wobble)
                     .clamp(BAR_MIN, 1.0);
                 p.smooth[i] += (target - p.smooth[i]) * 0.35;

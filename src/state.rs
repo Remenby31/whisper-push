@@ -50,6 +50,11 @@ pub enum Event {
     /// Hide the overlay pill — sent on the early-exit paths (quick-tap cancel,
     /// model-switch re-queue, mic-open failure) so a shown pill never sticks.
     HideOverlay,
+    /// TTS playback started/stopped. Kept separate from the dictation state so
+    /// the bottom pill can visualize app speech without changing the tray icon
+    /// or blocking microphone capture.
+    TtsPlaybackStarted,
+    TtsPlaybackFinished,
     /// Menu item clicked (menu item id string)
     MenuClicked(String),
     /// Prompt for missing permissions (after event loop is running)
