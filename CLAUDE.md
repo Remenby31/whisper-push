@@ -205,6 +205,11 @@ Enhancements layered on top of the existing modules — no new architectural pie
 - **DMG install window** — `resources/dmg-background.svg` is the source; `make
   dmg-artwork` re-renders the committed `.png`/`@2x.png`/`.tiff` (needs `brew
   install librsvg`), and `make dmg` passes the `.tiff` to `create-dmg`. The
+  wordmark is the **whisperpush.com** lockup, not a rebuild of it: same wave
+  geometry and the same hand (Caveat Bold 78 / letter-spacing −1 / textLength
+  342, monochrome like the site's `currentColor`), outlined into paths so the
+  render needs no font installed. Re-derive it from `index.html` on the website
+  repo if the site's mark ever changes. The
   window geometry lives in ONE place, the `DMG_*` variables at the top of the
   Makefile, because the drawing depends on it: the arrow runs between the two
   icon centres and the icons plus **their Finder-drawn labels** must land on the
