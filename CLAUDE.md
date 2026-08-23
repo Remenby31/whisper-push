@@ -205,6 +205,11 @@ Enhancements layered on top of the existing modules — no new architectural pie
 - **DMG install window** — `resources/dmg-background.svg` is the source; `make
   dmg-artwork` re-renders the committed `.png`/`@2x.png`/`.tiff` (needs `brew
   install librsvg`), and `make dmg` passes the `.tiff` to `create-dmg`. The
+  hand-drawn arrow keeps its untouched source next to it
+  (`resources/dmg-arrow-source.svg`, from SVG Repo) and is placed by a
+  measured transform — rotated 180° since the source points left, scaled to
+  130 px, its own ink centre brought onto the icon axis — so re-deriving it
+  after a geometry change is arithmetic, not eyeballing. The
   wordmark is the **whisperpush.com** lockup, not a rebuild of it: same wave
   geometry and the same hand (Caveat Bold 78 / letter-spacing −1 / textLength
   342, monochrome like the site's `currentColor`), outlined into paths so the
