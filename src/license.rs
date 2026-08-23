@@ -1,4 +1,4 @@
-//! Lemon Squeezy licensing — 7-day trial then locked, key + verified email.
+//! Lemon Squeezy licensing — 7-day trial then locked, then a license key.
 //!
 //! Output-side gate only: `is_entitled()` is a cheap RwLock read + arithmetic on
 //! the hot path; the network (activate/validate/deactivate) runs off-thread or on
@@ -90,7 +90,7 @@ pub struct LicenseState {
     license_key: Option<String>,
     instance_id: Option<String>,
     instance_name: Option<String>,
-    customer_email: Option<String>, // verified, lowercased
+    customer_email: Option<String>, // as reported by the server, lowercased
     product_kind: Option<ProductKind>,
     key_status: Option<KeyStatus>,
     expires_at_raw: Option<String>, // ISO string for display (None = lifetime)
@@ -211,8 +211,12 @@ fn file_mtime() -> u64 {
 fn maybe_reload() {
     let disk = file_mtime();
     if disk != 0 && disk != LOADED_MTIME.load(Ordering::Relaxed) {
-        LOADED_MTIME.store(disk, Ordering::Relaxed);
         if let Ok(content) = std::fs::read_to_string(license_path()) {
+            // Mark the revision as *seen* only now. Storing it before the read
+            // meant a transient failure (or a file replaced mid-read) retired
+            // that revision for good: we would never look at it again, and the
+            // menu would keep showing the previous verdict until the next write.
+            LOADED_MTIME.store(disk, Ordering::Relaxed);
             if let Ok(fresh) = serde_json::from_str::<LicenseState>(&content) {
                 // The external write we welcome is an activation by the CLI or
                 // the Subscription modal — both go through `save`, so both are
@@ -235,16 +239,94 @@ fn write() -> RwLockWriteGuard<'static, LicenseState> {
 }
 
 /// Arm state + kick a background revalidation if a key is due. Never blocks.
+/// mtime of license.json, or 0. A cheap change detector for the UI: the modal
+/// (a separate process) activates and deactivates by rewriting this file, and
+/// the tray owns the menu, so the menu has to notice. One `stat`.
+pub fn disk_revision() -> u64 {
+    file_mtime()
+}
+
+/// Load license.json (anchoring the trial on first run). No network — safe for
+/// the CLI, whose process exits right after printing. The daemon adds
+/// `start_background_revalidation` on top.
 pub fn init() {
-    let (has_key, last_attempt) = {
-        let s = read();
-        (s.license_key.is_some(), s.last_validation_attempt)
-    };
-    if has_key && now().saturating_sub(last_attempt) > REVALIDATE_EVERY {
-        std::thread::spawn(|| {
-            let _ = validate();
-        });
+    let _ = ensure();
+}
+
+/// Re-try a due server check no more often than this while it keeps failing
+/// (offline), so a customer in the offline grace window is re-confirmed within
+/// the hour of the network coming back rather than after REVALIDATE_EVERY.
+const REVALIDATE_RETRY: u64 = 55 * 60;
+/// How often the daemon re-stats license.json. The modal and the `license` CLI
+/// both activate/deactivate by rewriting that file *from another process*,
+/// while the tray owns the menu — without this, the menu keeps claiming
+/// "Trial expired" after a successful activation until something else redraws
+/// it. One `stat` per tick.
+const DISK_POLL: Duration = Duration::from_secs(1);
+/// How often that same loop considers an online re-check (cheap: usually a lock
+/// read that says "not due").
+const REVALIDATE_EVERY_TICKS: u32 = 3600;
+
+/// A key is stored and its server verdict is older than REVALIDATE_EVERY (and
+/// we haven't just tried). Also true right after the v2 upgrade, where
+/// `load_anchored` zeroes the verdict of an untagged file on purpose.
+fn revalidation_due() -> bool {
+    let s = read();
+    let t = now();
+    s.license_key.is_some()
+        && t.saturating_sub(s.last_validated_ok) > REVALIDATE_EVERY
+        && t.saturating_sub(s.last_validation_attempt) >= REVALIDATE_RETRY
+}
+
+/// Re-check the key online if it's due. Blocks for up to `HTTP_TIMEOUT`, so the
+/// daemon's background loop is the only caller — deliberately not the CLI, whose
+/// `status` the license modal runs before it can draw its first frame.
+/// Returns whether a check ran, so the caller can refresh the UI.
+fn revalidate_if_due() -> bool {
+    if !revalidation_due() {
+        return false;
     }
+    let _ = validate();
+    true
+}
+
+/// Daemon only: keep the world in sync with license.json for the whole run.
+///
+/// Two jobs, one thread because they share the same "did the verdict change?"
+/// follow-up:
+///  * **disk** — notice activations and deactivations performed by another
+///    process (the license modal, `whisper-push license activate`) and refresh
+///    the menu, every [`DISK_POLL`].
+///  * **server** — re-confirm the cached verdict when it is due. Without it a
+///    daemon that simply stays up slides from Licensed to GraceOffline after 3
+///    days and locks a paying customer after 14, while online the whole time.
+///
+/// The online check blocks for up to `HTTP_TIMEOUT`, which stalls the disk poll
+/// for that long at most once an hour — a delay nobody can perceive on a menu.
+pub fn start_background_sync() {
+    std::thread::Builder::new()
+        .name("license-sync".into())
+        .spawn(|| {
+            let mut seen = disk_revision();
+            let mut ticks = REVALIDATE_EVERY_TICKS; // check once at startup
+            loop {
+                if ticks >= REVALIDATE_EVERY_TICKS {
+                    ticks = 0;
+                    if revalidate_if_due() {
+                        seen = disk_revision(); // our own write, not someone else's
+                        crate::tray::post(crate::state::Event::LicenseChanged);
+                    }
+                }
+                let rev = disk_revision();
+                if rev != seen {
+                    seen = rev;
+                    crate::tray::post(crate::state::Event::LicenseChanged);
+                }
+                ticks += 1;
+                std::thread::sleep(DISK_POLL);
+            }
+        })
+        .ok();
 }
 
 /// The single source of truth. Pure over (state, now) → testable, no network.
@@ -318,7 +400,9 @@ pub fn status() -> LicenseStatus {
     evaluate(&read(), now())
 }
 
-/// Hot-path gate. One RwLock read + arithmetic.
+/// Hot-path gate: one `stat` (to notice an activation done by the modal or the
+/// CLI, which are separate processes), an RwLock read and arithmetic. No
+/// network, no parse unless the file actually changed.
 pub fn is_entitled() -> bool {
     matches!(
         status(),
@@ -361,15 +445,14 @@ fn post_form(url: &str, params: &[(&str, &str)]) -> Result<Value, NetErr> {
     }
 }
 
-/// Activate this device. Verifies store/product, test-mode, and email match.
-pub fn activate(key: &str, email: &str) -> ActivateOutcome {
+/// Activate this device with a license key. The key alone is the credential —
+/// Lemon Squeezy's activate call takes nothing else, and the purchase email it
+/// returns is only recorded for display (`status_json`). Verifies store/product
+/// ownership and test-mode; any rejection past activation frees the slot again.
+pub fn activate(key: &str) -> ActivateOutcome {
     let key = key.trim().to_string();
-    let email = email.trim().to_lowercase();
     if key.is_empty() {
         return ActivateOutcome::Rejected("Empty license key.".into());
-    }
-    if email.is_empty() {
-        return ActivateOutcome::Rejected("Email required.".into());
     }
 
     // Already activated on this device for this key → just revalidate, no new slot.
@@ -438,29 +521,36 @@ pub fn activate(key: &str, email: &str) -> ActivateOutcome {
     if !belongs_to_us(store_id, product_id) {
         return reject("This license key isn't for Whisper Push.");
     }
-    if cust_email != email {
-        return reject("Email doesn't match this license.");
-    }
 
     let mut s = write();
     s.license_key = Some(key);
     s.instance_id = instance_id;
     s.instance_name = Some(name);
-    s.customer_email = Some(cust_email);
+    s.customer_email = (!cust_email.is_empty()).then_some(cust_email);
     s.apply(&v);
     let t = now();
     s.last_validated_ok = t;
     s.last_validation_attempt = t;
     save(&s);
+    // Log every entitlement change: these are the events support questions are
+    // made of ("it says trial expired and I never touched it"), and without a
+    // line here a deactivation is indistinguishable from a bug.
+    tracing::info!(
+        "license activated: {} ({:?}, {} of {} device slots used)",
+        masked(&s.license_key),
+        s.product_kind,
+        s.activation_usage.unwrap_or(0),
+        s.activation_limit.unwrap_or(0)
+    );
     ActivateOutcome::Activated
 }
 
 /// Refresh the cached verdict from the server. Off-thread; never on hot path.
 pub fn validate() -> ValidateOutcome {
-    let (key, instance_id, verified) = {
+    let (key, instance_id) = {
         let s = read();
         match s.license_key.clone() {
-            Some(k) => (k, s.instance_id.clone(), s.customer_email.clone()),
+            Some(k) => (k, s.instance_id.clone()),
             None => return ValidateOutcome::Invalid,
         }
     };
@@ -482,22 +572,15 @@ pub fn validate() -> ValidateOutcome {
     s.last_validation_attempt = now();
     s.apply(&v);
     let valid = v.get("valid").and_then(Value::as_bool).unwrap_or(false);
-    let email_ok = match (
-        verified.as_deref(),
-        v.pointer("/meta/customer_email").and_then(Value::as_str),
-    ) {
-        (Some(a), Some(b)) => a == b.to_lowercase(),
-        _ => true, // can't compare → don't fail on this alone
-    };
+    if let Some(e) = v.pointer("/meta/customer_email").and_then(Value::as_str) {
+        s.customer_email = Some(e.to_lowercase()); // keep the display copy fresh
+    }
 
-    if valid && email_ok {
+    if valid {
         s.last_validated_ok = now();
         save(&s);
         ValidateOutcome::Valid
     } else {
-        if !email_ok {
-            s.key_status = Some(KeyStatus::Disabled);
-        }
         let err = v
             .get("error")
             .and_then(Value::as_str)
@@ -507,6 +590,11 @@ pub fn validate() -> ValidateOutcome {
             s.instance_id = None; // instance revoked elsewhere → allow re-activation
         }
         save(&s);
+        tracing::warn!(
+            "license validation rejected by the server: {} (status {:?})",
+            masked(&s.license_key),
+            s.key_status
+        );
         ValidateOutcome::Invalid
     }
 }
@@ -537,6 +625,10 @@ pub fn deactivate() -> DeactivateOutcome {
 
 fn clear() {
     let mut s = write();
+    tracing::info!(
+        "license cleared: {} (device slot freed)",
+        masked(&s.license_key)
+    );
     let trial = s.trial_started_at;
     let hw = s.clock_high_water;
     *s = LicenseState {
@@ -578,13 +670,14 @@ pub fn on_blocked() {
 }
 
 /// Open the in-app subscription / activation modal — the same window the tray's
-/// "Subscription…" item opens, so checkout lives in exactly one place. Runs on
-/// its own thread (the notification delegate spawns it); the daemon then picks up
-/// the resulting license.json via `maybe_reload`, so no manual refresh is needed.
+/// "Subscribe…" item opens, so checkout lives in exactly one place. The
+/// notification delegate calls this off the main thread, so it only *posts* the
+/// request; the tray opens the window from the main thread (where it can hand
+/// activation to the helper app) and refreshes the license when it closes.
 fn open_paywall() {
-    if !crate::onboarding::run_license_window(false) {
-        tracing::info!("license: subscribe action — license window unavailable (dev build?)");
-    }
+    crate::tray::post(crate::state::Event::OpenLicenseWindow {
+        start_activate: false,
+    });
 }
 
 // ─── Display (tray + CLI) ───────────────────────────────────────────────────
@@ -595,20 +688,42 @@ pub fn status_text() -> String {
         LicenseStatus::Trial { days_left } => {
             format!("Trial: {days_left} day{} left", plural(days_left))
         }
-        LicenseStatus::Licensed(LicensedKind::Lifetime) => "Licensed \u{2014} Lifetime".into(),
+        LicenseStatus::Licensed(LicensedKind::Lifetime) => "Licensed: Lifetime".into(),
         LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
             match read().expires_at_raw.as_deref().and_then(|s| s.get(0..10)) {
-                Some(d) => format!("Licensed \u{2014} renews {d}"),
-                None => "Licensed \u{2014} Monthly".into(),
+                Some(d) => format!("Licensed: renews {d}"),
+                None => "Licensed: Monthly".into(),
             }
         }
-        LicenseStatus::GraceOffline { days_left } => format!(
-            "Offline \u{2014} {days_left} day{} to reconnect",
-            plural(days_left)
-        ),
-        LicenseStatus::Expired => "Subscription expired \u{2014} renew".into(),
+        LicenseStatus::GraceOffline { days_left } => {
+            format!("Offline: {days_left} day{} to reconnect", plural(days_left))
+        }
+        LicenseStatus::Expired => "Subscription expired: renew".into(),
         LicenseStatus::Disabled => "License inactive".into(),
-        LicenseStatus::Locked => "Trial expired \u{2014} activate".into(),
+        LicenseStatus::Locked => "Trial expired: activate".into(),
+    }
+}
+
+/// The top-of-menu call to action, wording included. Everything the greyed
+/// "Trial \u{2502} 3 days left" line used to say is folded in here, because a line
+/// you cannot click is decoration: one item, clickable, that states the
+/// situation and what pressing it does. Lives beside `status_text` and
+/// `submenu_title` so the three readings of one enum cannot drift apart.
+pub fn cta_text(status: &LicenseStatus) -> String {
+    match status {
+        LicenseStatus::Trial { days_left } => format!(
+            "\u{2726} Unlock Whisper Push \u{2502} {days_left} day{} left",
+            plural(*days_left)
+        ),
+        LicenseStatus::Locked => "\u{2726} Trial ended \u{2502} Unlock Whisper Push\u{2026}".into(),
+        LicenseStatus::Expired => "\u{2726} Subscription expired \u{2502} Renew\u{2026}".into(),
+        LicenseStatus::Disabled => "\u{2726} License inactive \u{2502} Fix now\u{2026}".into(),
+        LicenseStatus::GraceOffline { days_left } => format!(
+            "\u{2726} Offline \u{2502} reconnect within {days_left} day{}",
+            plural(*days_left)
+        ),
+        // Licensed: the head of the menu is empty, so this text is never shown.
+        LicenseStatus::Licensed(_) => "\u{2726} Manage License\u{2026}".into(),
     }
 }
 
@@ -616,31 +731,52 @@ pub fn status_text() -> String {
 pub fn submenu_title() -> String {
     match status() {
         LicenseStatus::Licensed(_) => "License \u{2713}".into(),
-        LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => {
-            "License \u{2014} Trial".into()
-        }
+        LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => "License: Trial".into(),
         _ => "\u{26a0} License".into(),
     }
 }
 
-/// Machine-readable status (for the CLI / Swift onboarding).
+/// Machine-readable status (for the CLI / Swift onboarding). Licensed states
+/// also carry the purchase email and, for subscriptions, the renewal date, so
+/// the modal can show "Licensed to …" without a second round-trip.
 pub fn status_json() -> String {
-    match status() {
-        LicenseStatus::Trial { days_left } => {
-            format!("{{\"status\":\"trial\",\"days_left\":{days_left}}}")
-        }
-        LicenseStatus::Licensed(LicensedKind::Lifetime) => {
-            "{\"status\":\"licensed\",\"kind\":\"lifetime\"}".into()
-        }
-        LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
-            "{\"status\":\"licensed\",\"kind\":\"subscription\"}".into()
+    use serde_json::json;
+    let v = match status() {
+        LicenseStatus::Trial { days_left } => json!({"status": "trial", "days_left": days_left}),
+        LicenseStatus::Licensed(kind) => {
+            let s = read();
+            let renews = s.expires_at_raw.as_deref().and_then(|d| d.get(0..10));
+            json!({
+                "status": "licensed",
+                "kind": match kind {
+                    LicensedKind::Lifetime => "lifetime",
+                    LicensedKind::Subscription { .. } => "subscription",
+                },
+                "email": s.customer_email,
+                "renews": renews,
+                // The user's own key, so they can copy it onto another device
+                // without digging through their purchase email. Local-only: it
+                // already sits in license.json next to this binary.
+                "key": s.license_key,
+            })
         }
         LicenseStatus::GraceOffline { days_left } => {
-            format!("{{\"status\":\"grace_offline\",\"days_left\":{days_left}}}")
+            json!({"status": "grace_offline", "days_left": days_left})
         }
-        LicenseStatus::Expired => "{\"status\":\"expired\"}".into(),
-        LicenseStatus::Disabled => "{\"status\":\"disabled\"}".into(),
-        LicenseStatus::Locked => "{\"status\":\"locked\"}".into(),
+        LicenseStatus::Expired => json!({"status": "expired"}),
+        LicenseStatus::Disabled => json!({"status": "disabled"}),
+        LicenseStatus::Locked => json!({"status": "locked"}),
+    };
+    v.to_string()
+}
+
+/// A key as it may appear in a log or a support paste: enough to tell two keys
+/// apart, never enough to use one.
+fn masked(key: &Option<String>) -> String {
+    match key {
+        Some(k) if k.len() > 8 => format!("{}\u{2026}", &k[..8]),
+        Some(_) => "<short>".into(),
+        None => "<none>".into(),
     }
 }
 
@@ -840,7 +976,19 @@ fn compute_mac(s: &LicenseState) -> String {
 fn verify_mac(s: &LicenseState) -> bool {
     match &s.mac {
         Some(tag) => *tag == compute_mac(s),
-        None => s.version < STATE_VERSION,
+        // Untagged ⇒ accepted, whatever `version` says. Requiring
+        // `version < STATE_VERSION` here ("once you're at v2 you must carry a
+        // tag") looks tighter and is actually a licence-eating bug: a *pre-HMAC*
+        // binary writing this file legitimately produces v2-without-tag — it
+        // deserializes a v2 file into a struct that has no `mac` field, then
+        // saves it back with `version: 2` and the tag silently dropped. That is
+        // exactly what an in-app update does while the old daemon outlives the
+        // new bundle, and the next start would quarantine a paying customer's
+        // key. The check bought no security either: a forger drops the tag AND
+        // writes `version: 1` just as easily. What actually protects us is that
+        // an untagged file is never trusted on its own — `load_anchored` sends
+        // its key back through Lemon Squeezy before it entitles anything.
+        None => true,
     }
 }
 
@@ -1147,14 +1295,28 @@ mod mac_tests {
     }
 
     #[test]
-    fn requires_a_tag_once_at_v2() {
+    fn untagged_v2_file_is_grandfathered_not_quarantined() {
+        // Regression: a pre-HMAC binary (an older daemon still running through
+        // an in-app update) rewrites the file with `version: 2` and no `mac`,
+        // because its struct has no such field. Rejecting that shape quarantined
+        // the file and wiped a paying customer's key on the next start. It must
+        // be accepted — `load_anchored` still forces the key back through the
+        // server, so nothing is entitled on the file's word alone.
         let untagged_v2 = LicenseState {
             version: STATE_VERSION,
             license_key: Some("ABC-123".into()),
             mac: None,
             ..Default::default()
         };
-        assert!(!verify_mac(&untagged_v2));
+        assert!(verify_mac(&untagged_v2));
+
+        // …and the cached verdict it carries is neutered exactly like the v1 case.
+        let mut neutered = untagged_v2.clone();
+        neutered.key_status = Some(KeyStatus::Active);
+        neutered.product_kind = Some(ProductKind::Lifetime);
+        neutered.last_validated_ok = 0;
+        neutered.last_validation_attempt = 0;
+        assert_eq!(evaluate(&neutered, 2_000_100), LicenseStatus::Locked);
     }
 
     #[test]

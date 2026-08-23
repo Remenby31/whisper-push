@@ -93,15 +93,51 @@ pub fn run() -> Option<String> {
     Some(run_fallback(recommended_backend, recommended_model))
 }
 
+/// Bundle id of the onboarding / license helper app (see `resources/Onboarding-Info.plist`).
+#[cfg(target_os = "macos")]
+pub const WIZARD_BUNDLE_ID: &str = "com.whisper-push.onboarding";
+
+/// Hand foreground activation to the helper app *before* launching it. Since
+/// macOS 14 activation is cooperative: a process spawned by a menu-bar accessory
+/// is not allowed to make itself frontmost on its own — the helper's own
+/// `activate()` is silently ignored whenever the user is busy in another app, and
+/// its window then floats without keyboard focus (buttons and text fields look
+/// dead until the user clicks into it). Yielding from our side is the sanctioned
+/// fix; it must run on the main thread, so callers off it just skip (best effort).
+#[cfg(target_os = "macos")]
+pub fn yield_activation_to_wizard() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::NSString;
+    match MainThreadMarker::new() {
+        Some(mtm) => {
+            let app = NSApplication::sharedApplication(mtm);
+            app.yieldActivationToApplicationWithBundleIdentifier(&NSString::from_str(
+                WIZARD_BUNDLE_ID,
+            ));
+        }
+        None => tracing::warn!(
+            "license window: activation yield called off the main thread — the \
+             modal will open without keyboard focus"
+        ),
+    }
+}
+
 /// Open the license/payment modal (the onboarding wizard in `--license-only`
 /// mode) and block until it closes. Returns false if the wizard isn't installed
-/// (e.g. a `cargo run` dev build) so the caller can fall back to a CLI dialog.
+/// (e.g. a `cargo run` dev build) or could not be launched, so the caller can
+/// fall back to a CLI dialog — every failure is logged, never swallowed.
 #[cfg(target_os = "macos")]
 pub fn run_license_window(start_activate: bool) -> bool {
     let Some(wizard) = wizard_binary_path() else {
+        info!("license window: can't resolve the helper path");
         return false;
     };
     if !wizard.exists() {
+        info!(
+            "license window: helper not installed at {}",
+            wizard.display()
+        );
         return false;
     }
     let daemon = std::env::current_exe().unwrap_or_default();
@@ -113,6 +149,9 @@ pub fn run_license_window(start_activate: bool) -> bool {
     }
     args.push("--daemon-path".into());
     args.push(daemon.to_string_lossy().into_owned());
+    // NB: the activation yield must already have happened — it only works on the
+    // main thread and this function is called from a worker (see
+    // `tray::App::open_license_window`, which yields before spawning).
     // Launch the wizard's .app through LaunchServices (`open`) instead of exec'ing
     // the binary directly. A GUI process *spawned by our menu-bar accessory* is
     // denied foreground activation by macOS and opens behind everything — the
@@ -122,29 +161,49 @@ pub fn run_license_window(start_activate: bool) -> bool {
     let bundle = wizard
         .parent()
         .and_then(|p| p.parent())
-        .and_then(|p| p.parent());
-    if let Some(app) = bundle {
-        if app.extension().map_or(false, |e| e == "app") {
-            return std::process::Command::new("/usr/bin/open")
-                .arg("-W")
-                .arg(app)
-                .arg("--args")
-                .args(&args)
-                .status()
-                .is_ok();
+        .and_then(|p| p.parent())
+        .filter(|p| p.extension().is_some_and(|e| e == "app"));
+    let (program, mut cmd) = match bundle {
+        Some(app) => {
+            let mut c = std::process::Command::new("/usr/bin/open");
+            c.arg("-W").arg(app).arg("--args").args(&args);
+            ("open", c)
+        }
+        None => {
+            // Dev / non-bundled binary: exec it directly.
+            let mut c = std::process::Command::new(&wizard);
+            c.args(&args);
+            ("helper", c)
+        }
+    };
+    info!("license window: launching via {program} (start_activate={start_activate})");
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            info!("license window: closed");
+            true
+        }
+        Ok(out) => {
+            tracing::warn!(
+                "license window: {program} exited with {}: {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!("license window: couldn't spawn {program}: {e}");
+            false
         }
     }
-    // Fallback (dev / non-bundled binary): exec it directly.
-    std::process::Command::new(&wizard)
-        .args(&args)
-        .status()
-        .is_ok()
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn run_license_window(_start_activate: bool) -> bool {
     false
 }
+
+#[cfg(not(target_os = "macos"))]
+pub fn yield_activation_to_wizard() {}
 
 /// Locate the wizard binary in its sub-bundle:
 ///   <.app>/Contents/Library/Helpers/Onboarding.app/Contents/MacOS/Onboarding

@@ -26,9 +26,28 @@ pub fn is_newer(local: &str, remote: &str) -> bool {
     }
 }
 
-/// Parse a GitHub Releases API JSON response.
-/// Returns `Some((version, zip_url))` if a newer version is available.
-pub fn parse_release_json(json: &str) -> anyhow::Result<Option<(String, String)>> {
+/// Outcome of an update check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateCheck {
+    /// Running the latest release (or newer). No action.
+    UpToDate,
+    /// A newer release exists with an installable asset for this platform.
+    Available { version: String, url: String },
+    /// A newer release exists but ships no asset matching this platform (the
+    /// packaging is missing or was renamed). Kept distinct from `UpToDate` so a
+    /// manual check points the user at the releases page instead of silently
+    /// reporting "up to date" forever — the bug this enum was introduced to fix.
+    NoAsset { version: String },
+}
+
+/// GitHub page listing the latest release's downloads — offered when a newer
+/// release has no asset we can auto-install (`UpdateCheck::NoAsset`).
+pub fn releases_page() -> String {
+    format!("https://github.com/{GITHUB_REPO}/releases/latest")
+}
+
+/// Parse a GitHub Releases API JSON response into an [`UpdateCheck`].
+pub fn parse_release_json(json: &str) -> anyhow::Result<UpdateCheck> {
     let v: serde_json::Value = serde_json::from_str(json)?;
     let tag = v["tag_name"]
         .as_str()
@@ -36,10 +55,10 @@ pub fn parse_release_json(json: &str) -> anyhow::Result<Option<(String, String)>
     let version = tag.strip_prefix('v').unwrap_or(tag);
 
     if !is_newer(env!("CARGO_PKG_VERSION"), version) {
-        return Ok(None);
+        return Ok(UpdateCheck::UpToDate);
     }
 
-    // Find the macOS ZIP asset
+    // A newer release exists — find the installable asset for this platform.
     let asset_name = zip_asset_name();
     if let Some(assets) = v["assets"].as_array() {
         for asset in assets {
@@ -50,14 +69,19 @@ pub fn parse_release_json(json: &str) -> anyhow::Result<Option<(String, String)>
                     .unwrap_or("")
                     .to_string();
                 if !url.is_empty() {
-                    return Ok(Some((version.to_string(), url)));
+                    return Ok(UpdateCheck::Available {
+                        version: version.to_string(),
+                        url,
+                    });
                 }
             }
         }
     }
 
-    // No matching asset found
-    Ok(None)
+    // Newer release, but no asset we can install here — don't lie "up to date".
+    Ok(UpdateCheck::NoAsset {
+        version: version.to_string(),
+    })
 }
 
 /// The expected ZIP asset name for the current platform.
@@ -72,7 +96,7 @@ fn zip_asset_name() -> &'static str {
 }
 
 /// Check GitHub Releases for a newer version.
-pub fn check_for_update() -> anyhow::Result<Option<(String, String)>> {
+pub fn check_for_update() -> anyhow::Result<UpdateCheck> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
     let response = ureq::get(&url)
         .config()
@@ -125,12 +149,20 @@ pub fn spawn_check(tx: Sender<Event>, check_updates: bool) {
             }
 
             match check_for_update() {
-                Ok(Some((version, url))) => {
+                Ok(UpdateCheck::Available { version, url }) => {
                     info!("Update available: v{version}");
                     write_cache(&version, Some(&url));
                     let _ = tx.send(Event::UpdateAvailable(version, url));
                 }
-                Ok(None) => {
+                Ok(UpdateCheck::NoAsset { version }) => {
+                    // A newer release exists but has no asset for this platform.
+                    // A background check must not nag (no toast, no menu change) —
+                    // just log it and cache as "no installable update" so we honour
+                    // the check interval. A manual check surfaces the download page.
+                    info!("v{version} released but no installable asset for this platform");
+                    write_cache(env!("CARGO_PKG_VERSION"), None);
+                }
+                Ok(UpdateCheck::UpToDate) => {
                     info!("No update available");
                     write_cache(env!("CARGO_PKG_VERSION"), None);
                 }
@@ -210,23 +242,37 @@ mod tests {
                 "browser_download_url": "https://github.com/Remenby31/whisper-push/releases/download/v99.0.0/Whisper-Push-macOS-arm64.zip"
             }]
         }"#;
-        let result = parse_release_json(json).unwrap().unwrap();
-        assert_eq!(result.0, "99.0.0");
-        assert!(result.1.contains("macOS-arm64.zip"));
+        // The macOS asset name is what this (test) binary looks for on macOS; on
+        // other hosts the platform asset differs, so only assert Available there.
+        match parse_release_json(json).unwrap() {
+            UpdateCheck::Available { version, url } => {
+                assert_eq!(version, "99.0.0");
+                assert!(url.contains("macOS-arm64.zip"));
+            }
+            #[cfg(target_os = "macos")]
+            other => panic!("expected Available, got {other:?}"),
+            #[cfg(not(target_os = "macos"))]
+            // Off macOS the macOS-only asset isn't a match → NoAsset is correct.
+            UpdateCheck::NoAsset { version } => assert_eq!(version, "99.0.0"),
+            #[cfg(not(target_os = "macos"))]
+            other => panic!("expected Available or NoAsset, got {other:?}"),
+        }
     }
 
     #[test]
-    fn test_parse_release_json_no_update() {
+    fn test_parse_release_json_up_to_date() {
         let json = format!(
             r#"{{ "tag_name": "v{}", "assets": [] }}"#,
             env!("CARGO_PKG_VERSION")
         );
-        let result = parse_release_json(&json).unwrap();
-        assert!(result.is_none());
+        assert_eq!(parse_release_json(&json).unwrap(), UpdateCheck::UpToDate);
     }
 
     #[test]
-    fn test_parse_release_json_missing_asset() {
+    fn test_parse_release_json_newer_but_missing_asset_is_no_asset() {
+        // Regression guard: a newer release whose assets don't include this
+        // platform's package must report NoAsset, NOT UpToDate — otherwise a
+        // renamed/absent asset silently reports "up to date" forever.
         let json = r#"{
             "tag_name": "v99.0.0",
             "assets": [{
@@ -234,13 +280,23 @@ mod tests {
                 "browser_download_url": "https://example.com/other.zip"
             }]
         }"#;
-        let result = parse_release_json(json).unwrap();
-        assert!(result.is_none());
+        assert_eq!(
+            parse_release_json(json).unwrap(),
+            UpdateCheck::NoAsset {
+                version: "99.0.0".to_string()
+            }
+        );
     }
 
     #[test]
     fn test_parse_release_json_malformed() {
         assert!(parse_release_json("not json").is_err());
         assert!(parse_release_json("{}").is_err());
+    }
+
+    #[test]
+    fn test_releases_page_points_at_repo() {
+        assert!(releases_page().contains("Remenby31/whisper-push"));
+        assert!(releases_page().starts_with("https://"));
     }
 }

@@ -60,13 +60,34 @@ pub enum Event {
     DictChanged,
     /// The license state changed (activate/deactivate) — refresh its submenu
     LicenseChanged,
+    /// Open the license / subscription modal (the one surface for buying,
+    /// activating and managing a license). Routed through the UI thread so the
+    /// activation hand-off to the helper app happens on the main thread; `true`
+    /// lands directly on the enter-your-key screen.
+    OpenLicenseWindow { start_activate: bool },
     /// Trailing tray-icon refresh: re-apply the current state's icon on the main
     /// thread after a coalesced burst (see `tray::set_tray_icon`).
     RefreshTrayIcon,
+    /// Mid-recording microphone health probe, self-scheduled by the pipeline.
+    /// The u64 is a generation counter: checks scheduled for a recording that
+    /// already ended (or was superseded) carry a stale gen and are ignored.
+    MicHealthCheck(u64),
+    /// The input was auto-switched to a working mic (its name) after a dead one
+    /// was detected — retitle the Input submenu so it shows what's actually
+    /// recording (checkmarks stay on the saved config).
+    InputSwitched(String),
+    /// The hotkey capture armed by "Set Custom Hotkey…" ran out of time. The
+    /// u64 is a generation counter, so a timeout belonging to an earlier,
+    /// already-finished capture can't cancel the one running now.
+    HotkeyCaptureTimeout(u64),
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
     /// A new version is available (version, download_url)
     UpdateAvailable(String, String),
+    /// Show a manual-check result as the update menu item's text — the menu is
+    /// reliable feedback where notifications (deprecated NSUserNotification)
+    /// can be silently invisible.
+    UpdateStatus(String),
     /// Update download/install failed (error message)
     UpdateFailed(String),
     /// Request quit

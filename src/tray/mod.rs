@@ -3,6 +3,7 @@ use crate::state::{AppState, Event, State};
 use crate::util::LockSafe;
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -75,27 +76,23 @@ fn device_title(label: &str, value: &str) -> String {
 // single-key presets only.
 #[cfg(target_os = "macos")]
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
-    ("Hold \u{2014} Control", "ctrl", "hold"),
-    ("Hold \u{2014} Right Control", "rctrl", "hold"),
-    ("Hold \u{2014} Right Command", "rcmd", "hold"),
-    ("Hold \u{2014} Right Option", "ralt", "hold"),
+    ("Hold: Control", "ctrl", "hold"),
+    ("Hold: Right Control", "rctrl", "hold"),
+    ("Hold: Right Command", "rcmd", "hold"),
+    ("Hold: Right Option", "ralt", "hold"),
+    ("Toggle: \u{2318}\u{21e7}Space", "cmd+shift+space", "toggle"),
     (
-        "Toggle \u{2014} \u{2318}\u{21e7}Space",
-        "cmd+shift+space",
-        "toggle",
-    ),
-    (
-        "Toggle \u{2014} \u{2303}\u{21e7}Space",
+        "Toggle: \u{2303}\u{21e7}Space",
         "ctrl+shift+space",
         "toggle",
     ),
 ];
 #[cfg(not(target_os = "macos"))]
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
-    ("Hold \u{2014} Control", "ctrl", "hold"),
-    ("Hold \u{2014} Right Control", "rctrl", "hold"),
-    ("Hold \u{2014} Right Alt", "ralt", "hold"),
-    ("Hold \u{2014} Right Super", "rcmd", "hold"),
+    ("Hold: Control", "ctrl", "hold"),
+    ("Hold: Right Control", "rctrl", "hold"),
+    ("Hold: Right Alt", "ralt", "hold"),
+    ("Hold: Right Super", "rcmd", "hold"),
 ];
 
 /// User events forwarded into winit's event loop.
@@ -106,6 +103,36 @@ enum UserEvent {
     Menu(MenuEvent),
     App(Event),
 }
+
+/// Permissions submenu title. Carries the count itself, so the greyed
+/// "⚠ N permission(s) missing" line that used to sit above it — unclickable and
+/// saying the same thing — is gone.
+fn perms_title(status: &crate::permissions::PermissionStatus) -> String {
+    if status.all_granted() {
+        "Permissions \u{2713}".into()
+    } else {
+        format!("\u{26a0} Permissions: {} to grant", status.missing_count())
+    }
+}
+
+/// How long "Set Custom Hotkey…" stays armed before giving up, so the menu
+/// never sits in "Press your shortcut now…" forever.
+const HOTKEY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Resting label of the custom-hotkey item: the binding when there is one (it
+/// then also carries the checkmark), otherwise the call to action.
+fn custom_hotkey_label(current: Option<String>) -> String {
+    match current {
+        Some(disp) => format!("Custom: {disp}"),
+        None => "Set Custom Hotkey\u{2026}".to_string(),
+    }
+}
+
+/// Suffix of the update-item text for "newer release, but no asset for this
+/// platform". `Event::UpdateStatus` carries only display text, so the
+/// `UpdateStatus` arm recognizes this exact suffix to arm
+/// `pending_release_page` (click then opens the releases page).
+const OPEN_RELEASES_HINT: &str = "open download page";
 
 /// The application struct that implements winit's ApplicationHandler.
 struct App {
@@ -118,10 +145,25 @@ struct App {
     menu_items: Option<MenuItems>,
     // Pending update info (version, download_url)
     pending_update: Option<(String, String)>,
+    // Releases page to open on update-item click when a newer release has no
+    // asset for this platform. Mutually exclusive with `pending_update`.
+    pending_release_page: Option<String>,
+    // "Set Custom Hotkey…" is armed and waiting for a combo. The generation
+    // counter lets a timeout tell its own capture from a later one.
+    capturing: bool,
+    capture_gen: u64,
 }
 
 struct MenuItems {
+    /// The root menu, kept so the head (CTA / status line) can be inserted and
+    /// removed as state changes — a greyed-out line nobody can click is noise,
+    /// so we show nothing rather than something dead.
+    menu: Menu,
+    /// Non-clickable state line. Only in the menu while it says something the
+    /// clickable items don't already: loading, recording, transcribing.
     status_item: MenuItem,
+    /// Separator under the head; in the menu only when the head has content.
+    head_separator: PredefinedMenuItem,
     #[allow(dead_code)]
     notifications_item: CheckMenuItem,
     #[allow(dead_code)]
@@ -141,6 +183,10 @@ struct MenuItems {
     hotkey_ids: Vec<(String, String, String)>,
     hotkey_items: Vec<(CheckMenuItem, String, String)>,
     hotkey_submenu: Submenu,
+    /// One item doing three jobs, so a custom binding is visible in the same
+    /// list as the presets: "Set Custom Hotkey…" when idle, "Press your shortcut
+    /// now…" while armed, and a *checked* "Custom: ⌘⇧D" once one is bound.
+    custom_hotkey_item: Option<CheckMenuItem>,
     custom_hotkey_id: String,
     input_ids: Vec<(String, String)>,
     input_device_items: Vec<(CheckMenuItem, String)>,
@@ -152,7 +198,7 @@ struct MenuItems {
     acc_perm_item: MenuItem,
     input_mon_perm_item: MenuItem,
     perms_submenu: Submenu,
-    warn_item: Option<MenuItem>,
+
     mic_perm_id: String,
     acc_perm_id: String,
     input_mon_perm_id: String,
@@ -187,12 +233,21 @@ struct MenuItems {
     // License (Lemon Squeezy)
     license_submenu: Submenu,
     license_status_item: MenuItem,
+    /// "Subscribe…" while unlicensed / "Manage License…" once a key is active.
+    license_subscription_item: MenuItem,
     license_subscription_id: String,
+    /// "Enter License Key…" — straight to the key screen; only present while
+    /// unlicensed (once you have a key there is nothing to enter).
+    license_activate_item: MenuItem,
+    license_activate_id: String,
+    /// "Deactivate this device…" — only present while licensed.
+    license_deactivate_item: MenuItem,
     license_deactivate_id: String,
-    /// Buy-forward top block, present only while unlicensed: an urgency status
-    /// line + an "Unlock" CTA. `unlock_id` is empty when the block isn't shown.
-    trial_label: Option<MenuItem>,
-    unlock_item: Option<MenuItem>,
+    /// Buy-forward CTA, in the menu only while unlicensed. It carries its own
+    /// urgency ("Unlock Whisper Push | 3 days left"), so there is no second,
+    /// greyed-out line saying the same thing; once licensed it goes away
+    /// entirely and the License submenu is the one place to manage it.
+    unlock_item: MenuItem,
     unlock_id: String,
 }
 
@@ -207,10 +262,38 @@ impl App {
             pipeline_tx: None,
             menu_items: None,
             pending_update: None,
+            pending_release_page: None,
+            capturing: false,
+            capture_gen: 0,
+        }
+    }
+
+    /// Disarm capture and put the menu item back to its resting label (the
+    /// current custom binding, if any). The one exit from capture mode.
+    fn end_hotkey_capture(&mut self) {
+        crate::hotkey::cancel_capture();
+        self.capturing = false;
+        self.capture_gen += 1;
+        let cfg = self.config.lock_safe().clone();
+        let is_custom = !HOTKEY_PRESETS
+            .iter()
+            .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
+        if let Some(it) = self
+            .menu_items
+            .as_ref()
+            .and_then(|mi| mi.custom_hotkey_item.as_ref())
+        {
+            it.set_text(custom_hotkey_label(
+                is_custom.then(|| format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
+            ));
+            it.set_checked(is_custom);
         }
     }
 
     fn create_tray(&mut self) {
+        // Before anything is drawn: a device pinned in the config that no longer
+        // exists must not stay pinned (see `reconcile_device_pins`).
+        self.reconcile_device_pins();
         let cfg = self.config.lock_safe().clone();
 
         // Build menu
@@ -219,7 +302,7 @@ impl App {
         let status_text = if is_ready {
             format!("Whisper Push ({disp})")
         } else {
-            "Whisper Push \u{2014} \u{231b} Loading model\u{2026}".into()
+            "Whisper Push: \u{231b} Loading model\u{2026}".into()
         };
         let status_item = MenuItem::new(&status_text, false, None);
 
@@ -242,14 +325,27 @@ impl App {
         // exists on macOS. Offer it there; elsewhere the presets cover it and the
         // item would be a dead end (no HotkeyCaptured ever arrives) — so hide it.
         #[cfg(target_os = "macos")]
-        let custom_hotkey_id = {
+        let (custom_hotkey_item, custom_hotkey_id) = {
             let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
-            let custom_hotkey_item = MenuItem::new("Set Custom Hotkey\u{2026}", true, None);
-            let _ = hotkey_submenu.append(&custom_hotkey_item);
-            custom_hotkey_item.id().0.clone()
+            // A binding that matches no preset is a custom one: show it here,
+            // checked, so the menu always says what is actually bound.
+            let is_custom = !HOTKEY_PRESETS
+                .iter()
+                .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
+            let item = CheckMenuItem::new(
+                custom_hotkey_label(
+                    is_custom.then(|| format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
+                ),
+                true,
+                is_custom,
+                None,
+            );
+            let _ = hotkey_submenu.append(&item);
+            let id = item.id().0.clone();
+            (Some(item), id)
         };
         #[cfg(not(target_os = "macos"))]
-        let custom_hotkey_id = String::new();
+        let (custom_hotkey_item, custom_hotkey_id) = (None, String::new());
 
         // Permissions (computed once here; reused for the Permissions section).
         let perms = crate::permissions::check_all();
@@ -278,7 +374,7 @@ impl App {
         if perms.microphone == crate::permissions::PermState::Denied {
             let _ = input_submenu.append(&PredefinedMenuItem::separator());
             let _ = input_submenu.append(&MenuItem::new(
-                "\u{26a0} Microphone denied \u{2014} grant to record",
+                "\u{26a0} Microphone denied: grant to record",
                 false,
                 None,
             ));
@@ -330,31 +426,24 @@ impl App {
 
         // Permissions (perms already computed above for the input picker gate)
         let mic_label = format!(
-            "{} Microphone \u{2014} {}",
+            "{} Microphone \u{2502} {}",
             perms.microphone.symbol(),
             perms.microphone.label()
         );
         let acc_label = format!(
-            "{} Accessibility \u{2014} {}",
+            "{} Accessibility \u{2502} {}",
             perms.accessibility.symbol(),
             perms.accessibility.label()
         );
         let input_mon_label = format!(
-            "{} Input Monitoring \u{2014} {}",
+            "{} Input Monitoring \u{2502} {}",
             perms.input_monitoring.symbol(),
             perms.input_monitoring.label()
         );
         let mic_perm_item = MenuItem::new(&mic_label, true, None);
         let acc_perm_item = MenuItem::new(&acc_label, true, None);
         let input_mon_perm_item = MenuItem::new(&input_mon_label, true, None);
-        let perms_submenu = Submenu::new(
-            if perms.all_granted() {
-                "Permissions \u{2713}"
-            } else {
-                "\u{26a0} Permissions"
-            },
-            true,
-        );
+        let perms_submenu = Submenu::new(perms_title(&perms), true);
         let _ = perms_submenu.append(&mic_perm_item);
         let _ = perms_submenu.append(&acc_perm_item);
         let _ = perms_submenu.append(&input_mon_perm_item);
@@ -399,16 +488,20 @@ impl App {
         let dict_forget_voice_id = dict_forget_voice_item.id().0.clone();
 
         // License submenu (Lemon Squeezy). All state/text comes from license.rs.
+        // Items are created once; `refresh_license_submenu` retitles/enables
+        // them as the state moves between trial ↔ licensed (both directions).
+        // Only the actions that apply are in this submenu at any time — an item
+        // greyed out because it can't apply is noise (you can't "enter a key"
+        // when you already have one). `sync_license_submenu` swaps them.
         let license_submenu = Submenu::new(&crate::license::submenu_title(), true);
         let license_status_item = MenuItem::new(&crate::license::status_text(), false, None);
-        let license_subscription_item = MenuItem::new("Subscription\u{2026}", true, None);
+        let license_subscription_item = MenuItem::new("Subscribe\u{2026}", true, None);
+        let license_activate_item = MenuItem::new("Enter License Key\u{2026}", true, None);
         let license_deactivate_item = MenuItem::new("Deactivate this device\u{2026}", true, None);
         let _ = license_submenu.append(&license_status_item);
         let _ = license_submenu.append(&PredefinedMenuItem::separator());
-        let _ = license_submenu.append(&license_subscription_item);
-        let _ = license_submenu.append(&PredefinedMenuItem::separator());
-        let _ = license_submenu.append(&license_deactivate_item);
         let license_subscription_id = license_subscription_item.id().0.clone();
+        let license_activate_id = license_activate_item.id().0.clone();
         let license_deactivate_id = license_deactivate_item.id().0.clone();
 
         // Templates submenu (voice snippets). Triggers are disabled labels; the
@@ -433,14 +526,16 @@ impl App {
         let template_reload_id = template_reload_item.id().0.clone();
 
         // History submenu (recent dictations). Clicking an entry copies it.
+        // Entries come first (inserted right after the header on refresh);
+        // the file/clear actions sit at the bottom.
         let history_submenu = Submenu::new("History", true);
-        let history_open_item = MenuItem::new("Open history.txt\u{2026}", true, None);
-        let history_clear_item = MenuItem::new("Clear History", true, None);
-        let _ = history_submenu.append(&history_open_item);
-        let _ = history_submenu.append(&history_clear_item);
-        let _ = history_submenu.append(&PredefinedMenuItem::separator());
         let _ = history_submenu.append(&MenuItem::new("Recent (click to copy):", false, None));
         let history_entry_items = populate_history_entries(&history_submenu);
+        let history_open_item = MenuItem::new("Open history.txt\u{2026}", true, None);
+        let history_clear_item = MenuItem::new("Clear History", true, None);
+        let _ = history_submenu.append(&PredefinedMenuItem::separator());
+        let _ = history_submenu.append(&history_open_item);
+        let _ = history_submenu.append(&history_clear_item);
         let history_open_id = history_open_item.id().0.clone();
         let history_clear_id = history_clear_item.id().0.clone();
 
@@ -456,69 +551,39 @@ impl App {
         // Assemble — flat menu (submenus crash on macOS Tahoe)
         let menu = Menu::new();
 
-        // While unlicensed (trial included), pin a BUY-FORWARD block to the VERY
-        // TOP of the menu: an urgency line (days left / trial ended) + an "Unlock"
-        // CTA that opens the PLANS directly — leading with purchase, not key entry.
-        // Activating an existing key stays available inside that modal ("I already
-        // have a license key") and in the License submenu. Retired once licensed.
-        let st = crate::license::status();
-        let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
-        let (trial_label, unlock_item, unlock_id) = if licensed {
-            (None, None, String::new())
-        } else {
-            use crate::license::LicenseStatus as LS;
-            let urgency = match st {
-                LS::Trial { days_left } => format!(
-                    "\u{23f3} Trial \u{2014} {days_left} day{} left",
-                    if days_left == 1 { "" } else { "s" }
-                ),
-                LS::Locked => "Trial ended".into(),
-                LS::Expired => "Subscription expired".into(),
-                LS::GraceOffline { days_left } => format!(
-                    "Offline \u{2014} reconnect within {days_left} day{}",
-                    if days_left == 1 { "" } else { "s" }
-                ),
-                LS::Disabled => "License inactive".into(),
-                LS::Licensed(_) => String::new(),
-            };
-            let label = MenuItem::new(&urgency, false, None);
-            let unlock = MenuItem::new("\u{2726} Unlock Whisper Push\u{2026}", true, None);
-            let uid = unlock.id().0.clone();
-            let _ = menu.append(&label);
-            let _ = menu.append(&unlock);
-            let _ = menu.append(&PredefinedMenuItem::separator());
-            (Some(label), Some(unlock), uid)
-        };
+        // While unlicensed (trial included), a BUY-FORWARD CTA is pinned to the
+        // VERY TOP of the menu: one clickable line carrying its own urgency
+        // ("Unlock Whisper Push | 3 days left") that opens the PLANS directly —
+        // leading with purchase, not key entry. Entering an existing key stays
+        // available inside that modal and in the License submenu. It is inserted
+        // by `sync_menu_head`, not appended here, so it can come and go: once
+        // licensed there is nothing at the top at all.
+        let unlock_item = MenuItem::new(
+            crate::license::cta_text(&crate::license::status()),
+            true,
+            None,
+        );
+        let unlock_id = unlock_item.id().0.clone();
+        let head_separator = PredefinedMenuItem::separator();
 
-        let _ = menu.append(&status_item);
-        let warn_item = if !perms.all_granted() {
-            let w = MenuItem::new(
-                &format!("\u{26a0} {} permission(s) missing", perms.missing_count()),
-                false,
-                None,
-            );
-            let _ = menu.append(&w);
-            Some(w)
-        } else {
-            None
-        };
         // Permissions submenu — only shown when something is actually missing
-        // (when everything's granted it's just noise).
+        // (when everything's granted it's just noise). Its title carries the
+        // count, so no separate warning line is needed.
         if !perms.all_granted() {
-            let _ = menu.append(&PredefinedMenuItem::separator());
             let _ = menu.append(&perms_submenu);
         }
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
-        // Feature dropdowns (kept compact).
+        // Daily-use group first, then configuration dropdowns.
+        let _ = menu.append(&history_submenu);
+        let _ = menu.append(&dict_submenu);
+        let _ = menu.append(&templates_submenu);
+        let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&hotkey_submenu);
         let _ = menu.append(&backend_submenu);
         let _ = menu.append(&input_submenu);
         let _ = menu.append(&output_submenu);
-        let _ = menu.append(&dict_submenu);
-        let _ = menu.append(&templates_submenu);
-        let _ = menu.append(&history_submenu);
         let _ = menu.append(&license_submenu);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
@@ -558,7 +623,6 @@ impl App {
             acc_perm_item,
             input_mon_perm_item,
             perms_submenu,
-            warn_item,
             model_items,
             update_item,
             report_item,
@@ -573,18 +637,24 @@ impl App {
             dict_entry_items,
             license_submenu,
             license_status_item,
+            license_subscription_item,
             license_subscription_id,
+            license_activate_item,
+            license_activate_id,
+            license_deactivate_item,
             license_deactivate_id,
-            trial_label,
             unlock_item,
             unlock_id,
+            menu: menu.clone(),
             status_item,
+            head_separator,
             notifications_item,
             sound_item,
             debug_item,
             hotkey_ids,
             hotkey_items,
             hotkey_submenu,
+            custom_hotkey_item,
             custom_hotkey_id,
             input_ids,
             input_device_items,
@@ -602,6 +672,8 @@ impl App {
             history_clear_id,
             history_entry_items,
         });
+        // Apply the enabled/title state of the license items for the current state.
+        self.refresh_license_submenu();
 
         // Build tray
         let mut builder = TrayIconBuilder::new()
@@ -679,26 +751,149 @@ impl App {
             .set_text(format!("Templates ({})", crate::templates::count()));
     }
 
-    /// Refresh the License submenu title + status line (cheap, no rebuild).
+    /// Refresh every license-dependent menu item from `license::status()` — in
+    /// BOTH directions (activation, deactivation, expiry), cheap, no rebuild.
     fn refresh_license_submenu(&mut self) {
-        if let Some(mi) = self.menu_items.as_ref() {
-            mi.license_status_item
-                .set_text(crate::license::status_text());
-            mi.license_submenu.set_text(crate::license::submenu_title());
-            // Retire the buy-forward top block once a key is active.
-            if matches!(
-                crate::license::status(),
-                crate::license::LicenseStatus::Licensed(_)
-            ) {
-                if let Some(lbl) = &mi.trial_label {
-                    lbl.set_text("\u{2713} License active");
-                }
-                if let Some(it) = &mi.unlock_item {
-                    it.set_enabled(false);
-                    it.set_text("");
-                }
-            }
+        let Some(mi) = self.menu_items.as_ref() else {
+            return;
+        };
+        let st = crate::license::status();
+        let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
+        mi.license_status_item
+            .set_text(crate::license::status_text());
+        mi.license_submenu.set_text(crate::license::submenu_title());
+        mi.license_subscription_item.set_text(if licensed {
+            "Manage License\u{2026}"
+        } else {
+            "Subscribe\u{2026}"
+        });
+        // Licensed → [Manage License…, Deactivate this device…]
+        // Unlicensed → [Subscribe…, Enter License Key…]
+        // Never both sets with half of them greyed out.
+        let sub = &mi.license_submenu;
+        let _ = sub.remove(&mi.license_subscription_item);
+        let _ = sub.remove(&mi.license_activate_item);
+        let _ = sub.remove(&mi.license_deactivate_item);
+        let _ = sub.append(&mi.license_subscription_item);
+        let _ = sub.append(if licensed {
+            &mi.license_deactivate_item
+        } else {
+            &mi.license_activate_item
+        });
+        mi.unlock_item.set_text(crate::license::cta_text(&st));
+        self.sync_menu_head();
+    }
+
+    /// Fall back to Auto for any device pinned in the config that is no longer
+    /// present.
+    ///
+    /// A stale pin is a lie the whole UI then repeats: nothing is ticked in the
+    /// picker (the pinned name has no row), the submenu is titled after a device
+    /// that is gone, and recording quietly uses the system default anyway
+    /// (`find_input_device` falls back). Switching to Auto makes the menu agree
+    /// with what actually happens, and the user can re-pick once the device is
+    /// back. Only acts on a list we actually got: when enumeration fails
+    /// entirely we keep the pin rather than throw a preference away over a
+    /// CoreAudio stall.
+    fn reconcile_device_pins(&mut self) {
+        let (input, output) = {
+            let c = self.config.lock_safe();
+            (c.input_device.clone(), c.output_device.clone())
+        };
+        let gone = |pinned: &str, list: Vec<String>| {
+            pinned != "auto" && !list.is_empty() && !list.iter().any(|n| n == pinned)
+        };
+        let drop_input = gone(&input, crate::audio::list_devices().unwrap_or_default());
+        let drop_output = gone(
+            &output,
+            crate::audio::list_output_devices().unwrap_or_default(),
+        );
+        if !drop_input && !drop_output {
+            return;
         }
+        let mut c = self.config.lock_safe();
+        if drop_input {
+            warn!("Input device '{input}' is no longer present \u{2014} falling back to Auto");
+            c.input_device = "auto".into();
+            // A pin the user no longer has can't outrank the auto-fallback.
+            crate::audio::set_input_override("");
+        }
+        if drop_output {
+            warn!("Output device '{output}' is no longer present \u{2014} falling back to Auto");
+            c.output_device = "auto".into();
+        }
+        let _ = c.save();
+        crate::audio::playback::set_output_device(&c.output_device);
+    }
+
+    /// Put exactly the head items that carry information into the menu, in
+    /// order, and take out the ones that don't.
+    ///
+    /// The rule: **nothing at the top that you cannot click**. The buy CTA is
+    /// there only while unlicensed (once licensed, managing happens in the
+    /// License submenu — a second entry point at the top was just clutter), and
+    /// the state line only while the app is doing something the rest of the menu
+    /// doesn't already say. When both are gone the separator goes too, so the
+    /// menu opens straight onto its real contents.
+    fn sync_menu_head(&mut self) {
+        let Some(mi) = self.menu_items.as_ref() else {
+            return;
+        };
+        let licensed = matches!(
+            crate::license::status(),
+            crate::license::LicenseStatus::Licensed(_)
+        );
+        let busy = self.state.current() != State::Idle;
+
+        // Remove first (harmless if absent), then re-insert what applies: the
+        // order of a menu is its indices, so rebuilding the head wholesale is
+        // simpler and less error-prone than patching positions.
+        let _ = mi.menu.remove(&mi.unlock_item);
+        let _ = mi.menu.remove(&mi.status_item);
+        let _ = mi.menu.remove(&mi.head_separator);
+
+        let mut at = 0;
+        if !licensed {
+            let _ = mi.menu.insert(&mi.unlock_item, at);
+            at += 1;
+        }
+        if busy {
+            let _ = mi.menu.insert(&mi.status_item, at);
+            at += 1;
+        }
+        if at > 0 {
+            let _ = mi.menu.insert(&mi.head_separator, at);
+        }
+    }
+
+    /// The one way to open the license / subscription modal, from every entry
+    /// point (Unlock, Subscribe/Manage, Enter License Key, the blocked-dictation
+    /// notification). Runs on the main thread so the helper gets the activation
+    /// hand-off, then blocks on its own thread until the window closes and
+    /// refreshes the menu from the (possibly rewritten) license.json. Dev builds
+    /// without the helper bundle fall back to a native key dialog.
+    fn open_license_window(&self, start_activate: bool) {
+        // Hand foreground activation to the helper FIRST, from here: this runs on
+        // the main thread (it is called out of the event loop) and the yield is
+        // main-thread-only. Doing it inside the worker below silently did
+        // nothing, and the modal opened without keyboard focus.
+        crate::onboarding::yield_activation_to_wizard();
+        let tx = self.state.tx.clone();
+        std::thread::Builder::new()
+            .name("license-window".into())
+            .spawn(move || {
+                // No file watching here: `license::start_background_sync` polls
+                // license.json for the whole run, so an activation or
+                // deactivation done *inside* the modal retitles the menu while
+                // the window is still open — and the CLI path is covered too.
+                let opened = crate::onboarding::run_license_window(start_activate);
+                if opened {
+                    let _ = tx.send(Event::LicenseChanged);
+                } else {
+                    license_activate_dialog(tx);
+                }
+            })
+            .ok();
     }
 
     fn process_event(&mut self, event: Event) {
@@ -708,6 +903,10 @@ impl App {
         }
         if matches!(event, Event::LicenseChanged) {
             self.refresh_license_submenu();
+            return;
+        }
+        if let Event::OpenLicenseWindow { start_activate } = event {
+            self.open_license_window(start_activate);
             return;
         }
         let mi = match &self.menu_items {
@@ -723,6 +922,7 @@ impl App {
                     &self.state.config.hotkey_mode,
                 );
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
+                self.sync_menu_head(); // no longer loading → the state line goes
                 set_tray_icon(&self.tray, State::Idle);
                 if self.config.lock_safe().notifications {
                     crate::notify::app("Model loaded and ready!");
@@ -817,7 +1017,11 @@ impl App {
                     return;
                 }
                 if id == &mi.update_id {
-                    if let Some((version, url)) = self.pending_update.clone() {
+                    if let Some(page) = self.pending_release_page.take() {
+                        open_path(std::path::Path::new(&page));
+                        // UpdateFailed("") is the one reset path for the item.
+                        let _ = self.state.tx.send(Event::UpdateFailed(String::new()));
+                    } else if let Some((version, url)) = self.pending_update.clone() {
                         mi.update_item
                             .set_text(&format!("Downloading v{version}\u{2026}"));
                         mi.update_item.set_enabled(false);
@@ -839,18 +1043,41 @@ impl App {
                         let tx = self.state.tx.clone();
                         std::thread::Builder::new()
                             .name("update-manual-check".into())
-                            .spawn(move || match crate::updater::check_for_update() {
-                                Ok(Some((version, url))) => {
-                                    let _ = tx.send(Event::UpdateAvailable(version, url));
-                                }
-                                Ok(None) => {
-                                    crate::notify::app("You\u{2019}re on the latest version.");
-                                    let _ = tx.send(Event::UpdateFailed(String::new()));
-                                }
-                                Err(e) => {
-                                    tracing::error!("Update check failed: {e}");
-                                    crate::notify::app(&format!("Update check failed: {e}"));
-                                    let _ = tx.send(Event::UpdateFailed(e.to_string()));
+                            .spawn(move || {
+                                use crate::updater::UpdateCheck;
+                                match crate::updater::check_for_update() {
+                                    Ok(UpdateCheck::Available { version, url }) => {
+                                        let _ = tx.send(Event::UpdateAvailable(version, url));
+                                    }
+                                    Ok(UpdateCheck::UpToDate) => {
+                                        let v = env!("CARGO_PKG_VERSION");
+                                        crate::notify::app(&format!(
+                                            "You are on the latest version (v{v})."
+                                        ));
+                                        // Show the result in the menu too — the
+                                        // notification can be silently invisible —
+                                        // then reset the item after a beat.
+                                        let _ = tx.send(Event::UpdateStatus(format!(
+                                            "\u{2713} Up to date (v{v})"
+                                        )));
+                                        std::thread::sleep(std::time::Duration::from_secs(8));
+                                        let _ = tx.send(Event::UpdateFailed(String::new()));
+                                    }
+                                    Ok(UpdateCheck::NoAsset { version }) => {
+                                        crate::notify::app(&format!(
+                                            "v{version} is out, but the update package for \
+                                             this platform wasn't found in the release. Use \
+                                             the menu to open the download page."
+                                        ));
+                                        let _ = tx.send(Event::UpdateStatus(format!(
+                                            "\u{2b06} v{version} available \u{2502} {OPEN_RELEASES_HINT}"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Update check failed: {e}");
+                                        crate::notify::app(&format!("Update check failed: {e}"));
+                                        let _ = tx.send(Event::UpdateFailed(e.to_string()));
+                                    }
                                 }
                             })
                             .ok();
@@ -923,31 +1150,17 @@ impl App {
                     });
                     return;
                 }
-                if !mi.unlock_id.is_empty() && id == &mi.unlock_id {
-                    // Buy-forward: open the license modal on the PLANS screen
-                    // (forced to the front). Entering an existing key is available
-                    // there via "I already have a license key". Dev fallback: dialog.
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || {
-                        if crate::onboarding::run_license_window(false) {
-                            let _ = tx.send(Event::LicenseChanged);
-                        } else {
-                            license_activate_dialog(tx);
-                        }
-                    });
+                if (!mi.unlock_id.is_empty() && id == &mi.unlock_id)
+                    || id == &mi.license_subscription_id
+                {
+                    // Buy-forward (plans screen; a licensed user gets the
+                    // "manage" screen instead — the modal reads the state).
+                    self.open_license_window(false);
                     return;
                 }
-                if id == &mi.license_subscription_id {
-                    // Open the in-app payment / activation modal. Falls back to a
-                    // text dialog in dev builds where the wizard isn't bundled.
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || {
-                        if crate::onboarding::run_license_window(false) {
-                            let _ = tx.send(Event::LicenseChanged);
-                        } else {
-                            license_activate_dialog(tx);
-                        }
-                    });
+                if id == &mi.license_activate_id {
+                    // Straight to "enter your key".
+                    self.open_license_window(true);
                     return;
                 }
                 if id == &mi.license_deactivate_id {
@@ -991,11 +1204,30 @@ impl App {
                         return;
                     }
                 }
-                if id == &mi.custom_hotkey_id {
+                if !mi.custom_hotkey_id.is_empty() && id == &mi.custom_hotkey_id {
+                    if self.capturing {
+                        self.end_hotkey_capture(); // clicked again = cancel
+                        return;
+                    }
                     crate::hotkey::start_capture(self.state.tx.clone());
+                    self.capturing = true;
+                    self.capture_gen += 1;
+                    // The prompt goes in the MENU: the notification below rides
+                    // on the deprecated NSUserNotification path, which recent
+                    // macOS often delivers invisibly — the item looked dead.
+                    if let Some(it) = &mi.custom_hotkey_item {
+                        it.set_text("\u{2328} Press your shortcut now\u{2026} (click to cancel)");
+                        it.set_checked(false);
+                    }
                     crate::notify::app(
                         "Press your shortcut now: tap a modifier (e.g. Right \u{2318}) to hold, or a combo like \u{2318}\u{21e7}D to toggle.",
                     );
+                    // Don't stay armed forever if they walk away.
+                    let (tx, generation) = (self.state.tx.clone(), self.capture_gen);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(HOTKEY_CAPTURE_TIMEOUT);
+                        let _ = tx.send(Event::HotkeyCaptureTimeout(generation));
+                    });
                     return;
                 }
                 for (item_id, name) in &mi.input_ids {
@@ -1093,14 +1325,35 @@ impl App {
                     c.hotkey_mode = mode.clone();
                     let _ = c.save();
                 }
+                self.capturing = false;
+                self.capture_gen += 1; // any pending timeout is now stale
                 // Tap already rebound the live listener; just sync the UI.
+                let mut matched_preset = false;
                 for (item, hk, m) in &mi.hotkey_items {
-                    item.set_checked(hk == &hotkey && m == &mode);
+                    let on = hk == &hotkey && m == &mode;
+                    matched_preset |= on;
+                    item.set_checked(on);
                 }
                 let disp = format_hotkey_display(&hotkey, &mode);
+                // A combo that is none of the presets now appears in the list as
+                // a checked "Custom: …" entry, instead of vanishing into the
+                // submenu title.
+                if let Some(it) = &mi.custom_hotkey_item {
+                    it.set_text(custom_hotkey_label((!matched_preset).then(|| disp.clone())));
+                    it.set_checked(!matched_preset);
+                }
                 mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                 mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
                 crate::notify::app(&format!("Custom hotkey set: {disp}"));
+            }
+
+            // A timeout from an earlier capture (a newer one started, or this one
+            // already completed) carries a stale generation and falls through.
+            Event::HotkeyCaptureTimeout(generation)
+                if generation == self.capture_gen && self.capturing =>
+            {
+                self.end_hotkey_capture();
+                crate::notify::app("No shortcut captured \u{2014} nothing changed.");
             }
 
             Event::PromptPermissions => {
@@ -1124,17 +1377,17 @@ impl App {
                 let status = crate::permissions::check_all();
                 if let Some(mi) = &self.menu_items {
                     let mic_label = format!(
-                        "{} Microphone \u{2014} {}",
+                        "{} Microphone \u{2502} {}",
                         status.microphone.symbol(),
                         status.microphone.label()
                     );
                     let acc_label = format!(
-                        "{} Accessibility \u{2014} {}",
+                        "{} Accessibility \u{2502} {}",
                         status.accessibility.symbol(),
                         status.accessibility.label()
                     );
                     let input_mon_label = format!(
-                        "{} Input Monitoring \u{2014} {}",
+                        "{} Input Monitoring \u{2502} {}",
                         status.input_monitoring.symbol(),
                         status.input_monitoring.label()
                     );
@@ -1149,21 +1402,7 @@ impl App {
                     mi.input_mon_perm_item.set_enabled(
                         status.input_monitoring != crate::permissions::PermState::Granted,
                     );
-                    mi.perms_submenu.set_text(if status.all_granted() {
-                        "Permissions \u{2713}"
-                    } else {
-                        "\u{26a0} Permissions"
-                    });
-                    if let Some(ref w) = mi.warn_item {
-                        if status.all_granted() {
-                            w.set_text("\u{2713} All permissions granted");
-                        } else {
-                            w.set_text(&format!(
-                                "\u{26a0} {} permission(s) missing",
-                                status.missing_count()
-                            ));
-                        }
-                    }
+                    mi.perms_submenu.set_text(perms_title(&status));
                 }
                 info!(
                     "Permissions refreshed: mic={:?} acc={:?}",
@@ -1184,6 +1423,9 @@ impl App {
                     .set_text(&format!("\u{2b06} Update to v{version}"));
                 mi.update_item.set_enabled(true);
                 self.pending_update = Some((version.clone(), url.clone()));
+                // An installable update supersedes any "open the releases page"
+                // state — the two click behaviours must never both be armed.
+                self.pending_release_page = None;
                 if self.config.lock_safe().notifications {
                     crate::notify::app(&format!(
                         "Version {version} available! Click the menu to update."
@@ -1192,9 +1434,26 @@ impl App {
                 info!("Update available: v{version}");
             }
 
+            Event::UpdateStatus(ref text) => {
+                // Reliable, in-menu feedback for a manual check — the toast route
+                // (deprecated NSUserNotification) can be delivered invisibly.
+                mi.update_item.set_text(text);
+                mi.update_item.set_enabled(true);
+                if text.ends_with(OPEN_RELEASES_HINT) {
+                    // "Newer release, no asset for this platform" → clicking the
+                    // item opens the releases page instead of downloading.
+                    self.pending_release_page = Some(crate::updater::releases_page());
+                    self.pending_update = None;
+                } else {
+                    self.pending_release_page = None;
+                }
+            }
+
             Event::UpdateFailed(ref msg) => {
                 mi.update_item.set_text("Check for Updates\u{2026}");
                 mi.update_item.set_enabled(true);
+                // The one reset path for the item — clear both click behaviours.
+                self.pending_release_page = None;
                 if !msg.is_empty() {
                     warn!("Update failed: {msg}");
                 }
@@ -1205,8 +1464,18 @@ impl App {
                 flush_tray_icon(&self.tray);
             }
 
+            Event::InputSwitched(ref name) => {
+                // A dead mic was auto-replaced: show the live device in the
+                // submenu title. Checkmarks are left alone — they reflect the
+                // *saved* config, and an explicit user pick (handler above)
+                // resets the title via the plain `device_title`.
+                mi.input_submenu
+                    .set_text(format!("{} (auto-switched)", device_title("Input", name)));
+            }
+
             Event::StateChanged(s) => {
                 self.state.set(s);
+                self.sync_menu_head(); // busy ⇄ idle decides the state line
                 set_tray_icon(&self.tray, s); // also refreshes the tooltip
                 crate::overlay::set_state(match s {
                     State::Processing => crate::overlay::OverlayState::Processing,
@@ -1430,6 +1699,10 @@ fn pipeline_loop(
     // Everything here runs on this one thread — no Arc/Mutex/atomics needed.
     let mut recording = false;
     let mut capture: Option<crate::audio::capture::AudioCapture> = None;
+    // Generation counter for mid-recording mic health checks: bumped when a
+    // recording commits (and on a mid-recording input swap), so a check that
+    // arrives late — for a recording that already ended — is ignored as stale.
+    let mut mic_check_gen: u64 = 0;
 
     loop {
         // recv() is the one place the loop ends (channel closed at shutdown).
@@ -1450,6 +1723,7 @@ fn pipeline_loop(
                 &self_tx,
                 &mut recording,
                 &mut capture,
+                &mut mic_check_gen,
             )
         }))
         .is_err()
@@ -1510,9 +1784,29 @@ fn hold_gate(rx: &Receiver<Event>, self_tx: &Sender<Event>, delay: f64) -> bool 
     false
 }
 
+/// Delay before the first mid-recording mic health probe — long enough for a
+/// slow (Bluetooth) mic to open its link and start delivering on a healthy one.
+const MIC_CHECK_DELAY: Duration = Duration::from_millis(1200);
+/// Extra grace when a check finds too few samples to judge the peak yet.
+const MIC_CHECK_RETRY_DELAY: Duration = Duration::from_millis(700);
+/// Minimum captured audio (~0.9 s at 16 kHz) before a health check trusts the
+/// peak — under this the stream may simply still be warming up.
+const MIC_CHECK_MIN_SAMPLES: usize = crate::audio::SAMPLE_RATE as usize * 9 / 10;
+
+/// Send `MicHealthCheck(generation)` back into the pipeline channel after
+/// `delay`, from a detached thread (the pipeline thread must keep draining).
+fn schedule_mic_check(self_tx: &Sender<Event>, generation: u64, delay: Duration) {
+    let tx = self_tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let _ = tx.send(Event::MicHealthCheck(generation));
+    });
+}
+
 /// Handle one pipeline event. Split out of `pipeline_loop` so each event runs
 /// inside a `catch_unwind` at the call site — a panic here is contained and the
 /// loop resets to idle rather than the worker thread dying.
+#[allow(clippy::too_many_arguments)]
 fn handle_pipeline_event(
     event: Event,
     rx: &Receiver<Event>,
@@ -1521,6 +1815,7 @@ fn handle_pipeline_event(
     self_tx: &Sender<Event>,
     recording: &mut bool,
     capture: &mut Option<crate::audio::capture::AudioCapture>,
+    mic_check_gen: &mut u64,
 ) {
     match event {
         Event::HotkeyDown => {
@@ -1585,6 +1880,11 @@ fn handle_pipeline_event(
             notify_ui(ui_tx, Event::ShowOverlay);
             *capture = Some(cap);
             *recording = true;
+            // Arm the mid-recording dead-mic check: if this mic turns out to be
+            // flatline we swap it while the user is still speaking (see the
+            // MicHealthCheck arm), salvaging the dictation instead of losing it.
+            *mic_check_gen += 1;
+            schedule_mic_check(self_tx, *mic_check_gen, MIC_CHECK_DELAY);
             notify_ui(ui_tx, Event::StateChanged(State::Recording));
             // Harvest on-screen names off the pipeline thread so the AX reads
             // can't add latency between key-up and transcription (#7).
@@ -1602,7 +1902,7 @@ fn handle_pipeline_event(
             }
             *recording = false;
             notify_ui(ui_tx, Event::StateChanged(State::Processing));
-            stop_and_transcribe(config, capture);
+            stop_and_transcribe(config, capture, ui_tx);
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
 
@@ -1622,6 +1922,9 @@ fn handle_pipeline_event(
                     Ok(cap) => {
                         *capture = Some(cap);
                         *recording = true;
+                        // Same mid-recording dead-mic rescue as the hold path.
+                        *mic_check_gen += 1;
+                        schedule_mic_check(self_tx, *mic_check_gen, MIC_CHECK_DELAY);
                         notify_ui(ui_tx, Event::StateChanged(State::Recording));
                         if config.lock_safe().sound_feedback {
                             crate::audio::playback::play_sound("start");
@@ -1643,7 +1946,7 @@ fn handle_pipeline_event(
             } else {
                 *recording = false;
                 notify_ui(ui_tx, Event::StateChanged(State::Processing));
-                stop_and_transcribe(config, capture);
+                stop_and_transcribe(config, capture, ui_tx);
                 notify_ui(ui_tx, Event::StateChanged(State::Idle));
             }
         }
@@ -1703,6 +2006,51 @@ fn handle_pipeline_event(
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
 
+        Event::MicHealthCheck(generation) => {
+            // Stale (a newer recording started) or the recording already ended.
+            if generation != *mic_check_gen || !*recording {
+                return;
+            }
+            let Some(cap) = capture.as_ref() else { return };
+            if cap.live_len() < MIC_CHECK_MIN_SAMPLES {
+                // Too little audio to judge the peak — Bluetooth mics can be
+                // slow to deliver first samples. Look again shortly, same gen.
+                schedule_mic_check(self_tx, generation, MIC_CHECK_RETRY_DELAY);
+                return;
+            }
+            if cap.live_peak() >= crate::audio::DEAD_MIC_PEAK {
+                return; // signal present — the mic is healthy
+            }
+            // Dead mid-recording: swap to a verified-working mic NOW so the rest
+            // of the utterance is salvaged instead of lost. cpal streams are
+            // `!Send`, so the swap must happen here on the pipeline thread.
+            let dead = cap.device_name().to_string();
+            warn!("No signal from '{dead}' mid-recording — looking for a working mic");
+            match crate::audio::best_working_mic(&dead) {
+                Some(next) => match crate::audio::capture::AudioCapture::start(&next) {
+                    Ok(new_cap) => {
+                        // Replacing the capture drops the old one → its stream closes.
+                        *capture = Some(new_cap);
+                        crate::audio::set_input_override(&next);
+                        info!("Mid-recording input switch: '{dead}' → '{next}'");
+                        crate::notify::app(&format!(
+                            "“{dead}” went silent — now recording on “{next}”. \
+                             Please restart your sentence."
+                        ));
+                        notify_ui(ui_tx, Event::InputSwitched(next));
+                        // Watch the replacement too (fresh generation).
+                        *mic_check_gen += 1;
+                        schedule_mic_check(self_tx, *mic_check_gen, MIC_CHECK_DELAY);
+                    }
+                    // Couldn't open the replacement / none available: keep the
+                    // current stream; the post-hoc path in stop_and_transcribe
+                    // still recovers at key-up.
+                    Err(e) => warn!("Couldn't switch to '{next}' mid-recording: {e}"),
+                },
+                None => warn!("No replacement mic for dead '{dead}' — deferring to key-up"),
+            }
+        }
+
         _ => {}
     }
 }
@@ -1738,6 +2086,14 @@ static TRAY_TX: OnceLock<Sender<Event>> = OnceLock::new();
 /// got stranded by a dropped key-up — the watchdog itself is spawned before the
 /// pipeline exists, so it can't be handed the sender directly.
 static PIPELINE_TX: OnceLock<Sender<Event>> = OnceLock::new();
+
+/// Post an event to the UI (main) thread from anywhere — e.g. the notification
+/// delegate asking for the license window. Dropped silently before `run`.
+pub fn post(event: Event) {
+    if let Some(tx) = TRAY_TX.get() {
+        let _ = tx.send(event);
+    }
+}
 
 fn schedule_tray_flush(after: Duration) {
     if let Some(tx) = TRAY_TX.get() {
@@ -1811,23 +2167,19 @@ fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
         State::Loading => (
             GlyphStyle::Template(BUSY_OPACITY),
             true,
-            "Whisper Push \u{2014} Loading model\u{2026}",
+            "Whisper Push: Loading model\u{2026}",
         ),
         State::Processing => (
             GlyphStyle::Template(BUSY_OPACITY),
             true,
-            "Whisper Push \u{2014} Transcribing\u{2026}",
+            "Whisper Push: Transcribing\u{2026}",
         ),
         State::Recording => (
             GlyphStyle::Tint(TINT_RECORDING),
             false,
-            "Whisper Push \u{2014} Recording",
+            "Whisper Push: Recording",
         ),
-        State::Idle => (
-            GlyphStyle::Template(255),
-            true,
-            "Whisper Push \u{2014} Ready",
-        ),
+        State::Idle => (GlyphStyle::Template(255), true, "Whisper Push: Ready"),
     };
     if let Some(tray) = tray {
         if let Some(icon) = glyph_icon(style) {
@@ -1851,10 +2203,52 @@ fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
     }
 }
 
+/// The "every mic is dead" notification fires at most once per silent stretch —
+/// set when shown, re-armed by the next recording with real signal (see
+/// `stop_and_transcribe`) so a fixed permission doesn't leave it muted forever.
+static SYSTEMIC_MIC_NOTIFIED: AtomicBool = AtomicBool::new(false);
+
+/// Every usable input has failed — almost always a denied Microphone permission,
+/// not N broken devices in a row. Point the user at the fix.
+fn notify_systemic_mic_failure() {
+    if SYSTEMIC_MIC_NOTIFIED.swap(true, Ordering::Relaxed) {
+        return; // already told this silent stretch
+    }
+    let body = "No microphone is delivering any audio — this usually means Whisper Push \
+                is missing the Microphone permission. Open Settings and enable it, then dictate again.";
+    #[cfg(target_os = "macos")]
+    crate::notify::app_action(body, "Open Settings", || {
+        crate::permissions::open_settings("Privacy_Microphone")
+    });
+    #[cfg(not(target_os = "macos"))]
+    crate::notify::app(body);
+}
+
+/// Dead-mic recovery choke point: find a verified replacement for `dead`, make
+/// it the session input, retitle the Input submenu, and recap to the user —
+/// `what_happened` already names the device and duration (e.g. `No sound from
+/// “X” (2.3 s recorded)`). Escalates to the systemic notification when no
+/// candidate exists. Probes devices (~1–2 s worst case) — run it off the
+/// pipeline thread when a transcription is waiting.
+fn recover_dead_mic(what_happened: &str, dead: &str, ui_tx: &Sender<Event>) {
+    match crate::audio::best_working_mic(dead) {
+        Some(next) => {
+            crate::audio::set_input_override(&next);
+            warn!("Input auto-switch: '{dead}' → '{next}'");
+            crate::notify::app(&format!(
+                "{what_happened} — switched to “{next}”. Press your key and dictate again."
+            ));
+            notify_ui(ui_tx, Event::InputSwitched(next));
+        }
+        None => notify_systemic_mic_failure(),
+    }
+}
+
 /// Stop capture, transcribe audio, and paste result.
 fn stop_and_transcribe(
     config: &Arc<Mutex<Config>>,
     capture: &mut Option<crate::audio::capture::AudioCapture>,
+    ui_tx: &Sender<Event>,
 ) {
     let cfg = config.lock_safe().clone();
     if cfg.sound_feedback {
@@ -1867,10 +2261,24 @@ fn stop_and_transcribe(
     let device_lost = cap.as_ref().is_some_and(|c| c.device_lost());
     let used_device = cap.as_ref().map(|c| c.device_name().to_string());
     let audio = cap.map(|c| c.stop()).unwrap_or_default();
+    let secs = audio.len() as f32 / crate::audio::SAMPLE_RATE as f32;
 
     if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
         if device_lost {
             crate::notify::app("Recording stopped — the microphone disconnected.");
+            // Line up a verified replacement in the background so the NEXT press
+            // just works. Probing takes ~1–2 s — never on this thread, where the
+            // user may already be re-pressing the key.
+            if let Some(dead) = used_device {
+                let ui_tx = ui_tx.clone();
+                std::thread::spawn(move || {
+                    recover_dead_mic(
+                        &format!("“{dead}” disconnected ({secs:.1} s captured)"),
+                        &dead,
+                        &ui_tx,
+                    )
+                });
+            }
         }
         info!("Too short, skipping");
         return;
@@ -1879,28 +2287,27 @@ fn stop_and_transcribe(
     // Auto-fallback: enough audio was captured but it's flatline silence — the
     // signature of a connected-but-not-working mic (AirPods whose mic link never
     // opened, a muted USB interface), not a quiet room, which always has some
-    // ambient peak. We can't recover this utterance, but switch the live input
-    // to a known-good mic (built-in if the lid's open, else any other) so the
-    // next press just works.
+    // ambient peak. This utterance is unrecoverable (the mid-recording health
+    // check only rescues holds longer than its delay), but switch the live input
+    // to a probe-verified mic so the next press just works.
     let peak = audio.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
     if peak < crate::audio::DEAD_MIC_PEAK {
-        if let Some(dead) = used_device {
-            if let Some(next) = crate::audio::next_working_mic(&dead) {
-                crate::audio::set_input_override(&next);
-                warn!("No signal from '{dead}' (peak={peak:.6}) — switching input to '{next}'");
-                crate::notify::app(&format!(
-                    "No sound from {dead} — switched to {next}. Press your shortcut again."
-                ));
-                return;
-            }
+        if let Some(dead) = used_device.as_deref() {
+            warn!("No signal from '{dead}' (peak={peak:.6})");
+            recover_dead_mic(
+                &format!("No sound from “{dead}” ({secs:.1} s recorded)"),
+                dead,
+                ui_tx,
+            );
+        } else {
+            notify_systemic_mic_failure();
         }
-        // Every input is silent → systemic (likely Microphone permission). Fall
-        // through; the empty transcription is harmless and the log shows why.
-    } else {
-        // Good signal — forget any earlier dead-mic memory so devices that
-        // recover become eligible again.
-        crate::audio::clear_dead_mics();
+        return; // nothing to transcribe — the audio is flatline
     }
+    // Good signal — forget any earlier dead-mic memory so devices that recover
+    // become eligible again, and re-arm the systemic notification.
+    crate::audio::clear_dead_mics();
+    SYSTEMIC_MIC_NOTIFIED.store(false, Ordering::Relaxed);
 
     let rms = crate::util::rms(&audio);
     let backend = crate::model_manager::resolve_backend(&cfg.model);
@@ -1919,8 +2326,12 @@ fn stop_and_transcribe(
     // Panics are already caught inside transcribe_with_backend (the choke point)
     // and returned as Err, so no extra catch_unwind is needed here.
     let result = crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend);
+    // Did we actually produce text? Drives the wording of the device-lost recap
+    // below, so it never claims "transcribed" when nothing came out.
+    let mut transcribed = false;
     match result {
         Ok(text) if !text.is_empty() => {
+            transcribed = true;
             // Record the run so the user can find/re-copy it (History submenu +
             // history.txt). Records what was *recognised*, not the expansion.
             crate::history::record(&text);
@@ -1939,11 +2350,41 @@ fn stop_and_transcribe(
             }
             // No per-dictation notification (noise).
         }
-        Ok(_) => info!("No speech detected"),
+        Ok(_) => {
+            info!("No speech detected");
+            // Empty text from a *quiet* recording is worth explaining; a decent
+            // RMS means the user likely just said nothing — stay silent then.
+            // (When the device dropped, the disconnect recap below covers it.)
+            if !device_lost
+                && rms < crate::audio::LOW_SIGNAL_RMS
+                && let Some(dev) = used_device.as_deref()
+            {
+                crate::notify::app(&format!(
+                    "Heard {secs:.1} s from “{dev}” but it was too quiet to transcribe — \
+                     speak closer to the mic or pick another one in the menu."
+                ));
+            }
+        }
         Err(e) => {
             tracing::error!("Transcription: {e}");
             crate::notify::app(&format!("Error: {e}"));
         }
+    }
+
+    // The mic died partway through: recap what actually happened so a truncated
+    // (or missing) paste isn't a mystery. Word it by whether text came out.
+    if device_lost && let Some(dev) = used_device.as_deref() {
+        crate::notify::app(&if transcribed {
+            format!(
+                "“{dev}” disconnected mid-dictation — transcribed the {secs:.1} s \
+                 captured before the drop."
+            )
+        } else {
+            format!(
+                "“{dev}” disconnected mid-dictation — too little was captured to \
+                 transcribe. Reconnect it or pick another mic in the menu."
+            )
+        });
     }
 }
 
@@ -1967,15 +2408,15 @@ fn open_path(path: &std::path::Path) {
 fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     const MAX: usize = 12;
     const PREVIEW: usize = 48;
+    // Entries live between the header (index 0) and the trailing separator +
+    // actions, so they're inserted right after the header — refresh removes the
+    // old entries and re-inserts here without touching the stable items.
+    let mut pos = 1;
     let recent = crate::history::recent();
     let mut items = Vec::new();
     if recent.is_empty() {
-        let ph = MenuItem::new(
-            "  (empty \u{2014} your dictations will appear here)",
-            false,
-            None,
-        );
-        let _ = submenu.append(&ph);
+        let ph = MenuItem::new("  (empty: your dictations will appear here)", false, None);
+        let _ = submenu.insert(&ph, pos);
         items.push((ph, String::new()));
         return items;
     }
@@ -1988,7 +2429,8 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
             );
         }
         let it = MenuItem::new(&format!("  {preview}"), true, None);
-        let _ = submenu.append(&it);
+        let _ = submenu.insert(&it, pos);
+        pos += 1;
         items.push((it, text.clone()));
     }
     items
@@ -2001,11 +2443,7 @@ fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let triggers = crate::templates::triggers();
     let mut items = Vec::new();
     if triggers.is_empty() {
-        let ph = MenuItem::new(
-            "  (none yet \u{2014} use Add Template\u{2026})",
-            false,
-            None,
-        );
+        let ph = MenuItem::new("  (none yet: use Add Template\u{2026})", false, None);
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;
@@ -2152,11 +2590,7 @@ fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let entries = crate::dictionary::list_entries();
     let mut items = Vec::new();
     if entries.is_empty() {
-        let ph = MenuItem::new(
-            "  (empty \u{2014} your corrections will appear here)",
-            false,
-            None,
-        );
+        let ph = MenuItem::new("  (empty: your corrections will appear here)", false, None);
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;
@@ -2275,11 +2709,8 @@ fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
     if key.trim().is_empty() {
         return;
     }
-    let Some(email) = osascript_input("Enter the email used for your purchase:", "") else {
-        return;
-    };
     use crate::license::ActivateOutcome::*;
-    let msg = match crate::license::activate(&key, &email) {
+    let msg = match crate::license::activate(&key) {
         Activated => "License activated \u{2014} thank you!".to_string(),
         Rejected(r) => format!("Activation failed: {r}"),
         Offline => "Couldn't reach the license server. Check your connection and retry.".into(),

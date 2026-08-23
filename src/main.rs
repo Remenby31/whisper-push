@@ -109,12 +109,14 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum LicenseAction {
-    /// Activate this device with a license key + the purchase email.
+    /// Activate this device with a license key.
     Activate {
         #[arg(long)]
         key: String,
-        #[arg(long)]
-        email: String,
+        /// Ignored — the key alone activates. Accepted so an older onboarding
+        /// helper that still passes `--email` keeps working.
+        #[arg(long, hide = true)]
+        email: Option<String>,
     },
     /// Re-check the license against the server.
     Validate,
@@ -919,9 +921,14 @@ mod cli_license {
         license::init();
         match action {
             LicenseAction::Path => println!("{}", license::license_path().display()),
+            // Deliberately offline: the license modal runs this before it can
+            // draw its first frame, so a stale-verdict re-check here would show
+            // the user a blank window for as long as HTTP_TIMEOUT. The daemon's
+            // `start_background_sync` keeps the cached verdict fresh; `license
+            // validate` is the explicit way to force a check.
             LicenseAction::Status => println!("{}", license::status_json()),
-            LicenseAction::Activate { key, email } => {
-                let line = match license::activate(key, email) {
+            LicenseAction::Activate { key, email: _ } => {
+                let line = match license::activate(key) {
                     ActivateOutcome::Activated => "{\"activated\":true}".to_string(),
                     ActivateOutcome::Rejected(r) => {
                         format!("{{\"activated\":false,\"error\":{}}}", json_str(&r))
@@ -979,8 +986,9 @@ mod app {
 
         // Arm the adaptive dictionary (load dictionary.toml, compile tables).
         crate::dictionary::init(cfg.dictionary_enabled);
-        // Arm licensing (load license.json, anchor trial, kick bg revalidation).
+        // Arm licensing (load license.json, anchor trial, keep the verdict fresh).
         crate::license::init();
+        crate::license::start_background_sync();
         // Arm the acoustic dictionary (load fingerprints).
         crate::acoustic::init();
         // Optional online enrichment (opt-in, default off).

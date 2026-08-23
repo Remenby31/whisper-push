@@ -180,7 +180,10 @@ fn output_device(selected: &str) -> Option<cpal::Device> {
     if selected.is_empty() || selected == "auto" {
         host.default_output_device()
     } else {
-        host.output_devices()
+        // `devices()`, not `output_devices()`: classifying by stream format can
+        // hang indefinitely (see `audio::all_device_names`), and this runs while
+        // the user is waiting to hear the start/stop cue.
+        host.devices()
             .ok()
             .and_then(|mut ds| ds.find(|d| d.name().map(|n| n == selected).unwrap_or(false)))
             .or_else(|| host.default_output_device())

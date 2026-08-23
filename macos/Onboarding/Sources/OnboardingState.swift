@@ -35,9 +35,18 @@ class OnboardingState: ObservableObject {
     /// via `make onboarding-preview`). When true the wizard never calls
     /// the daemon, never downloads, and `finish()` does not emit JSON.
     let isDesignPreview: Bool
-    /// Standalone license/payment modal (menu bar → License → Subscription).
+    /// Standalone license/payment modal (menu bar → License → Subscribe…).
     /// Shows only LicenseView; its buttons close the window instead of advancing.
     let licenseOnly: Bool
+
+    /// What the daemon reports about the license, read ONCE synchronously at
+    /// launch (a ~20 ms subprocess). Taken before the window exists on purpose:
+    /// LicenseView must render its final screen on the very first frame. Reading
+    /// it asynchronously instead made the modal show the paywall and then swap to
+    /// the licensed screen — a visible flicker, and worse, that view swap
+    /// intermittently fired the replacement button's own action, so the window
+    /// closed itself a few seconds after opening.
+    let license: LicenseSnapshot?
     /// Open the modal directly on the activate (enter-your-key) screen instead of
     /// the paywall (menu bar → Activate with License Key…). Implies `licenseOnly`.
     let startActivate: Bool
@@ -67,6 +76,7 @@ class OnboardingState: ObservableObject {
         self.isDesignPreview = args.contains("--design-preview")
         self.licenseOnly = args.contains("--license-only")
         self.startActivate = args.contains("--activate")
+        self.license = Self.readLicense(daemonPath: self.daemonPath)
 
         let freeDiskGB = Self.freeDiskSpaceGB()
         let ramGB = Self.totalRAMGB()
@@ -97,6 +107,20 @@ class OnboardingState: ObservableObject {
         if self.licenseOnly {
             self.currentStep = .license
         }
+    }
+
+    /// One synchronous `license status` call. Returns nil when there is no
+    /// daemon to ask (design preview, dev run) or it answers something we can't
+    /// parse — callers then treat the user as unlicensed, which is the safe
+    /// default for a paywall.
+    private static func readLicense(daemonPath: String?) -> LicenseSnapshot? {
+        guard let obj = Daemon.json(daemonPath, ["license", "status"]),
+              let status = obj["status"] as? String else { return nil }
+        return LicenseSnapshot(status: status,
+                               kind: obj["kind"] as? String ?? "",
+                               email: obj["email"] as? String,
+                               renews: obj["renews"] as? String,
+                               key: obj["key"] as? String)
     }
 
     static func totalRAMGB() -> Double {
@@ -195,4 +219,16 @@ func backendDisplayName(_ model: String) -> String {
     if model.contains("voxtral") { return "Voxtral Realtime" }
     if model.contains("small") { return "Whisper Small" }
     return "Whisper Turbo"
+}
+
+
+/// The daemon's view of the licence, as printed by `whisper-push license status`.
+struct LicenseSnapshot: Equatable {
+    var status: String    // licensed | trial | grace_offline | expired | disabled | locked
+    var kind: String      // lifetime | subscription (empty unless licensed)
+    var email: String?    // purchase email, for "Licensed to …"
+    var renews: String?   // YYYY-MM-DD, subscriptions only
+    var key: String?      // the license key itself, to copy onto another device
+
+    var isLicensed: Bool { status == "licensed" }
 }

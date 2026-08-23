@@ -1,5 +1,5 @@
 # Whisper Push — Rust build helpers
-.PHONY: build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
+.PHONY: dmg-artwork build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
@@ -12,6 +12,19 @@ BUNDLE_ID = com.whisper-push.app
 # a TCC permission for the daemon.
 WIZARD_BUNDLE = $(APP_DIR)/Contents/Library/Helpers/Onboarding.app
 WIZARD_BUNDLE_ID = com.whisper-push.onboarding
+
+# Installer window artwork. These numbers ARE the background image: the icon
+# and drop-link centres are drawn into resources/dmg-background.svg (the arrow
+# points from one to the other, and the label band under them is left empty).
+# Change one and you must redraw the background (resources/dmg-background.svg
+# carries the same coordinates in its own comments).
+DMG_BACKGROUND = resources/dmg-background.tiff
+DMG_WINDOW_W = 640
+DMG_WINDOW_H = 480
+DMG_ICON_SIZE = 120
+DMG_ICON_Y = 250
+DMG_APP_X = 170
+DMG_DROP_X = 470
 
 # Install target: a stable /Applications location + login autostart agent
 INSTALL_DIR = /Applications
@@ -131,12 +144,19 @@ dmg: bundle
 	@if command -v create-dmg > /dev/null; then \
 		rm -rf build/dmg-stage && mkdir -p build/dmg-stage; \
 		cp -R "$(APP_DIR)" build/dmg-stage/; \
+		BG=""; \
+		if [ -f "$(DMG_BACKGROUND)" ]; then \
+			BG="--background $(DMG_BACKGROUND)"; \
+		else \
+			echo "⚠ $(DMG_BACKGROUND) missing — DMG will have no artwork"; \
+		fi; \
 		create-dmg \
 			--volname "$(APP_NAME)" \
-			--window-size 600 380 \
-			--icon-size 120 \
-			--icon "$(APP_NAME).app" 150 190 \
-			--app-drop-link 450 190 \
+			$$BG \
+			--window-size $(DMG_WINDOW_W) $(DMG_WINDOW_H) \
+			--icon-size $(DMG_ICON_SIZE) \
+			--icon "$(APP_NAME).app" $(DMG_APP_X) $(DMG_ICON_Y) \
+			--app-drop-link $(DMG_DROP_X) $(DMG_ICON_Y) \
 			--hide-extension "$(APP_NAME).app" \
 			"build/dist/Whisper-Push-macOS-arm64.dmg" build/dmg-stage || true; \
 		rm -rf build/dmg-stage; \
@@ -154,6 +174,21 @@ dmg: bundle
 	fi
 	@du -h "build/dist/Whisper-Push-macOS-arm64.dmg" | sed 's|^|  |'
 	@echo "✓ DMG created at build/dist/Whisper-Push-macOS-arm64.dmg"
+
+# Re-render the installer artwork from its SVG source. Needs librsvg
+# (`brew install librsvg`); the rendered files are committed, so a plain
+# `make dmg` — and CI — never needs it.
+# The .tiff pairs 1x and 2x in one file, which is how a DMG background goes
+# Retina: Finder picks the 144 dpi directory on a HiDPI display.
+.PHONY: dmg-artwork
+dmg-artwork:
+	@rsvg-convert -w $(DMG_WINDOW_W) -h $(DMG_WINDOW_H) resources/dmg-background.svg \
+		-o resources/dmg-background.png
+	@rsvg-convert -w $$(( $(DMG_WINDOW_W) * 2 )) -h $$(( $(DMG_WINDOW_H) * 2 )) \
+		resources/dmg-background.svg -o resources/dmg-background@2x.png
+	@tiffutil -cathidpicheck resources/dmg-background.png resources/dmg-background@2x.png \
+		-out resources/dmg-background.tiff > /dev/null
+	@echo "✓ DMG artwork re-rendered (1x + 2x → resources/dmg-background.tiff)"
 
 # Create a ZIP of the signed .app bundle (for auto-updater downloads).
 # Uses ditto to preserve code signatures and extended attributes.

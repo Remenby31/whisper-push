@@ -3,6 +3,7 @@ pub mod decode;
 pub mod playback;
 pub mod stream;
 
+use crate::util::run_with_timeout;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rubato::FftFixedIn;
@@ -19,6 +20,12 @@ pub const RESAMPLE_CHUNK_SIZE: usize = 1024;
 /// *some* ambient peak, a not-working one is flatline. Triggers the input
 /// auto-fallback in the record pipeline.
 pub const DEAD_MIC_PEAK: f32 = 1e-4;
+/// RMS below which an *empty* transcription is blamed on the signal (mic too
+/// far away, input gain near zero) rather than on the user having said nothing:
+/// normal speech into a working mic lands well above this, a barely-audible
+/// murmur or an almost-muted interface lands below. Separates "you were too
+/// quiet" (worth telling the user) from "you said nothing" (stay silent).
+pub const LOW_SIGNAL_RMS: f32 = 0.003;
 
 /// Upper bound on a CoreAudio device enumeration. `cpal`'s `input_devices()` /
 /// `output_devices()` call into CoreAudio with no deadline of their own, and a
@@ -30,28 +37,66 @@ pub const DEAD_MIC_PEAK: f32 = 1e-4;
 /// of hanging. A healthy enumeration is sub-100 ms, so this never bites normally.
 const DEVICE_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
-/// stalled CoreAudio enumeration can't wedge the caller (notably tray startup).
-pub fn list_devices() -> Result<Vec<String>> {
-    crate::util::run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+/// Every audio device's name, unclassified. `devices()` reads the device list
+/// and each name and nothing else — unlike `input_devices()`/`output_devices()`,
+/// which ask every device for its supported stream formats to classify it, and
+/// **that** is the call that hangs: a format query blocks indefinitely on a mic
+/// when the Microphone permission is missing, on a device that vanished
+/// mid-session (a display unplugged) and on some virtual drivers. Measured on a
+/// real Mac: `devices()` named all five devices in microseconds while
+/// `input_devices()` never returned.
+fn all_device_names() -> Vec<String> {
+    run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
         cpal::default_host()
-            .input_devices()
+            .devices()
             .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
             .unwrap_or_default()
     })
-    .ok_or_else(|| anyhow::anyhow!("input device enumeration timed out (CoreAudio stalled)"))
+    .unwrap_or_default()
+}
+
+/// Shared body of the two pickers: try the *classifying* enumeration first
+/// (bounded), and when it stalls fall back to the unfiltered device list rather
+/// than reporting nothing. `kind` only labels the log line.
+fn list_bounded(kind: &str, classify: fn() -> Vec<String>) -> Result<Vec<String>> {
+    let classified = run_with_timeout(DEVICE_ENUM_TIMEOUT, classify).unwrap_or_default();
+    if !classified.is_empty() {
+        return Ok(classified);
+    }
+    let all = all_device_names();
+    if all.is_empty() {
+        anyhow::bail!("{kind} device enumeration timed out (CoreAudio stalled)");
+    }
+    tracing::warn!(
+        "{kind} device classification stalled — listing all {} device(s) unfiltered",
+        all.len()
+    );
+    Ok(all)
+}
+
+/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
+/// stalled CoreAudio can't freeze the menu.
+///
+/// The fallback can offer an output-only device as an input; picking one simply
+/// fails to open and `find_input_device` falls back to the default, which beats
+/// offering nothing in exactly the situation where the user needs to re-pick.
+pub fn list_devices() -> Result<Vec<String>> {
+    list_bounded("input", || {
+        cpal::default_host()
+            .input_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default()
+    })
 }
 
 /// List available output audio devices (used for sound-feedback playback).
-/// Bounded by `DEVICE_ENUM_TIMEOUT` for the same reason as `list_devices`.
 pub fn list_output_devices() -> Result<Vec<String>> {
-    crate::util::run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+    list_bounded("output", || {
         cpal::default_host()
             .output_devices()
-            .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default()
     })
-    .ok_or_else(|| anyhow::anyhow!("output device enumeration timed out (CoreAudio stalled)"))
 }
 
 /// Find an input device by name ("auto" = default).
@@ -61,7 +106,10 @@ pub fn find_input_device(name: &str) -> Result<cpal::Device> {
         host.default_input_device()
             .ok_or_else(|| anyhow::anyhow!("No input device found"))
     } else {
-        host.input_devices()?
+        // `devices()`, not `input_devices()`: the latter classifies by querying
+        // stream formats and can hang forever (see `all_device_names`), which on
+        // this path would mean a dictation that never starts.
+        host.devices()?
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
             .or_else(|| {
                 // The pinned device is gone (unplugged headset, disconnected
@@ -148,38 +196,77 @@ fn default_input_name() -> Option<String> {
         .and_then(|d| d.name().ok())
 }
 
-/// Record `dead` as a no-signal device and return the next mic to try. Order:
-/// (1) the built-in mic — its presence is also the macOS clamshell signal (lid
-/// open ⇒ user is at the Mac); (2) the OS default input; (3) any other input —
-/// always skipping known-dead devices and loopback/monitor sources.
-/// `None` ⇒ every usable input has failed (systemic, not one bad device).
-pub fn next_working_mic(dead: &str) -> Option<String> {
+/// Preference order for a replacement input: (1) the built-in mic — its
+/// presence is also the macOS clamshell signal (lid open ⇒ user is at the Mac);
+/// (2) the OS default input; (3) any other input — always skipping known-dead
+/// devices and loopback/monitor sources. Pure (no device I/O) so the ordering
+/// is unit-testable; `best_working_mic` adds the live probing on top.
+fn rank_fallback_candidates(
+    inputs: &[String],
+    dead: &[String],
+    os_default: Option<&str>,
+) -> Vec<String> {
+    let usable = |n: &str| !dead.iter().any(|x| x == n) && !is_monitor_source(n);
+    let builtin = inputs
+        .iter()
+        .map(String::as_str)
+        .filter(|n| is_builtin_mic(n));
+    let rest = inputs.iter().map(String::as_str);
+    let mut out: Vec<String> = Vec::new();
+    for n in builtin.chain(os_default).chain(rest) {
+        if usable(n) && !out.iter().any(|x| x == n) {
+            out.push(n.to_string());
+        }
+    }
+    out
+}
+
+/// Fallback probing bounds: audition at most this many ranked candidates, this
+/// long each. 4 × 300 ms keeps the worst case (plus open time) under ~2 s — a
+/// breath between two dictations — while still verifying the pick.
+const PROBE_MAX_CANDIDATES: usize = 4;
+const PROBE_DUR: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Open `name` and listen for `dur`, returning the peak amplitude heard — the
+/// ground truth for "does this mic actually deliver signal?". Only runs off the
+/// latency-critical path (fallback probing). Bounded by `run_with_timeout`
+/// because a device open can hang; the cpal stream is created AND dropped
+/// inside the probing thread (streams are `!Send`), so a timeout orphans at
+/// most that thread.
+pub fn probe_peak(name: &str, dur: std::time::Duration) -> Option<f32> {
+    let name = name.to_string();
+    crate::util::run_with_timeout(dur + DEVICE_ENUM_TIMEOUT, move || {
+        let cap = capture::AudioCapture::start(&name).ok()?;
+        std::thread::sleep(dur);
+        Some(cap.live_peak()) // cap drops here → stream closed
+    })
+    .flatten()
+}
+
+/// Record `dead` as a no-signal device and return the best replacement mic —
+/// preferring one that *verifiably* captures signal: the ranked candidates
+/// (see `rank_fallback_candidates`) are probed in order and the first with a
+/// live peak wins. If none probes alive, the first candidate is still returned
+/// (better than nothing — the probe window may just have been silent). `None`
+/// only when there is no candidate at all ⇒ every usable input has failed
+/// (systemic — e.g. Microphone permission denied, not one bad device).
+pub fn best_working_mic(dead: &str) -> Option<String> {
     let inputs = list_devices().ok()?;
     if let Ok(mut d) = DEAD_MICS.write() {
-        let already_known = d.iter().any(|n| n.as_str() == dead);
-        if !already_known {
+        if !d.iter().any(|n| n.as_str() == dead) {
             d.push(dead.to_string());
         }
     }
     let dead_set = DEAD_MICS.read().ok()?.clone();
-    let alive = |name: &str| !dead_set.iter().any(|x| x.as_str() == name);
-    let usable = |name: &str| alive(name) && !is_monitor_source(name);
-
-    // 1. Built-in mic (also the macOS clamshell signal).
-    if let Some(b) = inputs
-        .iter()
-        .find(|n| is_builtin_mic(n.as_str()) && alive(n.as_str()))
-    {
-        return Some(b.clone());
-    }
-    // 2. The OS default input, when it's a usable real mic.
-    if let Some(def) = default_input_name() {
-        if usable(&def) {
-            return Some(def);
+    let os_default = default_input_name();
+    let candidates = rank_fallback_candidates(&inputs, &dead_set, os_default.as_deref());
+    for name in candidates.iter().take(PROBE_MAX_CANDIDATES) {
+        match probe_peak(name, PROBE_DUR) {
+            Some(peak) if peak > DEAD_MIC_PEAK => return Some(name.clone()),
+            peak => tracing::debug!("Probed '{name}': {peak:?} — no signal"),
         }
     }
-    // 3. Any other usable (non-monitor) input.
-    inputs.into_iter().find(|n| usable(n.as_str()))
+    candidates.into_iter().next()
 }
 
 /// Create a resampler from device sample rate to 16kHz, if needed.
@@ -283,6 +370,58 @@ mod tests {
         assert!(!is_builtin_mic("AirPods Pro"));
         assert!(!is_builtin_mic("Jabra Evolve 65"));
         assert!(!is_builtin_mic("Studio Display Microphone")); // external display
+    }
+
+    fn v(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_rank_builtin_first_then_default_then_rest() {
+        let inputs = v(&["AirPods Pro", "MacBook Pro Microphone", "USB Mic"]);
+        let ranked = rank_fallback_candidates(&inputs, &[], Some("AirPods Pro"));
+        assert_eq!(
+            ranked,
+            v(&["MacBook Pro Microphone", "AirPods Pro", "USB Mic"])
+        );
+    }
+
+    #[test]
+    fn test_rank_excludes_dead() {
+        let inputs = v(&["MacBook Pro Microphone", "USB Mic"]);
+        let dead = v(&["MacBook Pro Microphone"]);
+        assert_eq!(
+            rank_fallback_candidates(&inputs, &dead, None),
+            v(&["USB Mic"])
+        );
+    }
+
+    #[test]
+    fn test_rank_excludes_monitor_sources() {
+        let inputs = v(&["Monitor of Built-in Audio", "USB Mic"]);
+        let ranked = rank_fallback_candidates(&inputs, &[], Some("Monitor of Built-in Audio"));
+        assert_eq!(ranked, v(&["USB Mic"]));
+    }
+
+    #[test]
+    fn test_rank_os_default_before_rest() {
+        let inputs = v(&["A Mic", "B Mic", "C Mic"]);
+        let ranked = rank_fallback_candidates(&inputs, &[], Some("B Mic"));
+        assert_eq!(ranked, v(&["B Mic", "A Mic", "C Mic"]));
+    }
+
+    #[test]
+    fn test_rank_dedupes_builtin_that_is_also_default() {
+        let inputs = v(&["MacBook Pro Microphone", "USB Mic"]);
+        let ranked = rank_fallback_candidates(&inputs, &[], Some("MacBook Pro Microphone"));
+        assert_eq!(ranked, v(&["MacBook Pro Microphone", "USB Mic"]));
+    }
+
+    #[test]
+    fn test_rank_empty_when_all_dead() {
+        let inputs = v(&["A Mic"]);
+        let dead = v(&["A Mic"]);
+        assert!(rank_fallback_candidates(&inputs, &dead, None).is_empty());
     }
 
     #[test]
