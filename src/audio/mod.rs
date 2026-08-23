@@ -37,16 +37,14 @@ pub const LOW_SIGNAL_RMS: f32 = 0.003;
 /// of hanging. A healthy enumeration is sub-100 ms, so this never bites normally.
 const DEVICE_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
-/// stalled CoreAudio enumeration can't wedge the caller (notably tray startup).
 /// Every audio device's name, unclassified. `devices()` reads the device list
 /// and each name and nothing else — unlike `input_devices()`/`output_devices()`,
 /// which ask every device for its supported stream formats to classify it, and
 /// **that** is the call that hangs: a format query blocks indefinitely on a mic
-/// when the Microphone permission is missing, on a stale device (a display
-/// unplugged mid-session) and on some virtual drivers. Measured on a real Mac:
-/// `devices()` named all five devices in microseconds while `input_devices()`
-/// never returned.
+/// when the Microphone permission is missing, on a device that vanished
+/// mid-session (a display unplugged) and on some virtual drivers. Measured on a
+/// real Mac: `devices()` named all five devices in microseconds while
+/// `input_devices()` never returned.
 fn all_device_names() -> Vec<String> {
     run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
         cpal::default_host()
@@ -57,59 +55,45 @@ fn all_device_names() -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
-/// stalled CoreAudio can't freeze the menu.
-///
-/// Falls back to the unclassified list when classification stalls, so the picker
-/// is never reduced to "Auto": a user whose pinned mic disappeared needs to
-/// choose another one, and that is exactly the situation where the classifying
-/// call hangs. The fallback can offer an output-only device as an input; picking
-/// one simply fails to open and `find_input_device` falls back to the default,
-/// which beats offering nothing.
-pub fn list_devices() -> Result<Vec<String>> {
-    if let Some(v) = run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
-        cpal::default_host()
-            .input_devices()
-            .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
-            .unwrap_or_default()
-    }) {
-        if !v.is_empty() {
-            return Ok(v);
-        }
+/// Shared body of the two pickers: try the *classifying* enumeration first
+/// (bounded), and when it stalls fall back to the unfiltered device list rather
+/// than reporting nothing. `kind` only labels the log line.
+fn list_bounded(kind: &str, classify: fn() -> Vec<String>) -> Result<Vec<String>> {
+    let classified = run_with_timeout(DEVICE_ENUM_TIMEOUT, classify).unwrap_or_default();
+    if !classified.is_empty() {
+        return Ok(classified);
     }
     let all = all_device_names();
     if all.is_empty() {
-        anyhow::bail!("input device enumeration timed out (CoreAudio stalled)");
+        anyhow::bail!("{kind} device enumeration timed out (CoreAudio stalled)");
     }
-    tracing::warn!(
-        "input device classification stalled — listing all {} device(s) unfiltered",
-        all.len()
-    );
+    tracing::warn!("{kind} device classification stalled — listing all {} device(s) unfiltered", all.len());
     Ok(all)
 }
 
+/// List available input audio devices. See `DEVICE_ENUM_TIMEOUT` — bounded so a
+/// stalled CoreAudio can't freeze the menu.
+///
+/// The fallback can offer an output-only device as an input; picking one simply
+/// fails to open and `find_input_device` falls back to the default, which beats
+/// offering nothing in exactly the situation where the user needs to re-pick.
+pub fn list_devices() -> Result<Vec<String>> {
+    list_bounded("input", || {
+        cpal::default_host()
+            .input_devices()
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
+            .unwrap_or_default()
+    })
+}
+
 /// List available output audio devices (used for sound-feedback playback).
-/// Same bounded-then-unfiltered strategy as `list_devices`.
 pub fn list_output_devices() -> Result<Vec<String>> {
-    if let Some(v) = run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
+    list_bounded("output", || {
         cpal::default_host()
             .output_devices()
-            .map(|it| it.filter_map(|d| d.name().ok()).collect::<Vec<String>>())
+            .map(|it| it.filter_map(|d| d.name().ok()).collect())
             .unwrap_or_default()
-    }) {
-        if !v.is_empty() {
-            return Ok(v);
-        }
-    }
-    let all = all_device_names();
-    if all.is_empty() {
-        anyhow::bail!("output device enumeration timed out (CoreAudio stalled)");
-    }
-    tracing::warn!(
-        "output device classification stalled — listing all {} device(s) unfiltered",
-        all.len()
-    );
-    Ok(all)
+    })
 }
 
 /// Find an input device by name ("auto" = default).

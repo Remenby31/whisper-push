@@ -285,13 +285,15 @@ impl App {
         let is_custom = !HOTKEY_PRESETS
             .iter()
             .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
-        if let Some(mi) = self.menu_items.as_ref() {
-            if let Some(it) = &mi.custom_hotkey_item {
-                it.set_text(custom_hotkey_label(is_custom.then(|| {
-                    format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
-                })));
-                it.set_checked(is_custom);
-            }
+        if let Some(it) = self
+            .menu_items
+            .as_ref()
+            .and_then(|mi| mi.custom_hotkey_item.as_ref())
+        {
+            it.set_text(custom_hotkey_label(is_custom.then(|| {
+                format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
+            })));
+            it.set_checked(is_custom);
         }
     }
 
@@ -1343,12 +1345,13 @@ impl App {
                 crate::notify::app(&format!("Custom hotkey set: {disp}"));
             }
 
-            Event::HotkeyCaptureTimeout(generation) => {
-                // Stale (a newer capture started, or one already completed).
-                if generation == self.capture_gen && self.capturing {
-                    self.end_hotkey_capture();
-                    crate::notify::app("No shortcut captured \u{2014} nothing changed.");
-                }
+            // A timeout from an earlier capture (a newer one started, or this one
+            // already completed) carries a stale generation and falls through.
+            Event::HotkeyCaptureTimeout(generation)
+                if generation == self.capture_gen && self.capturing =>
+            {
+                self.end_hotkey_capture();
+                crate::notify::app("No shortcut captured \u{2014} nothing changed.");
             }
 
             Event::PromptPermissions => {
@@ -2354,13 +2357,14 @@ fn stop_and_transcribe(
             // Empty text from a *quiet* recording is worth explaining; a decent
             // RMS means the user likely just said nothing — stay silent then.
             // (When the device dropped, the disconnect recap below covers it.)
-            if !device_lost && rms < crate::audio::LOW_SIGNAL_RMS {
-                if let Some(dev) = used_device.as_deref() {
-                    crate::notify::app(&format!(
+            if !device_lost
+                && rms < crate::audio::LOW_SIGNAL_RMS
+                && let Some(dev) = used_device.as_deref()
+            {
+                crate::notify::app(&format!(
                         "Heard {secs:.1} s from “{dev}” but it was too quiet to transcribe — \
-                         speak closer to the mic or pick another one in the menu."
-                    ));
-                }
+                     speak closer to the mic or pick another one in the menu."
+                ));
             }
         }
         Err(e) => {
@@ -2371,21 +2375,18 @@ fn stop_and_transcribe(
 
     // The mic died partway through: recap what actually happened so a truncated
     // (or missing) paste isn't a mystery. Word it by whether text came out.
-    if device_lost {
-        if let Some(dev) = used_device.as_deref() {
-            let msg = if transcribed {
-                format!(
-                    "“{dev}” disconnected mid-dictation — transcribed the {secs:.1} s \
-                     captured before the drop."
-                )
-            } else {
-                format!(
-                    "“{dev}” disconnected mid-dictation — too little was captured to \
-                     transcribe. Reconnect it or pick another mic in the menu."
-                )
-            };
-            crate::notify::app(&msg);
-        }
+    if device_lost && let Some(dev) = used_device.as_deref() {
+        crate::notify::app(&if transcribed {
+            format!(
+                "“{dev}” disconnected mid-dictation — transcribed the {secs:.1} s \
+                 captured before the drop."
+            )
+        } else {
+            format!(
+                "“{dev}” disconnected mid-dictation — too little was captured to \
+                 transcribe. Reconnect it or pick another mic in the menu."
+            )
+        });
     }
 }
 
