@@ -3,9 +3,9 @@ pub mod decode;
 pub mod playback;
 pub mod stream;
 
+use crate::util::run_with_timeout;
 use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait};
-use crate::util::run_with_timeout;
 use rubato::FftFixedIn;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -67,7 +67,10 @@ fn list_bounded(kind: &str, classify: fn() -> Vec<String>) -> Result<Vec<String>
     if all.is_empty() {
         anyhow::bail!("{kind} device enumeration timed out (CoreAudio stalled)");
     }
-    tracing::warn!("{kind} device classification stalled — listing all {} device(s) unfiltered", all.len());
+    tracing::warn!(
+        "{kind} device classification stalled — listing all {} device(s) unfiltered",
+        all.len()
+    );
     Ok(all)
 }
 

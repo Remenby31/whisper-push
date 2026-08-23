@@ -625,7 +625,10 @@ pub fn deactivate() -> DeactivateOutcome {
 
 fn clear() {
     let mut s = write();
-    tracing::info!("license cleared: {} (device slot freed)", masked(&s.license_key));
+    tracing::info!(
+        "license cleared: {} (device slot freed)",
+        masked(&s.license_key)
+    );
     let trial = s.trial_started_at;
     let hw = s.clock_high_water;
     *s = LicenseState {
@@ -692,10 +695,9 @@ pub fn status_text() -> String {
                 None => "Licensed: Monthly".into(),
             }
         }
-        LicenseStatus::GraceOffline { days_left } => format!(
-            "Offline: {days_left} day{} to reconnect",
-            plural(days_left)
-        ),
+        LicenseStatus::GraceOffline { days_left } => {
+            format!("Offline: {days_left} day{} to reconnect", plural(days_left))
+        }
         LicenseStatus::Expired => "Subscription expired: renew".into(),
         LicenseStatus::Disabled => "License inactive".into(),
         LicenseStatus::Locked => "Trial expired: activate".into(),
@@ -729,9 +731,7 @@ pub fn cta_text(status: &LicenseStatus) -> String {
 pub fn submenu_title() -> String {
     match status() {
         LicenseStatus::Licensed(_) => "License \u{2713}".into(),
-        LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => {
-            "License: Trial".into()
-        }
+        LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => "License: Trial".into(),
         _ => "\u{26a0} License".into(),
     }
 }

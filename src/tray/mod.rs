@@ -80,11 +80,7 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Hold: Right Control", "rctrl", "hold"),
     ("Hold: Right Command", "rcmd", "hold"),
     ("Hold: Right Option", "ralt", "hold"),
-    (
-        "Toggle: \u{2318}\u{21e7}Space",
-        "cmd+shift+space",
-        "toggle",
-    ),
+    ("Toggle: \u{2318}\u{21e7}Space", "cmd+shift+space", "toggle"),
     (
         "Toggle: \u{2303}\u{21e7}Space",
         "ctrl+shift+space",
@@ -115,10 +111,7 @@ fn perms_title(status: &crate::permissions::PermissionStatus) -> String {
     if status.all_granted() {
         "Permissions \u{2713}".into()
     } else {
-        format!(
-            "\u{26a0} Permissions: {} to grant",
-            status.missing_count()
-        )
+        format!("\u{26a0} Permissions: {} to grant", status.missing_count())
     }
 }
 
@@ -290,9 +283,9 @@ impl App {
             .as_ref()
             .and_then(|mi| mi.custom_hotkey_item.as_ref())
         {
-            it.set_text(custom_hotkey_label(is_custom.then(|| {
-                format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
-            })));
+            it.set_text(custom_hotkey_label(
+                is_custom.then(|| format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
+            ));
             it.set_checked(is_custom);
         }
     }
@@ -340,9 +333,9 @@ impl App {
                 .iter()
                 .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
             let item = CheckMenuItem::new(
-                custom_hotkey_label(is_custom.then(|| {
-                    format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
-                })),
+                custom_hotkey_label(
+                    is_custom.then(|| format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
+                ),
                 true,
                 is_custom,
                 None,
@@ -565,7 +558,11 @@ impl App {
         // available inside that modal and in the License submenu. It is inserted
         // by `sync_menu_head`, not appended here, so it can come and go: once
         // licensed there is nothing at the top at all.
-        let unlock_item = MenuItem::new(crate::license::cta_text(&crate::license::status()), true, None);
+        let unlock_item = MenuItem::new(
+            crate::license::cta_text(&crate::license::status()),
+            true,
+            None,
+        );
         let unlock_id = unlock_item.id().0.clone();
         let head_separator = PredefinedMenuItem::separator();
 
@@ -757,7 +754,9 @@ impl App {
     /// Refresh every license-dependent menu item from `license::status()` — in
     /// BOTH directions (activation, deactivation, expiry), cheap, no rebuild.
     fn refresh_license_submenu(&mut self) {
-        let Some(mi) = self.menu_items.as_ref() else { return };
+        let Some(mi) = self.menu_items.as_ref() else {
+            return;
+        };
         let st = crate::license::status();
         let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
         mi.license_status_item
@@ -805,7 +804,10 @@ impl App {
             pinned != "auto" && !list.is_empty() && !list.iter().any(|n| n == pinned)
         };
         let drop_input = gone(&input, crate::audio::list_devices().unwrap_or_default());
-        let drop_output = gone(&output, crate::audio::list_output_devices().unwrap_or_default());
+        let drop_output = gone(
+            &output,
+            crate::audio::list_output_devices().unwrap_or_default(),
+        );
         if !drop_input && !drop_output {
             return;
         }
@@ -834,7 +836,9 @@ impl App {
     /// doesn't already say. When both are gone the separator goes too, so the
     /// menu opens straight onto its real contents.
     fn sync_menu_head(&mut self) {
-        let Some(mi) = self.menu_items.as_ref() else { return };
+        let Some(mi) = self.menu_items.as_ref() else {
+            return;
+        };
         let licensed = matches!(
             crate::license::status(),
             crate::license::LicenseStatus::Licensed(_)
@@ -1212,9 +1216,7 @@ impl App {
                     // on the deprecated NSUserNotification path, which recent
                     // macOS often delivers invisibly — the item looked dead.
                     if let Some(it) = &mi.custom_hotkey_item {
-                        it.set_text(
-                            "\u{2328} Press your shortcut now\u{2026} (click to cancel)",
-                        );
+                        it.set_text("\u{2328} Press your shortcut now\u{2026} (click to cancel)");
                         it.set_checked(false);
                     }
                     crate::notify::app(
@@ -2177,11 +2179,7 @@ fn set_tray_icon_now(tray: &Option<TrayIcon>, state: State) {
             false,
             "Whisper Push: Recording",
         ),
-        State::Idle => (
-            GlyphStyle::Template(255),
-            true,
-            "Whisper Push: Ready",
-        ),
+        State::Idle => (GlyphStyle::Template(255), true, "Whisper Push: Ready"),
     };
     if let Some(tray) = tray {
         if let Some(icon) = glyph_icon(style) {
@@ -2362,7 +2360,7 @@ fn stop_and_transcribe(
                 && let Some(dev) = used_device.as_deref()
             {
                 crate::notify::app(&format!(
-                        "Heard {secs:.1} s from “{dev}” but it was too quiet to transcribe — \
+                    "Heard {secs:.1} s from “{dev}” but it was too quiet to transcribe — \
                      speak closer to the mic or pick another one in the menu."
                 ));
             }
@@ -2417,11 +2415,7 @@ fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let recent = crate::history::recent();
     let mut items = Vec::new();
     if recent.is_empty() {
-        let ph = MenuItem::new(
-            "  (empty: your dictations will appear here)",
-            false,
-            None,
-        );
+        let ph = MenuItem::new("  (empty: your dictations will appear here)", false, None);
         let _ = submenu.insert(&ph, pos);
         items.push((ph, String::new()));
         return items;
@@ -2449,11 +2443,7 @@ fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let triggers = crate::templates::triggers();
     let mut items = Vec::new();
     if triggers.is_empty() {
-        let ph = MenuItem::new(
-            "  (none yet: use Add Template\u{2026})",
-            false,
-            None,
-        );
+        let ph = MenuItem::new("  (none yet: use Add Template\u{2026})", false, None);
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;
@@ -2600,11 +2590,7 @@ fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     let entries = crate::dictionary::list_entries();
     let mut items = Vec::new();
     if entries.is_empty() {
-        let ph = MenuItem::new(
-            "  (empty: your corrections will appear here)",
-            false,
-            None,
-        );
+        let ph = MenuItem::new("  (empty: your corrections will appear here)", false, None);
         let _ = submenu.append(&ph);
         items.push((ph, String::new()));
         return items;

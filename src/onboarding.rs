@@ -134,7 +134,10 @@ pub fn run_license_window(start_activate: bool) -> bool {
         return false;
     };
     if !wizard.exists() {
-        info!("license window: helper not installed at {}", wizard.display());
+        info!(
+            "license window: helper not installed at {}",
+            wizard.display()
+        );
         return false;
     }
     let daemon = std::env::current_exe().unwrap_or_default();
