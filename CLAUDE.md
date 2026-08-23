@@ -202,6 +202,17 @@ Enhancements layered on top of the existing modules — no new architectural pie
 - **Menu-bar icons** (`tray/mod.rs`) — ONE master glyph (`resources/icons/icon-glyph.svg` → `icon-glyph.png`, the brand three-wave sound mark) is recoloured per state at runtime by `glyph_icon(GlyphStyle)`, so the geometry/size is byte-identical across states (no more squished or oversized variants). **Idle** = crisp macOS template (auto black/white); **Loading/Processing** = same template dimmed to ~43% (`BUSY_OPACITY`, reads as "working", visible on any bar); **Recording** = **citron #CEDC00** (`TINT_RECORDING`, the sole accent). State drives the icon via `set_tray_icon`; crucially the **pipeline thread emits `StateChanged`** on hotkey-driven record/stop too, so the icon updates identically whether recording starts from the menu or the key (previously only the menu path did). Start/stop sounds live at the trigger points only — never in the `StateChanged` handlers — to avoid doubling.
 - **Makefile** — `make install` copies the bundle to `/Applications` and writes the login `LaunchAgent`. `make uninstall` reverses it. `make dmg` bundles `~/Library/Application Support/whisper-push/models/ggml-large-v3-turbo-q5_0.bin` into `Contents/Resources/models/` **before** signing, so the distributed DMG (~528 MB) gives a zero-download first launch. `make install` stays slim — only `make dmg` ships the model.
 - **App icon** — `resources/AppIcon.icns` generated from the brand kit squircle PNGs, referenced by `Info.plist` (`CFBundleIconFile`).
+- **DMG install window** — `resources/dmg-background.svg` is the source; `make
+  dmg-artwork` re-renders the committed `.png`/`@2x.png`/`.tiff` (needs `brew
+  install librsvg`), and `make dmg` passes the `.tiff` to `create-dmg`. The
+  window geometry lives in ONE place, the `DMG_*` variables at the top of the
+  Makefile, because the drawing depends on it: the arrow runs between the two
+  icon centres and the icons plus **their Finder-drawn labels** must land on the
+  cream card. Two constraints the artwork exists to satisfy — Finder draws those
+  labels in dark text you cannot restyle (hence a light stage, never the racing
+  green), and anything drawn under a 120 px icon slot is simply hidden. Change a
+  `DMG_*` number and you must redraw. The `.tiff` pairs 1x and 2x so the
+  background is Retina.
 
 ## Licensing UX (Lemon Squeezy) — flows & gotchas
 
