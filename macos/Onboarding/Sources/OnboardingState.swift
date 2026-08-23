@@ -114,19 +114,7 @@ class OnboardingState: ObservableObject {
     /// parse — callers then treat the user as unlicensed, which is the safe
     /// default for a paywall.
     private static func readLicense(daemonPath: String?) -> LicenseSnapshot? {
-        guard let path = daemonPath, FileManager.default.isExecutableFile(atPath: path) else {
-            return nil
-        }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["license", "status"]
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let line = String(data: data, encoding: .utf8)?
-            .split(separator: "\n").last.map(String.init) ?? ""
-        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+        guard let obj = Daemon.json(daemonPath, ["license", "status"]),
               let status = obj["status"] as? String else { return nil }
         return LicenseSnapshot(status: status,
                                kind: obj["kind"] as? String ?? "",

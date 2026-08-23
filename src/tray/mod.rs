@@ -122,29 +122,6 @@ fn perms_title(status: &crate::permissions::PermissionStatus) -> String {
     }
 }
 
-/// The top-of-menu call to action, wording included. Everything the old greyed
-/// "Trial | 3 days left" line said is folded in here, because a line you cannot
-/// click is decoration: one item, clickable, that states the situation and what
-/// pressing it does.
-fn unlock_label(status: &crate::license::LicenseStatus) -> String {
-    use crate::license::LicenseStatus as LS;
-    match status {
-        LS::Trial { days_left } => format!(
-            "\u{2726} Unlock Whisper Push \u{2502} {days_left} day{} left",
-            if *days_left == 1 { "" } else { "s" }
-        ),
-        LS::Locked => "\u{2726} Trial ended \u{2502} Unlock Whisper Push\u{2026}".into(),
-        LS::Expired => "\u{2726} Subscription expired \u{2502} Renew\u{2026}".into(),
-        LS::Disabled => "\u{2726} License inactive \u{2502} Fix now\u{2026}".into(),
-        LS::GraceOffline { days_left } => format!(
-            "\u{2726} Offline \u{2502} reconnect within {days_left} day{}",
-            if *days_left == 1 { "" } else { "s" }
-        ),
-        // Licensed: the head is empty, this text is never shown.
-        LS::Licensed(_) => "\u{2726} Manage License\u{2026}".into(),
-    }
-}
-
 /// How long "Set Custom Hotkey…" stays armed before giving up, so the menu
 /// never sits in "Press your shortcut now…" forever.
 const HOTKEY_CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -586,7 +563,7 @@ impl App {
         // available inside that modal and in the License submenu. It is inserted
         // by `sync_menu_head`, not appended here, so it can come and go: once
         // licensed there is nothing at the top at all.
-        let unlock_item = MenuItem::new(unlock_label(&crate::license::status()), true, None);
+        let unlock_item = MenuItem::new(crate::license::cta_text(&crate::license::status()), true, None);
         let unlock_id = unlock_item.id().0.clone();
         let head_separator = PredefinedMenuItem::separator();
 
@@ -802,7 +779,7 @@ impl App {
         } else {
             &mi.license_activate_item
         });
-        mi.unlock_item.set_text(unlock_label(&st));
+        mi.unlock_item.set_text(crate::license::cta_text(&st));
         self.sync_menu_head();
     }
 

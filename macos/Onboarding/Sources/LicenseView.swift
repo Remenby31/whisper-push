@@ -450,7 +450,7 @@ struct LicenseView: View {
     private func refreshLicenseInfo() {
         guard let path = daemonBinary else { return }
         DispatchQueue.global().async {
-            let obj = Self.runDaemonJSON(path: path, ["license", "status"])
+            let obj = Daemon.json(path, ["license", "status"])
             let snap = (obj?["status"] as? String).map { st in
                 LicenseSnapshot(status: st,
                                 kind: obj?["kind"] as? String ?? "",
@@ -466,23 +466,10 @@ struct LicenseView: View {
         return path
     }
 
-    /// Run the daemon CLI and parse its final JSON line.
-    private static func runDaemonJSON(path: String, _ args: [String]) -> [String: Any]? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = args
-        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
-        do { try p.run() } catch { return nil }
-        p.waitUntilExit()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let line = String(data: data, encoding: .utf8)?.split(separator: "\n").last.map(String.init) ?? ""
-        return try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-    }
-
     /// Run a daemon command and report (success, humanized error).
     private static func runDaemon(path: String, _ args: [String],
                                   successKey: String, successValue: String? = nil) -> (Bool, String?) {
-        guard let obj = runDaemonJSON(path: path, args) else {
+        guard let obj = Daemon.json(path, args) else {
             return (false, "Couldn't start the activation helper.")
         }
         let ok: Bool

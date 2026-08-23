@@ -72,14 +72,9 @@ private struct PermissionRow: View {
     }
 
     private func requestPermission() {
-        if let path = daemonPath, FileManager.default.isExecutableFile(atPath: path) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: path)
-            p.arguments = ["--permissions-request", kind.cliName]
-            p.standardOutput = Pipe()
-            p.standardError = Pipe()
-            try? p.run()
-        }
+        // Fire and forget: this command waits on the user's answer to the
+        // system prompt (up to 30 s for the mic) and this is a button action.
+        Daemon.spawn(daemonPath, ["--permissions-request", kind.cliName])
         // Mic 1-tap popup is the grant UI in .notRequested; only open
         // Settings for the other kinds, or when the user already denied.
         let shouldOpenSettings: Bool
@@ -157,16 +152,7 @@ final class PermissionsPoller: ObservableObject {
 
     private func poll() {
         guard let path = daemonPath else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: path)
-        p.arguments = ["--permissions-json"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = Pipe()
-        do { try p.run() } catch { return }
-        p.waitUntilExit()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let obj = Daemon.json(path, ["--permissions-json"]) else { return }
         microphone = parse(obj["microphone"])
         accessibility = parse(obj["accessibility"])
         inputMonitoring = parse(obj["input_monitoring"])

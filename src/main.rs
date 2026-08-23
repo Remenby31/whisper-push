@@ -921,13 +921,12 @@ mod cli_license {
         license::init();
         match action {
             LicenseAction::Path => println!("{}", license::license_path().display()),
-            LicenseAction::Status => {
-                // Print a *current* verdict: if the cached one is stale (or was
-                // just reset by the v2 upgrade path), confirm it online first
-                // instead of leaving a pending check behind when we exit.
-                license::revalidate_if_due();
-                println!("{}", license::status_json());
-            }
+            // Deliberately offline: the license modal runs this before it can
+            // draw its first frame, so a stale-verdict re-check here would show
+            // the user a blank window for as long as HTTP_TIMEOUT. The daemon's
+            // `start_background_sync` keeps the cached verdict fresh; `license
+            // validate` is the explicit way to force a check.
+            LicenseAction::Status => println!("{}", license::status_json()),
             LicenseAction::Activate { key, email: _ } => {
                 let line = match license::activate(key) {
                     ActivateOutcome::Activated => "{\"activated\":true}".to_string(),

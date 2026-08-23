@@ -211,8 +211,12 @@ fn file_mtime() -> u64 {
 fn maybe_reload() {
     let disk = file_mtime();
     if disk != 0 && disk != LOADED_MTIME.load(Ordering::Relaxed) {
-        LOADED_MTIME.store(disk, Ordering::Relaxed);
         if let Ok(content) = std::fs::read_to_string(license_path()) {
+            // Mark the revision as *seen* only now. Storing it before the read
+            // meant a transient failure (or a file replaced mid-read) retired
+            // that revision for good: we would never look at it again, and the
+            // menu would keep showing the previous verdict until the next write.
+            LOADED_MTIME.store(disk, Ordering::Relaxed);
             if let Ok(fresh) = serde_json::from_str::<LicenseState>(&content) {
                 // The external write we welcome is an activation by the CLI or
                 // the Subscription modal — both go through `save`, so both are
@@ -274,10 +278,11 @@ fn revalidation_due() -> bool {
         && t.saturating_sub(s.last_validation_attempt) >= REVALIDATE_RETRY
 }
 
-/// Re-check the key online if it's due. Synchronous (≤ HTTP_TIMEOUT) — off the
-/// hot path only: the CLI before printing a status, the daemon's background
-/// loop. Returns whether a check ran, so callers can refresh their UI.
-pub fn revalidate_if_due() -> bool {
+/// Re-check the key online if it's due. Blocks for up to `HTTP_TIMEOUT`, so the
+/// daemon's background loop is the only caller — deliberately not the CLI, whose
+/// `status` the license modal runs before it can draw its first frame.
+/// Returns whether a check ran, so the caller can refresh the UI.
+fn revalidate_if_due() -> bool {
     if !revalidation_due() {
         return false;
     }
@@ -395,7 +400,9 @@ pub fn status() -> LicenseStatus {
     evaluate(&read(), now())
 }
 
-/// Hot-path gate. One RwLock read + arithmetic.
+/// Hot-path gate: one `stat` (to notice an activation done by the modal or the
+/// CLI, which are separate processes), an RwLock read and arithmetic. No
+/// network, no parse unless the file actually changed.
 pub fn is_entitled() -> bool {
     matches!(
         status(),
@@ -525,6 +532,16 @@ pub fn activate(key: &str) -> ActivateOutcome {
     s.last_validated_ok = t;
     s.last_validation_attempt = t;
     save(&s);
+    // Log every entitlement change: these are the events support questions are
+    // made of ("it says trial expired and I never touched it"), and without a
+    // line here a deactivation is indistinguishable from a bug.
+    tracing::info!(
+        "license activated: {} ({:?}, {} of {} device slots used)",
+        masked(&s.license_key),
+        s.product_kind,
+        s.activation_usage.unwrap_or(0),
+        s.activation_limit.unwrap_or(0)
+    );
     ActivateOutcome::Activated
 }
 
@@ -573,6 +590,11 @@ pub fn validate() -> ValidateOutcome {
             s.instance_id = None; // instance revoked elsewhere → allow re-activation
         }
         save(&s);
+        tracing::warn!(
+            "license validation rejected by the server: {} (status {:?})",
+            masked(&s.license_key),
+            s.key_status
+        );
         ValidateOutcome::Invalid
     }
 }
@@ -603,6 +625,7 @@ pub fn deactivate() -> DeactivateOutcome {
 
 fn clear() {
     let mut s = write();
+    tracing::info!("license cleared: {} (device slot freed)", masked(&s.license_key));
     let trial = s.trial_started_at;
     let hw = s.clock_high_water;
     *s = LicenseState {
@@ -679,6 +702,29 @@ pub fn status_text() -> String {
     }
 }
 
+/// The top-of-menu call to action, wording included. Everything the greyed
+/// "Trial \u{2502} 3 days left" line used to say is folded in here, because a line
+/// you cannot click is decoration: one item, clickable, that states the
+/// situation and what pressing it does. Lives beside `status_text` and
+/// `submenu_title` so the three readings of one enum cannot drift apart.
+pub fn cta_text(status: &LicenseStatus) -> String {
+    match status {
+        LicenseStatus::Trial { days_left } => format!(
+            "\u{2726} Unlock Whisper Push \u{2502} {days_left} day{} left",
+            plural(*days_left)
+        ),
+        LicenseStatus::Locked => "\u{2726} Trial ended \u{2502} Unlock Whisper Push\u{2026}".into(),
+        LicenseStatus::Expired => "\u{2726} Subscription expired \u{2502} Renew\u{2026}".into(),
+        LicenseStatus::Disabled => "\u{2726} License inactive \u{2502} Fix now\u{2026}".into(),
+        LicenseStatus::GraceOffline { days_left } => format!(
+            "\u{2726} Offline \u{2502} reconnect within {days_left} day{}",
+            plural(*days_left)
+        ),
+        // Licensed: the head of the menu is empty, so this text is never shown.
+        LicenseStatus::Licensed(_) => "\u{2726} Manage License\u{2026}".into(),
+    }
+}
+
 /// Submenu title with a state glyph.
 pub fn submenu_title() -> String {
     match status() {
@@ -722,6 +768,16 @@ pub fn status_json() -> String {
         LicenseStatus::Locked => json!({"status": "locked"}),
     };
     v.to_string()
+}
+
+/// A key as it may appear in a log or a support paste: enough to tell two keys
+/// apart, never enough to use one.
+fn masked(key: &Option<String>) -> String {
+    match key {
+        Some(k) if k.len() > 8 => format!("{}\u{2026}", &k[..8]),
+        Some(_) => "<short>".into(),
+        None => "<none>".into(),
+    }
 }
 
 fn plural(n: u64) -> &'static str {
