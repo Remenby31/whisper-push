@@ -1,11 +1,34 @@
 # Whisper Push — Rust build helpers
-.PHONY: dmg-artwork build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
+.PHONY: dmg-artwork build release onboarding onboarding-preview bundle sign \
+	notarize-app dmg dmg-package zip zip-package notarize notarize-dmg \
+	notarize-ci release-macos clean check deploy install uninstall
+
+# The release chain is strictly ordered — sign, notarize, staple, package —
+# and a stapled ticket does not survive a re-sign. `make -j` would happily run
+# packaging next to notarization, so opt the whole file out of parallelism;
+# nothing here is worth parallelising anyway.
+.NOTPARALLEL:
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
 BINARY = target/release/whisper-push
 SIGN_ID = Developer ID Application: Baptiste Cruvellier (3SNT64YKAS)
 BUNDLE_ID = com.whisper-push.app
+
+# Ad-hoc signing has no timestamp service to talk to, so asking for one is a
+# hard codesign error. Real Developer ID signing needs the secure timestamp:
+# notarization rejects anything without it.
+TIMESTAMP = $(if $(filter -,$(SIGN_ID)),--timestamp=none,--timestamp)
+
+# Notarization credentials. CI passes an App Store Connect API key
+# (APPLE_API_KEY_PATH / _ID / _ISSUER_ID); a local machine falls back to the
+# "whisper-push" keychain profile written by `notarytool store-credentials`.
+NOTARY_AUTH = $(if $(APPLE_API_KEY_PATH),--key "$(APPLE_API_KEY_PATH)" --key-id "$(APPLE_API_KEY_ID)" --issuer "$(APPLE_API_ISSUER_ID)",--keychain-profile "whisper-push")
+
+# The two macOS release artefacts: the DMG humans install from, and the ZIP
+# the in-app updater downloads.
+DMG = build/dist/Whisper-Push-macOS-arm64.dmg
+ZIP = build/dist/Whisper-Push-macOS-arm64.zip
 
 # Onboarding wizard sub-bundle — own Info.plist + own bundle ID so the
 # wizard isn't targeted by "Quit and reopen" popups when the user grants
@@ -98,52 +121,74 @@ bundle: release onboarding
 	@echo "✓ App bundle created at $(APP_DIR)"
 	@echo "  L wizard sub-bundle at Contents/Library/Helpers/Onboarding.app"
 
-# Sign the app with Developer ID
+# Sign the bundle, bottom-up: the wizard sub-bundle first, then the daemon
+# binary, then the outer .app wrap. Each signature seals everything below it,
+# so signing top-down would record the outer seal before its contents settled
+# and every nested signature after it would break that seal.
+#
+# This is the ONE place the bundle gets signed. `dmg` and `zip` used to carry
+# their own copies of these four codesign calls, which drifted (the DMG path
+# never signed the wizard with a timestamp) and — worse — re-signing after
+# `notarize-app` would strip the stapled ticket back off.
 sign: bundle
-	@codesign --force --options runtime \
+	@codesign --force --options runtime $(TIMESTAMP) \
 		-s "$(SIGN_ID)" \
-		-i "$(BUNDLE_ID)" \
-		--entitlements resources/entitlements.plist \
-		--timestamp \
-		"$(APP_DIR)/Contents/MacOS/whisper-push"
-	@codesign --force --options runtime --deep \
-		-s "$(SIGN_ID)" \
-		--entitlements resources/entitlements.plist \
-		--timestamp \
-		"$(APP_DIR)"
-	@echo "✓ App signed with Developer ID"
-
-# Create a distributable DMG. Uses SIGN_ID for signing — set to "-" for
-# ad-hoc (local dev) or "Developer ID Application: ..." for production.
-# Bottom-up: wizard sub-bundle first, then daemon, then outer .app wrap.
-dmg: bundle
-	@codesign --force --options runtime -s "$(SIGN_ID)" \
 		"$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
-	@codesign --force --options runtime -s "$(SIGN_ID)" \
+	@codesign --force --options runtime $(TIMESTAMP) \
+		-s "$(SIGN_ID)" \
 		"$(WIZARD_BUNDLE)"
-	@codesign --force --options runtime -s "$(SIGN_ID)" \
+	@codesign --force --options runtime $(TIMESTAMP) \
+		-s "$(SIGN_ID)" \
 		-i "$(BUNDLE_ID)" \
 		--entitlements resources/entitlements.plist \
-		--timestamp \
 		"$(APP_DIR)/Contents/MacOS/whisper-push"
-	@codesign --force --options runtime -s "$(SIGN_ID)" \
+	@codesign --force --options runtime $(TIMESTAMP) \
+		-s "$(SIGN_ID)" \
 		--entitlements resources/entitlements.plist \
-		--timestamp \
 		"$(APP_DIR)"
 	@if [ "$(SIGN_ID)" = "-" ]; then \
-		echo "✓ App ad-hoc signed (DMG path) - right-click then Open to bypass Gatekeeper"; \
+		echo "✓ App ad-hoc signed - right-click then Open to bypass Gatekeeper"; \
 	else \
-		echo "✓ App signed with Developer ID (DMG path)"; \
+		echo "✓ App signed with Developer ID (hardened runtime, timestamped)"; \
 	fi
+
+# Notarize the .app itself and staple the ticket INTO the bundle.
+#
+# Stapling the DMG alone leaves the app inside it ticketless: Gatekeeper then
+# has to reach Apple over the network to clear it, and the copy the in-app
+# updater unpacks from the ZIP carries no ticket at all. A stapled bundle
+# validates offline wherever it travels — DMG install and updater alike.
+#
+# Nothing may re-sign the bundle after this point; a fresh signature drops the
+# ticket. Hence `dmg-package` and `zip-package` only package.
+notarize-app: sign
+	@if [ "$(SIGN_ID)" = "-" ]; then \
+		echo "⚠ ad-hoc signed - skipping notarization (nothing to staple)"; \
+	else \
+		mkdir -p build/dist; \
+		rm -f build/notarize-app.zip; \
+		echo "Notarizing the .app..."; \
+		(cd build && ditto -c -k --sequesterRsrc --keepParent "$(APP_NAME).app" notarize-app.zip); \
+		xcrun notarytool submit build/notarize-app.zip $(NOTARY_AUTH) --wait; \
+		xcrun stapler staple "$(APP_DIR)"; \
+		rm -f build/notarize-app.zip; \
+		echo "✓ .app notarized, ticket stapled into the bundle"; \
+	fi
+
+# Build the distributable DMG from the already-signed (and, in a release,
+# already-stapled) bundle. Signing lives in `sign`; this target only packages.
+dmg: notarize-app dmg-package
+
+dmg-package:
 	@# Package the DMG with the pixel-perfect drag-to-Applications layout via
 	@# create-dmg (install it with `brew install create-dmg`). If it's missing or
 	@# fails, fall back to a plain image that STILL carries an Applications
 	@# drop-link, so users can always drag-to-install.
 	@mkdir -p build/dist
-	@rm -f "build/dist/Whisper-Push-macOS-arm64.dmg"
+	@rm -f "$(DMG)"
 	@if command -v create-dmg > /dev/null; then \
 		rm -rf build/dmg-stage && mkdir -p build/dmg-stage; \
-		cp -R "$(APP_DIR)" build/dmg-stage/; \
+		ditto "$(APP_DIR)" "build/dmg-stage/$(APP_NAME).app"; \
 		BG=""; \
 		if [ -f "$(DMG_BACKGROUND)" ]; then \
 			BG="--background $(DMG_BACKGROUND)"; \
@@ -158,22 +203,26 @@ dmg: bundle
 			--icon "$(APP_NAME).app" $(DMG_APP_X) $(DMG_ICON_Y) \
 			--app-drop-link $(DMG_DROP_X) $(DMG_ICON_Y) \
 			--hide-extension "$(APP_NAME).app" \
-			"build/dist/Whisper-Push-macOS-arm64.dmg" build/dmg-stage || true; \
+			"$(DMG)" build/dmg-stage || true; \
 		rm -rf build/dmg-stage; \
 	else \
 		echo "⚠ create-dmg not found — run 'brew install create-dmg' for the styled DMG"; \
 	fi
-	@if [ ! -f "build/dist/Whisper-Push-macOS-arm64.dmg" ]; then \
+	@if [ ! -f "$(DMG)" ]; then \
 		echo "→ building drag-to-Applications fallback DMG (no styled background)"; \
 		rm -rf build/dmg-stage && mkdir -p build/dmg-stage; \
-		cp -R "$(APP_DIR)" build/dmg-stage/; \
+		ditto "$(APP_DIR)" "build/dmg-stage/$(APP_NAME).app"; \
 		ln -s /Applications build/dmg-stage/Applications; \
 		hdiutil create -volname "$(APP_NAME)" -srcfolder build/dmg-stage -ov -format UDZO \
-			"build/dist/Whisper-Push-macOS-arm64.dmg"; \
+			"$(DMG)"; \
 		rm -rf build/dmg-stage; \
 	fi
-	@du -h "build/dist/Whisper-Push-macOS-arm64.dmg" | sed 's|^|  |'
-	@echo "✓ DMG created at build/dist/Whisper-Push-macOS-arm64.dmg"
+	@# Sign the disk image itself. Without this the .dmg carries "no usable
+	@# signature" of its own: only the .app inside it was ever signed, so
+	@# Gatekeeper has nothing to check before the image is mounted.
+	@codesign --force $(TIMESTAMP) -s "$(SIGN_ID)" "$(DMG)"
+	@du -h "$(DMG)" | sed 's|^|  |'
+	@echo "✓ DMG created and signed at $(DMG)"
 
 # Re-render the installer artwork from its SVG source. Needs librsvg
 # (`brew install librsvg`); the rendered files are committed, so a plain
@@ -190,36 +239,44 @@ dmg-artwork:
 		-out resources/dmg-background.tiff > /dev/null
 	@echo "✓ DMG artwork re-rendered (1x + 2x → resources/dmg-background.tiff)"
 
-# Create a ZIP of the signed .app bundle (for auto-updater downloads).
-# Uses ditto to preserve code signatures and extended attributes.
-zip: sign
+# ZIP the signed+stapled .app bundle (this is what the in-app updater
+# downloads). ditto preserves the code signature, the xattrs, and the
+# notarization ticket `notarize-app` stapled in.
+#
+# A ZIP can't be stapled itself — `stapler` refuses archives — which is
+# exactly why the ticket has to be inside the bundle before we zip it.
+zip: notarize-app zip-package
+
+zip-package:
 	@mkdir -p build/dist
-	@cd build && ditto -c -k --sequesterRsrc --keepParent "$(APP_NAME).app" "dist/Whisper-Push-macOS-arm64.zip"
-	@echo "✓ ZIP created at build/dist/Whisper-Push-macOS-arm64.zip"
+	@cd build && ditto -c -k --sequesterRsrc --keepParent "$(APP_NAME).app" "$(CURDIR)/$(ZIP)"
+	@echo "✓ ZIP created at $(ZIP)"
 
-# Notarize the DMG (local: uses keychain-profile)
-notarize: dmg
-	@echo "Notarizing..."
-	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
-		--keychain-profile "whisper-push" \
-		--wait
-	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
-	@echo "✓ DMG notarized and stapled"
+# Notarize the DMG and staple its ticket, so Gatekeeper clears the image
+# offline. One target for both callers: NOTARY_AUTH picks the App Store
+# Connect API key when CI passes one, and the local keychain profile
+# otherwise — the old notarize / notarize-ci split only differed in that.
+notarize-dmg:
+	@if [ "$(SIGN_ID)" = "-" ]; then \
+		echo "⚠ ad-hoc signed - skipping DMG notarization"; \
+	else \
+		echo "Notarizing the DMG..."; \
+		xcrun notarytool submit "$(DMG)" $(NOTARY_AUTH) --wait; \
+		xcrun stapler staple "$(DMG)"; \
+		echo "✓ DMG notarized and stapled"; \
+	fi
 
-# Notarize the DMG (CI: uses API key file)
-notarize-ci: dmg
-	@echo "Notarizing (CI)..."
-	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
-		--key "$(APPLE_API_KEY_PATH)" \
-		--key-id "$(APPLE_API_KEY_ID)" \
-		--issuer "$(APPLE_API_ISSUER_ID)" \
-		--wait
-	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
-	@echo "✓ DMG notarized and stapled (CI)"
+notarize: dmg notarize-dmg
 
-# Full release: build + sign + DMG + notarize
-release-macos: notarize
-	@echo "✓ Release ready at build/dist/Whisper-Push-macOS-arm64.dmg"
+# Kept so an older invocation still works; NOTARY_AUTH makes it the same path.
+notarize-ci: notarize
+
+# Everything a macOS release ships, in one pass: sign once, notarize the .app
+# once, then package the DMG and the updater ZIP from that same stapled
+# bundle, and notarize the image itself. Running `make dmg` and `make zip`
+# back to back would sign and notarize the app twice over.
+release-macos: notarize-app dmg-package notarize-dmg zip-package
+	@echo "✓ Release ready: $(DMG) + $(ZIP)"
 
 # Build + sign + launch (dev workflow)
 deploy: sign

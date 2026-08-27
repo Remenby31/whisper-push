@@ -106,14 +106,36 @@ TOML format, compatible with Python version. Platform-default paths:
 - Linux: `~/.config/whisper-push/config.toml`
 - Windows: `%APPDATA%/whisper-push/config.toml`
 
-## Codesign (macOS)
+## Codesign + notarization (macOS)
 
 ```bash
 # Developer ID: Baptiste Cruvellier (3SNT64YKAS)
 # Permissions TCC persist across rebuilds with this certificate
-make sign    # sign the .app bundle
-make dmg     # create distributable DMG
+make sign           # sign the .app bundle (the ONE place signing happens)
+make notarize-app   # notarize the .app + staple the ticket INTO the bundle
+make dmg            # notarize-app, then package + sign the DMG
+make zip            # notarize-app, then package the updater ZIP
+make notarize       # the above + notarize & staple the DMG itself
+make release-macos  # all of it, in one pass (what CI runs)
 ```
+
+**Order is load-bearing: sign → notarize → staple → package.** Re-signing a
+bundle strips the stapled ticket back off, which is why `dmg-package` and
+`zip-package` only package and never call `codesign` on the app. `make dmg`
+followed by `make zip` is safe (each goes through `notarize-app`) but pays for
+two notarization round-trips; `make release-macos` does one.
+
+Stapling the ticket into the **bundle** — not just the DMG — is what lets the
+app validate offline: a ZIP can't carry a ticket of its own, so without it the
+copy the in-app updater unpacks needs Gatekeeper to reach Apple over the
+network. `notarize-app` / `notarize-dmg` no-op when `SIGN_ID=-` (ad-hoc dev
+builds), and CI keeps both steps `continue-on-error` so a lapsed Apple
+Developer Program agreement (403) still ships a Developer ID signed DMG.
+
+Credentials come from `NOTARY_AUTH`: CI passes an App Store Connect API key
+(`APPLE_API_KEY_PATH` / `_ID` / `APPLE_API_ISSUER_ID`), a local machine falls
+back to the `whisper-push` keychain profile from
+`xcrun notarytool store-credentials`.
 
 ## Pièges
 
