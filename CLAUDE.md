@@ -2,6 +2,16 @@
 
 Push-to-talk voice dictation, 100% local. Cross-platform (macOS, Linux, Windows).
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues on `Remenby31/whisper-push`, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context repo. See `docs/agents/domain.md`.
+
 ## Build & Run
 
 ```bash
