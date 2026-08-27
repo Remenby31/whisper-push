@@ -134,7 +134,30 @@ objc2-app-kit = { version = "0.3", features = [
     "block2",
 ] }
 block2 = "0.6"
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGRemoteOperation"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGEvent",
+    "CGRemoteOperation",
+    # Screen-vocabulary capture (issue #18): enumerate displays and grab a
+    # per-display CGImage snapshot to hand to Vision OCR.
+    "CGDirectDisplay",
+    "CGError",
+    "CGImage",
+    # CGPreflightScreenCaptureAccess / CGRequestScreenCaptureAccess.
+    "CGWindow",
+] }
+# Vision framework OCR (issue #18) — same objc2 ecosystem as the other
+# macOS-native bindings above, not a new FFI approach. Trimmed to exactly the
+# text-recognition surface we use (default features pull in AVFoundation,
+# CoreML, CoreImage, etc. for detectors we don't need).
+objc2-vision = { version = "0.3", default-features = false, features = [
+    "std",
+    "VNRequest",
+    "VNRecognizeTextRequest",
+    "VNRequestHandler",
+    "VNObservation",
+    "objc2-core-graphics",
+] }
 core-foundation = { version = "0.10", features = ["mac_os_10_7_support"] }
 core-graphics = "0.24"
 core-foundation-sys = "0.8"

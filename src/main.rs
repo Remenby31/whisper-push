@@ -19,6 +19,7 @@ mod overlay;
 mod paste;
 mod permissions;
 mod report;
+mod screen_vocab;
 mod state;
 mod templates;
 mod transcribe;
@@ -100,6 +101,12 @@ enum Commands {
     /// core with simulated dictation+edit pairs and asserts the right
     /// corrections are (or aren't) learned. Deterministic, no GUI, no human.
     CaptureSelfTest,
+    /// Run the screen-vocabulary capture pipeline once (macOS only): capture
+    /// every connected display, OCR each with Vision (FR+EN), extract
+    /// candidate words, and append them to the vocabulary log. Independent of
+    /// the dictation lifecycle (not wired to press/release yet — see #19) —
+    /// this is how to invoke and verify it on its own.
+    ScreenVocabCapture,
     /// Manage the Lemon Squeezy license (activate, validate, status, …).
     License {
         #[command(subcommand)]
@@ -225,6 +232,10 @@ fn main() -> Result<()> {
     if let Some(Commands::CaptureSelfTest) = &cli.command {
         init_logging(false);
         return cli_capture_selftest::run();
+    }
+    if let Some(Commands::ScreenVocabCapture) = &cli.command {
+        init_logging(false);
+        return cli_screen_vocab::run();
     }
     if let Some(Commands::License { action }) = &cli.command {
         init_logging(false);
@@ -908,6 +919,56 @@ mod cli_capture_selftest {
             Ok(())
         } else {
             bail!("FAIL: {fails} capture scenario(s) failed")
+        }
+    }
+}
+
+/// Manual/dev trigger for the screen-vocabulary capture pipeline (issue #18):
+/// runs it once and reports what happened, so the pipeline is verifiable on
+/// its own ahead of being wired into the dictation lifecycle (#19).
+mod cli_screen_vocab {
+    use anyhow::{Result, bail};
+
+    pub fn run() -> Result<()> {
+        use crate::screen_vocab::Outcome;
+        match crate::screen_vocab::capture_and_log() {
+            Outcome::Unsupported => {
+                println!("Screen-vocabulary capture is macOS-only — nothing to do here.");
+                Ok(())
+            }
+            Outcome::PermissionDenied => {
+                println!(
+                    "Screen Recording permission not granted — no capture attempted. \
+                     (A system prompt was fired; grant it in System Settings, then run this again.)"
+                );
+                Ok(())
+            }
+            Outcome::NoDisplays => {
+                println!("No connected displays found — nothing captured.");
+                Ok(())
+            }
+            Outcome::Logged {
+                path,
+                displays,
+                words,
+            } => {
+                println!(
+                    "Captured {displays} display(s), extracted {words} candidate word(s), \
+                     appended to {}",
+                    path.display()
+                );
+                Ok(())
+            }
+            // Distinct from every branch above: capture actually succeeded but
+            // the record was lost, so this is the one case worth a non-zero
+            // exit — a caller scripting this command can tell it apart from
+            // "nothing to capture".
+            Outcome::WriteFailed { path, error } => {
+                bail!(
+                    "captured OK, but failed to write {}: {error}",
+                    path.display()
+                )
+            }
         }
     }
 }

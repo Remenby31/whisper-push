@@ -17,7 +17,7 @@ pub use whisper_push_dict::{
 
 /// `dictionary.toml` lives next to `config.toml`.
 pub fn dictionary_path() -> PathBuf {
-    whisper_push_dict::default_path_beside(&crate::config::config_path())
+    whisper_push_dict::default_path_beside(&crate::config::config_path(), "dictionary.toml")
 }
 
 /// Load the dictionary and arm correction. A failure (or `enabled == false`)
