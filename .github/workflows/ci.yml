@@ -71,8 +71,10 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path target\release, obj | Out-Null
           Set-Content -Path target\release\whisper-push.exe -Value 'stub payload'
+          # Quote the -d switches: PowerShell splits `-dVersion=0.0.0` at the
+          # dots and candle then hunts for a file called '.0.0'.
           candle.exe -arch x64 -ext WixUtilExtension `
-            -dVersion=0.0.0 -dCargoTargetBinDir=target\release `
+            "-dVersion=0.0.0" "-dCargoTargetBinDir=target\release" `
             -out obj\main.wixobj wix\main.wxs
           light.exe -ext WixUIExtension -ext WixUtilExtension `
             -out obj\authoring-check.msi obj\main.wixobj
