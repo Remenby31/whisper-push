@@ -42,6 +42,14 @@ pub fn windows_app_id() -> &'static str {
     windows_shell::APP_ID
 }
 
+/// Claim our AppUserModelID for this process. Called at the very start of
+/// `app::run`, before onboarding: the wizard and guided setup both notify, and a
+/// toast sent before the id is registered is attributed to PowerShell.
+#[cfg(target_os = "windows")]
+pub fn register_windows_app_id() {
+    windows_shell::register_app_id();
+}
+
 /// Racing green — the badge ground on Windows/Linux (see `badge_icon`).
 const BRAND_GREEN: [u8; 3] = [0x0D, 0x2E, 0x25];
 
@@ -827,8 +835,6 @@ impl App {
         // flyout until the user drags it out. Explorer writes our entry when the
         // icon registers, so promote it just after — and once more shortly
         // after, since the entry can appear a beat later.
-        #[cfg(target_os = "windows")]
-        windows_shell::register_app_id();
         #[cfg(target_os = "windows")]
         if self.tray.is_some() {
             windows_shell::promote();

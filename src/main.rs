@@ -1147,6 +1147,12 @@ mod app {
         // Ensure single instance
         let _lock = crate::state::acquire_lock()?;
 
+        // Claim our Windows identity before anything can notify: a toast sent
+        // before the AppUserModelID is registered is attributed to PowerShell,
+        // and onboarding notifies well before the tray exists.
+        #[cfg(target_os = "windows")]
+        crate::tray::register_windows_app_id();
+
         // Arm the adaptive dictionary (load dictionary.toml, compile tables).
         crate::dictionary::init(cfg.dictionary_enabled);
         // Arm licensing (load license.json, anchor trial, keep the verdict fresh).
