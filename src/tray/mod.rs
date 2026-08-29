@@ -234,6 +234,9 @@ enum UserEvent {
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     App(Event),
+    /// Carries nothing: sending it just wakes the loop so `about_to_wait` drains
+    /// the crossbeam channels now instead of at the next tick. See `wake_main`.
+    Wake,
 }
 
 /// Permissions submenu title. Carries the count itself, so the greyed
@@ -1715,6 +1718,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::App(app_event) => {
                 self.process_event(app_event);
             }
+            // A bare wake: the work happens in `about_to_wait`, which winit runs
+            // right after dispatching this.
+            UserEvent::Wake => {}
         }
     }
 }
@@ -1724,12 +1730,14 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
 
-    // Don't use EventLoopProxy for menu/tray events — it causes macOS Tahoe
-    // to close the tray menu. Instead, poll MenuEvent::receiver() in about_to_wait().
-
-    // No proxy forwarding — all crossbeam events are polled in about_to_wait().
-    // EventLoopProxy wake-ups cause macOS Tahoe to close the tray menu (Apple bug).
-    // Instead, we use WaitUntil(100ms) so about_to_wait is called periodically.
+    // Menu and tray events are NOT forwarded through the proxy: a winit user
+    // event closes the tray menu on macOS Tahoe (Apple bug), so they are polled
+    // in `about_to_wait` instead, driven by the WaitUntil tick.
+    //
+    // Off macOS the proxy is kept for one thing only — waking that tick early so
+    // a state change (the recording icon) shows immediately. See `wake_main`.
+    #[cfg(not(target_os = "macos"))]
+    let _ = EVENT_PROXY.set(event_loop.create_proxy());
 
     // Sender for the coalesced trailing tray-icon refresh (see set_tray_icon).
     let _ = TRAY_TX.set(state.tx.clone());
@@ -1862,7 +1870,21 @@ fn wake_main() {
             rl.wake_up();
         }
     }
+    // Windows and Linux have no equivalent of "poke the run loop" outside winit,
+    // so wake it the sanctioned way. The Tahoe menu-close bug that rules the
+    // proxy out is macOS-only — and there the CFRunLoop poke above already does
+    // the job without creating a winit event. Without this the recording icon,
+    // which off macOS is the ONLY sign the app heard you (there is no overlay
+    // pill), lagged the 500 ms WaitUntil tick on every single dictation.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(proxy) = EVENT_PROXY.get() {
+        let _ = proxy.send_event(UserEvent::Wake);
+    }
 }
+
+/// Proxy used by `wake_main` off macOS. Set once, when the loop is built.
+#[cfg(not(target_os = "macos"))]
+static EVENT_PROXY: OnceLock<winit::event_loop::EventLoopProxy<UserEvent>> = OnceLock::new();
 
 /// Send a UI event from the pipeline thread and wake the main loop so the icon /
 /// overlay pill react immediately rather than lagging the WaitUntil tick.

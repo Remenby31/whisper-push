@@ -83,6 +83,16 @@ offers to launch the app when it finishes. Whisper Push then lives in the
 itself out of the `^` overflow flyout automatically; on Windows 10, drag it out
 of the flyout once to keep it in view.
 
+> Not code-signed yet, so SmartScreen shows "Windows protected your PC" the
+> first time: click **More info → Run anyway**. A signing certificate is on the
+> roadmap, same as notarization on macOS.
+
+> Upgrading from **1.2.7 or earlier**? Those installed machine-wide into
+> `Program Files`. Uninstall that one first (Settings → Apps → whisper-push);
+> the installer will say so if you forget. Your models, dictionary and license
+> are kept — they live in your user profile, and move themselves out of the
+> roaming part of it on first run.
+
 > First launch opens the setup wizard on **every** platform — models,
 > permissions, hotkey, launch-at-login — then the app runs from the tray.
 
