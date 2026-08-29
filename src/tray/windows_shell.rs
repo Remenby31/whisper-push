@@ -28,8 +28,15 @@ use windows::core::{HSTRING, PCWSTR, PWSTR};
 const ROOT: &str = r"Control Panel\NotifyIconSettings";
 
 /// Where we remember that the one-time promotion has happened.
-const OWN_KEY: &str = r"Software\Whisper Push";
-const PROMOTED_VALUE: &str = "TrayPromoted";
+///
+/// A file in the data directory, not the registry: the installer owns
+/// `HKCU\Software\Whisper Push` (its components key their state off it) and
+/// clears it on uninstall — which a major upgrade performs first, so a registry
+/// marker would be wiped on every update and the icon would re-pin itself
+/// against a user who had deliberately hidden it.
+fn promoted_marker() -> std::path::PathBuf {
+    crate::config::data_dir().join(".tray_promoted")
+}
 
 /// Delays at which to look for our NotifyIconSettings entry. Explorer creates it
 /// when the icon registers, but not always immediately — and giving up after one
@@ -49,7 +56,8 @@ const PROMOTE_ATTEMPTS: &[u64] = &[0, 2, 5, 15, 30];
 /// Best effort throughout: a missing key (Windows 10, a locked-down policy) is
 /// logged and ignored — the icon still exists, just in the flyout.
 pub fn promote() {
-    if reg_str(OWN_KEY, PROMOTED_VALUE).is_some() {
+    let marker = promoted_marker();
+    if marker.exists() {
         debug!("tray pin: already done once — leaving the taskbar to the user");
         return;
     }
@@ -67,7 +75,10 @@ pub fn promote() {
                 Ok(n) => {
                     info!("tray pin: promoted {n} notification-area entr{}", plural(n));
                     // Remember, so the user's later choice is never overridden.
-                    let _ = set_string(OWN_KEY, PROMOTED_VALUE, "1");
+                    if let Some(dir) = marker.parent() {
+                        let _ = std::fs::create_dir_all(dir);
+                    }
+                    let _ = std::fs::write(&marker, "1");
                     return;
                 }
                 Err(e) => {

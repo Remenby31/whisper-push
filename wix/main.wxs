@@ -91,15 +91,35 @@
             <!-- %LOCALAPPDATA%\Programs\Whisper Push -->
             <Directory Id='LocalAppDataFolder'>
                 <Directory Id='ProgramsFolder' Name='Programs'>
+                    <!-- Every component here installs into the user profile, so
+                         each needs an HKCU value as its KeyPath rather than a
+                         file (ICE38): that is how Windows Installer tracks
+                         per-user state, and it is what makes two accounts on one
+                         machine independent. The RemoveFolder entries are ICE64:
+                         without them uninstall leaves the empty directory tree
+                         behind. (RemoveFolder only deletes an EMPTY directory,
+                         so listing the shared `Programs` parent is safe.) -->
                     <Directory Id='APPLICATIONFOLDER' Name='Whisper Push'>
                         <Component Id='License' Guid='*'>
-                            <File Id='LicenseFile' DiskId='1' Source='LICENSE' KeyPath='yes'/>
+                            <File Id='LicenseFile' DiskId='1' Source='LICENSE'/>
+                            <RegistryValue Root='HKCU'
+                                Key='Software\Whisper Push'
+                                Name='License'
+                                Type='integer'
+                                Value='1'
+                                KeyPath='yes'/>
+                            <RemoveFolder Id='RemoveApplicationFolder'
+                                Directory='APPLICATIONFOLDER'
+                                On='uninstall'/>
+                            <RemoveFolder Id='RemoveProgramsFolder'
+                                Directory='ProgramsFolder'
+                                On='uninstall'/>
                         </Component>
 
                         <Directory Id='Bin' Name='bin'>
                             <!-- The user's PATH, not the machine's: a per-user
                                  install can't write the system environment. -->
-                            <Component Id='Path' Guid='9C8F2D3E-4A5B-4C6D-AE7F-8B9C0D1E2F30' KeyPath='yes'>
+                            <Component Id='Path' Guid='9C8F2D3E-4A5B-4C6D-AE7F-8B9C0D1E2F30'>
                                 <Environment
                                     Id='PATH'
                                     Name='PATH'
@@ -108,14 +128,28 @@
                                     Part='last'
                                     Action='set'
                                     System='no'/>
+                                <RegistryValue Root='HKCU'
+                                    Key='Software\Whisper Push'
+                                    Name='PathEntry'
+                                    Type='integer'
+                                    Value='1'
+                                    KeyPath='yes'/>
                             </Component>
                             <Component Id='binary0' Guid='*'>
                                 <File
                                     Id='exe0'
                                     Name='whisper-push.exe'
                                     DiskId='1'
-                                    Source='$(var.CargoTargetBinDir)\whisper-push.exe'
+                                    Source='$(var.CargoTargetBinDir)\whisper-push.exe'/>
+                                <RegistryValue Root='HKCU'
+                                    Key='Software\Whisper Push'
+                                    Name='Installed'
+                                    Type='integer'
+                                    Value='1'
                                     KeyPath='yes'/>
+                                <RemoveFolder Id='RemoveBinFolder'
+                                    Directory='Bin'
+                                    On='uninstall'/>
                             </Component>
                             <!--
                               The whisper-push-test E2E harness binary is intentionally
@@ -166,9 +200,8 @@
                         <RemoveRegistryKey Root='HKCU'
                             Key='Software\Classes\AppUserModelId\com.whisper-push.app'
                             Action='removeOnUninstall'/>
-                        <!-- Our own key, which the app also writes to (the
-                             one-shot "the tray icon has been un-hidden" marker).
-                             Removing the whole key leaves no trace behind. -->
+                        <!-- Windows Installer removes the values it created,
+                             but not the key they sat in. -->
                         <RemoveRegistryKey Root='HKCU'
                             Key='Software\Whisper Push'
                             Action='removeOnUninstall'/>
