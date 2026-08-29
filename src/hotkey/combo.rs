@@ -52,12 +52,51 @@ impl ModKind {
     }
 }
 
+/// A non-modifier key that has a name rather than a character.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Named {
+    Space,
+    Return,
+    Tab,
+    Escape,
+}
+
+impl Named {
+    fn token(self) -> &'static str {
+        match self {
+            Named::Space => "space",
+            Named::Return => "return",
+            Named::Tab => "tab",
+            Named::Escape => "escape",
+        }
+    }
+
+    fn from_token(token: &str) -> Option<Self> {
+        Some(match token {
+            "space" => Named::Space,
+            "return" | "enter" => Named::Return,
+            "tab" => Named::Tab,
+            "escape" | "esc" => Named::Escape,
+            _ => return None,
+        })
+    }
+}
+
 /// One key as the listeners report it: a modifier (with the side actually
-/// pressed) or any other key, named the way the config names it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// pressed), a character, or a named key.
+///
+/// `Copy`, and deliberately free of `String`: this type is constructed for
+/// **every keystroke on the machine** inside the Windows low-level keyboard hook
+/// and for every evdev event on Linux. Allocating and hashing a String per
+/// keypress there is waste at best, and Windows silently unhooks a low-level
+/// hook that takes too long (`LowLevelHooksTimeout`) — which would kill
+/// dictation until the app was restarted, with nothing in the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Mod(ModKind, Side),
-    Other(String),
+    /// A letter or digit, always lowercase.
+    Char(char),
+    Named(Named),
 }
 
 impl Key {
@@ -66,16 +105,19 @@ impl Key {
     fn satisfies(&self, required: &Key) -> bool {
         match (self, required) {
             (Key::Mod(k1, s1), Key::Mod(k2, s2)) => k1 == k2 && (*s2 == Side::Any || s1 == s2),
-            (Key::Other(a), Key::Other(b)) => a.eq_ignore_ascii_case(b),
+            (Key::Char(a), Key::Char(b)) => a.eq_ignore_ascii_case(b),
+            (Key::Named(a), Key::Named(b)) => a == b,
             _ => false,
         }
     }
 
-    /// The token this key would be written as in config.
+    /// The token this key would be written as in config. Cold path — only
+    /// capture and parsing need it.
     fn token(&self) -> String {
         match self {
             Key::Mod(kind, side) => kind.token(*side).to_string(),
-            Key::Other(name) => name.clone(),
+            Key::Named(n) => n.token().to_string(),
+            Key::Char(c) => c.to_string(),
         }
     }
 
@@ -93,9 +135,12 @@ pub struct Combo {
     pub is_hold: bool,
 }
 
-/// Parse a config hotkey (`"ctrl"`, `"rctrl"`, `"cmd+shift+space"`). Returns
-/// `None` for a binding with nothing usable in it, which the caller must treat
-/// as a hard error — a silently unmatched hotkey is a dead app.
+/// Parse a config hotkey (`"ctrl"`, `"rctrl"`, `"cmd+shift+space"`).
+///
+/// `None` for anything this listener could never match — an empty binding, or a
+/// key it has no name for (`"f13"`). The callers treat that as a hard error and
+/// tell the user, which beats the alternative: a binding accepted, silently
+/// never fired, and reported as "dictation just doesn't work".
 pub fn parse(hotkey: &str, mode: &str) -> Option<Combo> {
     let mut mods = Vec::new();
     let mut key = None;
@@ -104,10 +149,18 @@ pub fn parse(hotkey: &str, mode: &str) -> Option<Combo> {
         if part.is_empty() {
             continue;
         }
-        match parse_modifier(part) {
-            Some(m) => mods.push(m),
-            None => key = Some(Key::Other(part.to_string())),
+        if let Some(m) = parse_modifier(part) {
+            mods.push(m);
+            continue;
         }
+        key = Some(match Named::from_token(part) {
+            Some(n) => Key::Named(n),
+            // A single letter or digit; anything longer we have no code for.
+            None => match part.chars().next() {
+                Some(c) if part.chars().count() == 1 && c.is_ascii_alphanumeric() => Key::Char(c),
+                _ => return None,
+            },
+        });
     }
     if mods.is_empty() && key.is_none() {
         return None;
@@ -251,8 +304,8 @@ mod tests {
     fn ctrl(side: Side) -> Key {
         Key::Mod(ModKind::Ctrl, side)
     }
-    fn other(name: &str) -> Key {
-        Key::Other(name.into())
+    fn space() -> Key {
+        Key::Named(Named::Space)
     }
 
     #[test]
@@ -267,13 +320,23 @@ mod tests {
     fn parses_a_combo() {
         let c = parse("cmd+shift+space", "toggle").unwrap();
         assert_eq!(c.mods.len(), 2);
-        assert_eq!(c.key, Some(other("space")));
+        assert_eq!(c.key, Some(space()));
         assert!(!c.is_hold);
     }
 
     #[test]
     fn rejects_nonsense() {
         assert!(parse("", "hold").is_none());
+    }
+
+    /// A key we have no code for must fail loudly at parse time. Accepting it
+    /// would produce a binding that can never fire, which reaches the user as
+    /// "dictation stopped working" with nothing in the log.
+    #[test]
+    fn rejects_a_key_we_cannot_match() {
+        assert!(parse("ctrl+f13", "toggle").is_none());
+        assert!(parse("ctrl+a", "toggle").is_some());
+        assert!(parse("ctrl+9", "toggle").is_some());
     }
 
     /// A generic "ctrl" binding fires from either physical key; "rctrl" doesn't
@@ -306,22 +369,22 @@ mod tests {
     fn combo_needs_every_key() {
         let mut m = Matcher::new(parse("ctrl+shift+space", "toggle").unwrap());
         assert_eq!(m.on_key(ctrl(Side::Left), true), None);
-        assert_eq!(m.on_key(other("space"), true), None, "shift is missing");
+        assert_eq!(m.on_key(space(), true), None, "shift is missing");
         assert_eq!(
             m.on_key(Key::Mod(ModKind::Shift, Side::Right), true),
             Some(Action::Toggle)
         );
         // Releasing emits nothing in toggle mode…
-        assert_eq!(m.on_key(other("space"), false), None);
+        assert_eq!(m.on_key(space(), false), None);
         // …and pressing again toggles again.
-        assert_eq!(m.on_key(other("space"), true), Some(Action::Toggle));
+        assert_eq!(m.on_key(space(), true), Some(Action::Toggle));
     }
 
     #[test]
     fn hold_combo_reports_both_edges() {
         let mut m = Matcher::new(parse("ctrl+space", "hold").unwrap());
         assert_eq!(m.on_key(ctrl(Side::Left), true), None);
-        assert_eq!(m.on_key(other("space"), true), Some(Action::Down));
+        assert_eq!(m.on_key(space(), true), Some(Action::Down));
         assert_eq!(m.on_key(ctrl(Side::Left), false), Some(Action::Up));
     }
 
@@ -355,7 +418,7 @@ mod tests {
         assert_eq!(c.on_key(ctrl(Side::Left), true), None);
         assert_eq!(c.on_key(Key::Mod(ModKind::Shift, Side::Left), true), None);
         assert_eq!(
-            c.on_key(other("space"), true),
+            c.on_key(space(), true),
             Some(("lctrl+lshift+space".into(), "toggle".into()))
         );
     }
@@ -366,7 +429,7 @@ mod tests {
     fn capture_prefix_is_not_a_tap() {
         let mut c = Capture::default();
         c.on_key(ctrl(Side::Left), true);
-        c.on_key(other("space"), true);
+        c.on_key(space(), true);
         assert_eq!(c.on_key(ctrl(Side::Left), false), None);
     }
 
@@ -382,7 +445,7 @@ mod tests {
         let mut c = Capture::default();
         c.on_key(Key::Mod(ModKind::Meta, Side::Left), true);
         c.on_key(Key::Mod(ModKind::Shift, Side::Left), true);
-        let (hotkey, mode) = c.on_key(other("space"), true).unwrap();
+        let (hotkey, mode) = c.on_key(space(), true).unwrap();
         assert_eq!(hotkey, "lcmd+lshift+space");
         assert!(parse(&hotkey, &mode).is_some());
     }

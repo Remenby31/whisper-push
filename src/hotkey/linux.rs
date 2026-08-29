@@ -1,4 +1,4 @@
-use super::combo::{Action, Capture, Key, Matcher, ModKind, Side};
+use super::combo::{Action, Capture, Key, Matcher, ModKind, Named, Side};
 use crate::state::Event;
 use crate::util::LockSafe;
 use crossbeam_channel::Sender;
@@ -38,7 +38,7 @@ fn key_from_code(code: u16) -> Option<Key> {
 
     let letter = |row: &[u8], base: u16| -> Option<Key> {
         row.get((code - base) as usize)
-            .map(|c| Key::Other((*c as char).to_string()))
+            .map(|c| Key::Char(*c as char))
     };
     let k = match code {
         KEY_LEFTCTRL => Key::Mod(ModKind::Ctrl, Side::Left),
@@ -49,10 +49,10 @@ fn key_from_code(code: u16) -> Option<Key> {
         KEY_RIGHTALT => Key::Mod(ModKind::Alt, Side::Right),
         KEY_LEFTMETA => Key::Mod(ModKind::Meta, Side::Left),
         KEY_RIGHTMETA => Key::Mod(ModKind::Meta, Side::Right),
-        KEY_SPACE => Key::Other("space".into()),
-        KEY_ENTER => Key::Other("return".into()),
-        KEY_TAB => Key::Other("tab".into()),
-        KEY_ESC => Key::Other("escape".into()),
+        KEY_SPACE => Key::Named(Named::Space),
+        KEY_ENTER => Key::Named(Named::Return),
+        KEY_TAB => Key::Named(Named::Tab),
+        KEY_ESC => Key::Named(Named::Escape),
         2..=11 => return letter(ROW_DIGITS, 2),
         16..=25 => return letter(ROW_Q, 16),
         30..=38 => return letter(ROW_A, 30),
@@ -279,11 +279,11 @@ mod tests {
             key_from_code(KEY_RIGHTCTRL),
             Some(Key::Mod(ModKind::Ctrl, Side::Right))
         );
-        assert_eq!(key_from_code(KEY_SPACE), Some(Key::Other("space".into())));
-        assert_eq!(key_from_code(30), Some(Key::Other("a".into())));
-        assert_eq!(key_from_code(16), Some(Key::Other("q".into())));
-        assert_eq!(key_from_code(2), Some(Key::Other("1".into())));
-        assert_eq!(key_from_code(11), Some(Key::Other("0".into())));
+        assert_eq!(key_from_code(KEY_SPACE), Some(Key::Named(Named::Space)));
+        assert_eq!(key_from_code(30), Some(Key::Char('a')));
+        assert_eq!(key_from_code(16), Some(Key::Char('q')));
+        assert_eq!(key_from_code(2), Some(Key::Char('1')));
+        assert_eq!(key_from_code(11), Some(Key::Char('0')));
         assert_eq!(key_from_code(59), None, "F1 isn't bindable");
     }
 }

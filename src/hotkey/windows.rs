@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, info, warn};
 
-use super::combo::{Action, Capture, Combo, Key, Matcher, ModKind, Side};
+use super::combo::{Action, Capture, Combo, Key, Matcher, ModKind, Named, Side};
 
 /// Virtual key codes we care about (winuser.h).
 const VK_LCONTROL: u32 = 0xA2;
@@ -41,14 +41,12 @@ fn key_from_vk(vk: u32) -> Option<Key> {
         VK_RMENU => Key::Mod(ModKind::Alt, Side::Right),
         VK_LWIN => Key::Mod(ModKind::Meta, Side::Left),
         VK_RWIN => Key::Mod(ModKind::Meta, Side::Right),
-        VK_SPACE => Key::Other("space".into()),
-        VK_RETURN => Key::Other("return".into()),
-        VK_TAB => Key::Other("tab".into()),
-        VK_ESCAPE => Key::Other("escape".into()),
+        VK_SPACE => Key::Named(Named::Space),
+        VK_RETURN => Key::Named(Named::Return),
+        VK_TAB => Key::Named(Named::Tab),
+        VK_ESCAPE => Key::Named(Named::Escape),
         // Letters and digits use their ASCII code as the VK.
-        0x30..=0x39 | 0x41..=0x5A => {
-            Key::Other((vk as u8 as char).to_ascii_lowercase().to_string())
-        }
+        0x30..=0x39 | 0x41..=0x5A => Key::Char((vk as u8 as char).to_ascii_lowercase()),
         _ => return None,
     };
     Some(k)
@@ -192,9 +190,9 @@ mod tests {
             key_from_vk(VK_RCONTROL),
             Some(Key::Mod(ModKind::Ctrl, Side::Right))
         );
-        assert_eq!(key_from_vk(VK_SPACE), Some(Key::Other("space".into())));
-        assert_eq!(key_from_vk(0x41), Some(Key::Other("a".into())));
-        assert_eq!(key_from_vk(0x39), Some(Key::Other("9".into())));
+        assert_eq!(key_from_vk(VK_SPACE), Some(Key::Named(Named::Space)));
+        assert_eq!(key_from_vk(0x41), Some(Key::Char('a')));
+        assert_eq!(key_from_vk(0x39), Some(Key::Char('9')));
         assert_eq!(key_from_vk(0x70), None, "F1 isn't bindable");
     }
 }
