@@ -434,6 +434,74 @@ binary doesn't start), `gnome-shell-extension-appindicator` is a `recommends`,
 and the `.desktop` file sets `StartupNotify=false` (a tray app never opens a
 window, so the launcher spun a "starting…" cursor for 30 s).
 
+### Windows operation — the non-obvious ones
+
+Found by reviewing for "a real Windows machine", not by a compiler:
+
+- **TLS is verified against the OS trust store** (`src/net.rs`, ureq's
+  `platform-verifier`), not ureq's bundled Mozilla roots. Managed networks
+  intercept TLS (Zscaler, Netskope, a proxy appliance) with a private root that
+  IS in the Windows store and is NOT in Mozilla's list — with the default, every
+  HTTPS call on such a machine fails with an opaque certificate error: model
+  download, license activation, update check. `src/net.rs` is also the one agent
+  the whole app uses; proxies come free (ureq reads `HTTPS_PROXY`).
+- **App data lives in LocalAppData, not Roaming.** `dirs::data_dir()` is Roaming
+  on Windows, which a domain profile syncs at every logon — and it holds
+  multi-GB models. `config::data_dir()` moves the directory across once by
+  renaming it (so the license and models come along) and falls back to Roaming if
+  that fails. Config stays in Roaming: settings SHOULD follow the user.
+- **Never spawn a console program from the daemon** — it is a GUI-subsystem
+  binary, so `reg.exe` / `nvidia-smi` / `cmd /C start` each flash a black window.
+  `util::quiet_command` (CREATE_NO_WINDOW) and `util::open_external`
+  (ShellExecuteW) exist for this; autostart writes the registry directly.
+- **`attach_parent_console` only fills in handles the shell did NOT give us.**
+  Overwriting them unconditionally sent `whisper-push --models > out.txt` to the
+  console and left the file empty.
+- **The tray icon is un-hidden ONCE, ever** (recorded under
+  `HKCU\Software\Whisper Push`), with a backoff out to 30 s because Explorer
+  writes the `NotifyIconSettings` entry some time after the icon registers.
+  Windows stores the *user's* choice in the same `IsPromoted` value, so promoting
+  on every launch would silently undo a deliberate "hide this icon".
+- **Auto-start repairs itself only when the recorded binary is GONE.** Repairing
+  on any mismatch would let a `cargo run` dev build hijack the installed app's
+  login entry — that rule is what `autostart::repair`'s test covers.
+- **The clipboard is a single global lock on Windows**: `OpenClipboard` fails
+  while any other process holds it (clipboard managers, Office, browsers), and
+  one failed `set_text` used to throw away a whole dictation. `paste` retries.
+- **The keyboard hook sees every keystroke on the machine**, so `hotkey::combo`'s
+  `Key` is `Copy` with no `String` — Windows silently unhooks a low-level hook
+  that takes too long (`LowLevelHooksTimeout`), which would kill dictation until
+  a restart with nothing in the log.
+- **`wake_main` wakes winit through an `EventLoopProxy` off macOS.** Without it
+  the recording icon — the only feedback there is, since the overlay pill is
+  macOS-only — lagged the 500 ms tick. The Tahoe menu-close bug that rules the
+  proxy out is macOS-only, and macOS keeps its CFRunLoop poke.
+- **Off macOS an available release does NOT arm the in-app installer** (there
+  isn't one): the menu offers the download page instead. Arming it produced an
+  "Update failed" toast for a click that had just opened the browser, and left
+  the item stuck on "Downloading…".
+- ONNX Runtime is **statically linked** (`ort-sys` → `rustc-link-lib=static=onnxruntime`),
+  so Parakeet needs no `onnxruntime.dll` beside the .exe. Don't "fix" the
+  packaging by shipping one.
+
+### The MSI's three non-obvious rules
+
+1. **`util:CloseApplication` is not optional.** Whisper Push is running whenever
+   it is installed, and Windows Installer cannot replace an executing binary —
+   without it an upgrade asks for a reboot and an uninstall leaves the .exe.
+2. **A per-user package cannot remove the old per-MACHINE install** (≤ 1.2.7,
+   Program Files) — that needs elevation. A launch condition detects it and says
+   what to do; `LaunchConditions` runs before `FindRelatedProducts`, so that
+   message is the one the user sees instead of an opaque MSI error.
+3. **The installer never CREATES the autostart value or the AppUserModelId key,
+   but removes both on uninstall.** `src/autostart.rs` owns the Run value (two
+   owners means a repair re-enables what the user turned off); leaving it behind
+   means Windows reporting a startup item that points at nothing.
+
+An icon id used by a `Shortcut` must end in `.ico` — Windows Installer derives
+the icon's file name from it. And `ShortcutProperty` (the AppUserModelID) needs
+`InstallerVersion='500'`.
+
 ### Permissions are a per-platform list
 
 `PermissionStatus` is a `Vec<Perm>`, not three macOS-shaped fields: macOS gates
