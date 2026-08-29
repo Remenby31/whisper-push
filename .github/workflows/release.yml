@@ -263,12 +263,16 @@ jobs:
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         if: steps.build_cuda.outcome == 'success'
-        # See windows-cpu note: -p whisper-push (workspace) + continue-on-error.
+        # Tolerant on the BUILD above (CUDA toolchain churn is a real risk, and
+        # the packaging steps are skipped when it breaks) but NOT here: the wxs
+        # is shared with windows-cpu, so a failure means an authoring bug, and a
+        # tolerated one shipped a CUDA release with no installer at all while the
+        # step still reported success and the upload went ahead regardless.
         shell: bash
-        continue-on-error: true
         run: |
           mkdir -p dist
           cargo wix -p whisper-push --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
+          test -f dist/whisper-push-x64-cuda.msi
       - name: Package portable .zip
         if: steps.build_cuda.outcome == 'success'
         shell: bash

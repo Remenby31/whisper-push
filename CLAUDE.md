@@ -498,9 +498,36 @@ Found by reviewing for "a real Windows machine", not by a compiler:
    owners means a repair re-enables what the user turned off); leaving it behind
    means Windows reporting a startup item that points at nothing.
 
+Per-user packaging has rules `cargo check` will never mention, and `light`'s ICE
+validation is what enforces them — hence the **`Installer authoring (WiX)` CI
+job**, which runs candle + light against a *stub* binary in ~2 minutes on every
+push. Before it, an error in `wix/main.wxs` only surfaced after a ~25 minute
+release compile, i.e. at tag time. What it has already caught:
+
+- **ICE38** — a component installing into the user profile must use an HKCU
+  value as its KeyPath, not a file. That is how per-user state is tracked, and
+  what keeps two accounts on one machine independent.
+- **ICE64** — user-profile directories must be in the RemoveFile table or
+  uninstall leaves the empty tree behind. `RemoveFolder` only deletes an EMPTY
+  directory, so listing the shared `Programs` parent is safe.
+- **CNDL0230** — a component holding both a file and a registry KeyPath can't
+  have a generated `Guid='*'`; those need fixed GUIDs.
+- **CNDL0038** — `Return='asyncNoWait'` is for `ExeCommand`, not a DLL custom
+  action. `ignore` is right for the launch-at-end action anyway.
+- ICE69 (a non-advertised shortcut targeting another component's file) and ICE91
+  (a per-user directory not varying with ALLUSERS) stay as warnings — both are
+  what a deliberately per-user package looks like.
+
 An icon id used by a `Shortcut` must end in `.ico` — Windows Installer derives
 the icon's file name from it. And `ShortcutProperty` (the AppUserModelID) needs
 `InstallerVersion='500'`.
+
+**`continue-on-error` on a packaging step is a trap.** GitHub reports such a step
+as `success` in the API, the job goes on, and `Upload artifacts` publishes
+whatever happens to be in `dist/` — which is how a CUDA release could ship with
+no installer and nothing anywhere saying so. It belongs on the CUDA *build*
+(toolchain churn is real, and the packaging steps are gated on its outcome),
+never on the packaging.
 
 ### Permissions are a per-platform list
 
