@@ -23,8 +23,7 @@
   Variables `cargo wix` supplies: CargoTargetBinDir, Version, Profile, …
 -->
 
-<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
-     xmlns:util='http://schemas.microsoft.com/wix/UtilExtension'>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
     <Product
         Id='*'
@@ -109,7 +108,7 @@
                             Description='Push-to-talk voice dictation, 100% local'
                             Target='[#exe0]'
                             WorkingDirectory='Bin'
-                            Icon='ProductICO'>
+                            Icon='whisperpush.ico'>
                             <!-- Ties toast notifications to our identity; the
                                  daemon claims the same id at startup (see
                                  src/tray/windows_shell.rs). -->
@@ -152,8 +151,10 @@
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
 
-        <Icon Id='ProductICO' SourceFile='wix\whisper-push.ico'/>
-        <Property Id='ARPPRODUCTICON' Value='ProductICO'/>
+        <!-- The id must end in .ico: Windows Installer derives the icon's file name
+             from it, and a shortcut with an extension-less icon id fails validation. -->
+        <Icon Id='whisperpush.ico' SourceFile='wix\whisper-push.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='whisperpush.ico'/>
         <Property Id='ARPHELPLINK' Value='https://whisperpush.com'/>
 
         <!-- ── Launch on the last page ────────────────────────────────────────

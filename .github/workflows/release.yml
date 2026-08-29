@@ -189,13 +189,17 @@ jobs:
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         # `-p whisper-push` is required: the repo is a Cargo workspace, so cargo
-        # wix errors "Workspace detected" without it. Keep continue-on-error so a
-        # future toolchain break omits the .msi (portable .zip still ships).
+        # wix errors "Workspace detected" without it.
+        #
+        # NOT continue-on-error, unlike the CUDA variant below: the MSI is now
+        # the supported way to install on Windows (shortcut, wizard, no UAC), so
+        # a release that silently shipped only the portable .zip would put every
+        # new user back in a terminal — the exact bug this installer fixed.
         shell: bash
-        continue-on-error: true
         run: |
           mkdir -p dist
           cargo wix -p whisper-push --no-build --nocapture --output dist/whisper-push-x64.msi
+          test -f dist/whisper-push-x64.msi
       - name: Package portable .zip
         shell: bash
         run: |
