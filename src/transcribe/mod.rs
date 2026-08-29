@@ -63,11 +63,6 @@ const KEEP_WARM_INTERVAL: Duration = Duration::from_secs(90);
 /// forward pass (touching every weight) on any backend.
 pub(crate) const WARM_SAMPLES: usize = 16_000;
 
-/// Upper bound on a model download. Generous — a ~1.5 GB Whisper / 2.3 GB
-/// Parakeet pull over a slow link must not be aborted — but finite, so a
-/// dead socket eventually surfaces as an error instead of a permanent wedge.
-pub(crate) const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
-
 /// Cumulative (major, minor) page faults for this process. Major faults are the
 /// ones that hit disk (the model's mmapped weights being read back in after the
 /// OS evicted them); minor faults are served from RAM (e.g. decompression). The
@@ -166,7 +161,10 @@ pub fn load_model(model_name: &str) -> Result<()> {
 
     if !path.exists() {
         info!("Model not found at {}, downloading...", path.display());
-        download_model(model_name, &path)?;
+        // ONE downloader for every model and every caller (wizard, tray, here) —
+        // see model_manager::download. No progress sink: this path is the lazy
+        // first-use fetch, whose progress nobody is watching.
+        crate::model_manager::download(model_name, &mut |_| {})?;
     }
 
     info!("Loading model from {}...", path.display());
@@ -355,48 +353,4 @@ fn transcribe_whisper(audio: &[f32], language: &str) -> Result<String> {
 
     info!("Transcribed: '{text}'");
     Ok(text)
-}
-
-/// Download a GGUF model from HuggingFace.
-fn download_model(model_name: &str, dest: &PathBuf) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Map model name to HuggingFace repo and file
-    let (repo, filename) = match model_name {
-        "ggml-large-v3-turbo-q5_0.bin" => ("ggerganov/whisper.cpp", "ggml-large-v3-turbo-q5_0.bin"),
-        "ggml-large-v3-turbo.bin" => ("ggerganov/whisper.cpp", "ggml-large-v3-turbo.bin"),
-        other => {
-            // Try as a direct repo/file reference
-            ("ggerganov/whisper.cpp", other)
-        }
-    };
-
-    info!("Downloading {filename} from {repo}...");
-
-    // hf-hub's blocking client has no request deadline of its own, so a
-    // dead/half-open TCP socket would block here forever — and this runs on the
-    // single pipeline thread, wedging every future hotkey. Bound it: on timeout
-    // we return Err so the caller (LoadModel) restores Idle + the hotkeys. The
-    // orphaned download thread is harmless — the temp→dest copy only runs on a
-    // value we actually receive in time.
-    let repo = repo.to_string();
-    let filename = filename.to_string();
-    let path = crate::util::run_with_timeout(DOWNLOAD_TIMEOUT, move || -> Result<PathBuf> {
-        let api = hf_hub::api::sync::Api::new()?;
-        Ok(api.model(repo).get(&filename)?)
-    })
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Model download timed out after {}s",
-            DOWNLOAD_TIMEOUT.as_secs()
-        )
-    })??;
-
-    // Copy to our model directory
-    std::fs::copy(&path, dest)?;
-
-    info!("Model downloaded to {}", dest.display());
-    Ok(())
 }

@@ -58,7 +58,18 @@ pub fn parse_release_json(json: &str) -> anyhow::Result<UpdateCheck> {
         return Ok(UpdateCheck::UpToDate);
     }
 
-    // A newer release exists — find the installable asset for this platform.
+    // A newer release exists. Only macOS can install one in place (see
+    // install.rs), so everywhere else this is "open the download page", not
+    // "click to install" — arming the installer path off macOS ended in an
+    // "Update failed" toast for a click that had, in fact, just opened the
+    // browser, and left the menu item stuck on "Downloading…" forever.
+    if !cfg!(target_os = "macos") {
+        return Ok(UpdateCheck::NoAsset {
+            version: version.to_string(),
+        });
+    }
+
+    // Find the installable asset for this platform.
     let asset_name = zip_asset_name();
     if let Some(assets) = v["assets"].as_array() {
         for asset in assets {
@@ -98,16 +109,9 @@ fn zip_asset_name() -> &'static str {
 /// Check GitHub Releases for a newer version.
 pub fn check_for_update() -> anyhow::Result<UpdateCheck> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
-    let response = ureq::get(&url)
-        .config()
-        // Never hang the update thread on a stalled socket (captive portal,
-        // GitHub outage) — it would leave the menu item stuck "Checking…".
-        .timeout_global(Some(std::time::Duration::from_secs(15)))
-        .build()
-        .header(
-            "User-Agent",
-            &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),
-        )
+    // Never hang the update thread on a stalled socket (captive portal, GitHub
+    // outage) — it would leave the menu item stuck "Checking…".
+    let response = crate::net::get(&url, std::time::Duration::from_secs(15))
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|e| anyhow::anyhow!("GitHub API request failed: {e}"))?;
@@ -155,11 +159,16 @@ pub fn spawn_check(tx: Sender<Event>, check_updates: bool) {
                     let _ = tx.send(Event::UpdateAvailable(version, url));
                 }
                 Ok(UpdateCheck::NoAsset { version }) => {
-                    // A newer release exists but has no asset for this platform.
-                    // A background check must not nag (no toast, no menu change) —
-                    // just log it and cache as "no installable update" so we honour
-                    // the check interval. A manual check surfaces the download page.
-                    info!("v{version} released but no installable asset for this platform");
+                    // A newer release exists that we can't install in place (any
+                    // platform but macOS, or a release missing our asset). Don't
+                    // nag with a toast — but DO retitle the menu item, which is
+                    // both how the user finds out at all and what arms the click
+                    // that opens the download page. Cache as "nothing to install"
+                    // so the check interval is still honoured.
+                    info!("v{version} released, but this platform installs updates by hand");
+                    let _ = tx.send(Event::UpdateStatus(crate::tray::manual_update_label(
+                        &version,
+                    )));
                     write_cache(env!("CARGO_PKG_VERSION"), None);
                 }
                 Ok(UpdateCheck::UpToDate) => {
@@ -256,6 +265,29 @@ mod tests {
             UpdateCheck::NoAsset { version } => assert_eq!(version, "99.0.0"),
             #[cfg(not(target_os = "macos"))]
             other => panic!("expected Available or NoAsset, got {other:?}"),
+        }
+    }
+
+    /// Off macOS there is no in-app installer, so a newer release must come
+    /// back as NoAsset even when the platform's asset IS in the release — the
+    /// menu then offers the download page instead of a download that ends in
+    /// "Update failed" and a menu item stuck on "Downloading…".
+    #[test]
+    fn only_macos_arms_the_in_app_installer() {
+        let json = format!(
+            r#"{{ "tag_name": "v99.0.0", "assets": [{{ "name": "{}", "browser_download_url": "https://example.com/pkg" }}] }}"#,
+            zip_asset_name()
+        );
+        let parsed = parse_release_json(&json).unwrap();
+        if cfg!(target_os = "macos") {
+            assert!(matches!(parsed, UpdateCheck::Available { .. }));
+        } else {
+            assert_eq!(
+                parsed,
+                UpdateCheck::NoAsset {
+                    version: "99.0.0".to_string()
+                }
+            );
         }
     }
 

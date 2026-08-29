@@ -1,11 +1,17 @@
 // Some objc2-driven macOS deps (dispatch2/objc2_foundation) hit the default
 // rustc macro recursion limit on stable. Bump it generously here.
 #![recursion_limit = "1024"]
+// Windows: a GUI-subsystem binary, so launching from the Start Menu shortcut,
+// the desktop or autostart never flashes a console window — and closing a
+// console can't kill the daemon. The CLI still works: `attach_parent_console`
+// below hooks stdout/stderr back up when we WERE started from a terminal.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod acoustic;
 mod audio;
 mod autostart;
 mod config;
+mod dialog;
 mod dictionary;
 mod enrich;
 mod hardware;
@@ -13,12 +19,14 @@ mod history;
 mod hotkey;
 mod license;
 mod model_manager;
+mod net;
 mod notify;
 mod onboarding;
 mod overlay;
 mod paste;
 mod permissions;
 mod report;
+mod setup;
 mod state;
 mod templates;
 mod transcribe;
@@ -79,6 +87,35 @@ struct Cli {
     /// Post-update cleanup (remove old version backup, show notification).
     #[arg(long, hide = true)]
     post_update: bool,
+
+    /// Run the setup UI in this process and exit. The daemon spawns itself with
+    /// this flag (see src/setup) because a winit event loop can only be built
+    /// once per process and the tray owns the daemon's.
+    ///   --setup-ui           first-launch wizard; prints its result as JSON
+    ///   --setup-ui license   license modal (paywall / manage)
+    ///   --setup-ui dialog    one dialog described by --dialog
+    #[arg(long, hide = true, value_name = "KIND", num_args = 0..=1,
+          default_missing_value = "wizard")]
+    setup_ui: Option<String>,
+
+    /// With `--setup-ui license`: open on the "enter your key" screen.
+    #[arg(long, hide = true)]
+    activate: bool,
+
+    /// With `--setup-ui dialog`: the dialog spec, as JSON (see src/dialog.rs).
+    #[arg(long, hide = true, value_name = "JSON")]
+    dialog: Option<String>,
+
+    /// With `--setup-ui`: never touch the daemon, never download, never report a
+    /// result — for eyeballing the design next to the macOS wizard.
+    #[arg(long, hide = true)]
+    design_preview: bool,
+
+    /// With `--setup-ui`: render every screen to PNGs in this directory and
+    /// exit (with `--setup-ui dialog`, the PATH of the single PNG to write).
+    /// Implies --design-preview.
+    #[arg(long, hide = true, value_name = "DIR")]
+    screenshot_to: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -170,6 +207,13 @@ enum DictAction {
 }
 
 fn main() -> Result<()> {
+    // Windows only: re-attach to the terminal that launched us, if any. A
+    // GUI-subsystem process is not attached to its parent's console, so every
+    // `println!` — `--doctor`, `dict list`, the JSON the wizard prints — would
+    // vanish. Must run before clap, which prints --help and usage errors.
+    #[cfg(target_os = "windows")]
+    attach_parent_console();
+
     // Install panic hook early — catches panics and logs them + shows notification
     report::install_panic_hook();
 
@@ -179,11 +223,17 @@ fn main() -> Result<()> {
     // clean (the wizard parses our stdout as JSON).
     if cli.permissions_json {
         let s = permissions::check_all();
+        // One key per permission this platform gates, named by `cli_name()` —
+        // the macOS SwiftUI wizard reads "microphone"/"accessibility"/
+        // "input_monitoring", so those names are load-bearing.
+        let fields: Vec<String> = s
+            .items
+            .iter()
+            .map(|p| format!("\"{}\":\"{}\"", p.kind.cli_name(), perm_state_str(p.state)))
+            .collect();
         println!(
-            "{{\"microphone\":\"{}\",\"accessibility\":\"{}\",\"input_monitoring\":\"{}\",\"all_granted\":{}}}",
-            perm_state_str(s.microphone),
-            perm_state_str(s.accessibility),
-            perm_state_str(s.input_monitoring),
+            "{{{},\"all_granted\":{}}}",
+            fields.join(","),
             s.all_granted()
         );
         return Ok(());
@@ -194,19 +244,49 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(ref kind) = cli.permissions_request {
+        let Some(kind) = permissions::PermKind::from_cli(kind) else {
+            eprintln!("Unknown permission: {kind}");
+            return Ok(());
+        };
         permissions::request_one(kind);
-        if kind == "mic" || kind == "microphone" {
+        // The mic prompt is a modal the user has to answer; park until they do
+        // (or 30 s) so macOS doesn't tear the dialog down with our process.
+        if kind == permissions::PermKind::Microphone {
             for _ in 0..60 {
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                let s = permissions::check_all();
-                if s.microphone == permissions::PermState::Granted
-                    || s.microphone == permissions::PermState::Denied
-                {
+                let s = permissions::check(kind);
+                if s == permissions::PermState::Granted || s == permissions::PermState::Denied {
                     break;
                 }
             }
         }
         return Ok(());
+    }
+
+    // Setup UI (wizard / license modal). Handled before config + logging setup
+    // so stdout carries nothing but the one JSON result line the parent parses;
+    // tracing goes to stderr, which the parent discards.
+    if let Some(kind) = cli.setup_ui.as_deref() {
+        init_logging(false);
+        let mode = match kind {
+            "license" => setup::Mode::License {
+                activate: cli.activate,
+            },
+            "dialog" => {
+                let spec = cli
+                    .dialog
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .ok_or_else(|| anyhow::anyhow!("--setup-ui dialog needs a valid --dialog"))?;
+                setup::Mode::Dialog(spec)
+            }
+            _ => setup::Mode::Wizard,
+        };
+        return setup::run(
+            mode,
+            cli.design_preview || cli.screenshot_to.is_some(),
+            cli.screenshot_to.clone(),
+        );
     }
 
     // Dictionary management subcommand (no daemon, stderr logging only).
@@ -285,6 +365,65 @@ fn main() -> Result<()> {
 
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
     app::run(cfg)
+}
+
+/// Attach to the parent process's console (when launched from one) and point
+/// our standard handles at it. No-op with no parent console — a shortcut launch
+/// stays windowless, which is the entire reason for the `windows` subsystem.
+#[cfg(target_os = "windows")]
+fn attach_parent_console() {
+    use windows::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::Console::{
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
+    };
+    use windows::core::HSTRING;
+
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
+            return; // launched from a shortcut / autostart: nothing to attach to
+        }
+        // Only fill in handles the shell did NOT give us. `whisper-push --models
+        // > out.txt` passes a real file handle for stdout; overwriting it with
+        // CONOUT$ would send the output to the console and leave the file empty.
+        let missing = |which| match GetStdHandle(which) {
+            Ok(h) => h.is_invalid() || h.0.is_null(),
+            Err(_) => true,
+        };
+        // Rust's stdio fetches the handle on every write, so replacing the
+        // process's std handles is enough — no re-opening of `std::io::stdout`.
+        let open = |name: &str| -> Option<HANDLE> {
+            let h = CreateFileW(
+                &HSTRING::from(name),
+                GENERIC_READ.0 | GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+            .ok()?;
+            (h != INVALID_HANDLE_VALUE).then_some(h)
+        };
+        if missing(STD_OUTPUT_HANDLE) || missing(STD_ERROR_HANDLE) {
+            if let Some(h) = open("CONOUT$") {
+                if missing(STD_OUTPUT_HANDLE) {
+                    let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+                }
+                if missing(STD_ERROR_HANDLE) {
+                    let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+                }
+            }
+        }
+        if missing(STD_INPUT_HANDLE) {
+            if let Some(h) = open("CONIN$") {
+                let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+            }
+        }
+    }
 }
 
 fn perm_state_str(s: permissions::PermState) -> &'static str {
@@ -449,16 +588,86 @@ mod doctor {
             println!("\nModel:     not downloaded (will download on first use)");
         }
 
-        // Permissions (macOS)
-        #[cfg(target_os = "macos")]
+        // Where this install actually lives and whether it comes back on login —
+        // the two questions every "it stopped working" report needs answered,
+        // and both are invisible from the menu.
+        println!("\nInstall:");
+        println!(
+            "  Binary:    {}",
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "?".into())
+        );
+        println!("  Data:      {}", crate::config::data_dir().display());
+        println!("  Config:    {}", crate::config::config_path().display());
+        match crate::autostart::registered_exe() {
+            Some(p) => {
+                let current = std::env::current_exe().unwrap_or_default();
+                let stale = p != current;
+                println!(
+                    "  Autostart: on \u{2192} {}{}",
+                    p.display(),
+                    if stale {
+                        "  (STALE — points elsewhere)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            None => println!("  Autostart: off"),
+        }
+
+        // Permissions — whatever THIS platform gates us on (see permissions.rs).
+        let perms = crate::permissions::check_all();
+        if !perms.items.is_empty() {
+            println!("\nPermissions:");
+            for p in &perms.items {
+                println!(
+                    "  {} {:<17} {}",
+                    p.state.symbol(),
+                    p.kind.title(),
+                    p.state.label()
+                );
+            }
+        }
+
+        // Desktop integration — the tray icon is the app's only UI, so a host
+        // that can't show one is worth naming before the user concludes the app
+        // simply didn't start.
+        #[cfg(target_os = "linux")]
         {
-            let perms = crate::permissions::check_all();
-            println!("\nMicrophone:       {}", perms.microphone.label());
-            println!("Accessibility:    {}", perms.accessibility.label());
+            println!("\nTray:");
+            let has_lib = ["/usr/lib", "/usr/lib64", "/usr/lib/x86_64-linux-gnu"]
+                .iter()
+                .any(|d| {
+                    std::path::Path::new(d)
+                        .join("libayatana-appindicator3.so.1")
+                        .exists()
+                });
             println!(
-                "Input Monitoring: {}  (required for the global hotkey)",
-                perms.input_monitoring.label()
+                "  {} libayatana-appindicator3 {}",
+                if has_lib { "✓" } else { "✗" },
+                if has_lib {
+                    "found"
+                } else {
+                    "MISSING — install libayatana-appindicator3-1"
+                }
             );
+            let gnome = std::env::var("XDG_CURRENT_DESKTOP")
+                .map(|d| d.to_lowercase().contains("gnome"))
+                .unwrap_or(false);
+            if gnome {
+                println!(
+                    "  ! GNOME needs the AppIndicator extension to show tray icons\n    \
+                     (Ubuntu ships it; on vanilla GNOME install gnome-shell-extension-appindicator)"
+                );
+            }
+            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                println!(
+                    "  ! Wayland session: pasting uses XWayland (xdotool). If dictated text\n    \
+                     doesn't appear, run the X11 session or enable XWayland."
+                );
+            }
         }
 
         println!("\nAll checks complete.");
@@ -983,6 +1192,25 @@ mod app {
     pub fn run(mut cfg: Config) -> Result<()> {
         // Ensure single instance
         let _lock = crate::state::acquire_lock()?;
+
+        // Claim our Windows identity before anything can notify: a toast sent
+        // before the AppUserModelID is registered is attributed to PowerShell,
+        // and onboarding notifies well before the tray exists.
+        #[cfg(target_os = "windows")]
+        crate::tray::register_windows_app_id();
+
+        // Auto-start records an absolute path; the app moving (a Windows
+        // installer switching from Program Files to %LOCALAPPDATA%, a portable
+        // build dragged elsewhere) would otherwise leave a login entry aimed at
+        // a file that is gone, and the app just stops coming back after a reboot.
+        crate::autostart::repair();
+
+        // Windows only, and only the once: app data moves out of the roaming
+        // profile (see config::data_dir). Reported here because it is decided
+        // while logging is still being set up.
+        if let Some(note) = crate::config::data_dir_migration_note() {
+            tracing::info!("{note}");
+        }
 
         // Arm the adaptive dictionary (load dictionary.toml, compile tables).
         crate::dictionary::init(cfg.dictionary_enabled);
