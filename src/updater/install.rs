@@ -44,12 +44,7 @@ pub fn download_and_install(url: &str) -> Result<()> {
 /// Open a URL in the user's default browser (Linux/Windows manual-update path).
 #[cfg(not(target_os = "macos"))]
 fn open_url(url: &str) {
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    crate::util::open_external(url);
 }
 
 /// Download the ZIP to a temp directory.

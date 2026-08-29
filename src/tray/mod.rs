@@ -1,3 +1,6 @@
+#[cfg(target_os = "windows")]
+mod windows_shell;
+
 use crate::config::Config;
 use crate::state::{AppState, Event, State};
 use crate::util::LockSafe;
@@ -33,10 +36,42 @@ enum GlyphStyle {
     Tint([u8; 3]),
 }
 
-/// Build a tray icon from the one master glyph, applying `style`. The geometry
-/// is always identical — only colour/opacity change — so the icon never shifts
-/// size or shape between states.
+/// The process's Windows AppUserModelID — see `windows_shell::APP_ID`.
+#[cfg(target_os = "windows")]
+pub fn windows_app_id() -> &'static str {
+    windows_shell::APP_ID
+}
+
+/// Racing green — the badge ground on Windows/Linux (see `badge_icon`).
+const BRAND_GREEN: [u8; 3] = [0x0D, 0x2E, 0x25];
+
+/// Build the tray icon for `style`.
+///
+/// **macOS** gets the bare glyph: the menu bar wants a template image, which the
+/// OS recolours to contrast with whatever is behind it.
+///
+/// **Windows and Linux** get the brand badge — the glyph on a rounded racing-
+/// green square, i.e. the app icon. A template image is exactly wrong there:
+/// nothing recolours it, so the pure-black glyph this ships is invisible on the
+/// (default) dark Windows taskbar and on most Linux panels. That is what "it
+/// doesn't appear in the tray" was. A badge carries its own background, so it
+/// reads on any panel colour, light or dark, with no theme guessing — and it's
+/// what every other Windows app in that area does. Recording inverts it (citron
+/// ground, green waves) so "live" is unmistakable at 16 px.
 fn glyph_icon(style: GlyphStyle) -> Option<Icon> {
+    #[cfg(target_os = "macos")]
+    {
+        template_icon(style)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        badge_icon(style)
+    }
+}
+
+/// The glyph alone, recoloured — macOS menu-bar form.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn template_icon(style: GlyphStyle) -> Option<Icon> {
     let mut img = image::load_from_memory(ICON_GLYPH).ok()?.into_rgba8();
     match style {
         GlyphStyle::Tint([r, g, b]) => {
@@ -59,6 +94,94 @@ fn glyph_icon(style: GlyphStyle) -> Option<Icon> {
     Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
+/// The glyph on a rounded brand square — Windows/Linux notification-area form.
+/// Rendered at the platform's icon size so the 3 px strokes survive: handing
+/// Shell_NotifyIcon a 128 px image and letting it downscale to 16 px washed the
+/// waves out to almost nothing.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn badge_icon(style: GlyphStyle) -> Option<Icon> {
+    let img = badge_image(style)?;
+    let (w, h) = img.dimensions();
+    Icon::from_rgba(img.into_raw(), w, h).ok()
+}
+
+/// The badge's pixels — split from `badge_icon` so the invariants that make it
+/// visible (opaque ground, rounded corners) can be asserted in a test;
+/// `tray_icon::Icon` hands back nothing to inspect.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn badge_image(style: GlyphStyle) -> Option<image::RgbaImage> {
+    let size = platform_icon_size();
+    let (ground, ink, alpha) = match style {
+        // Live: inverted, so the state reads at a glance.
+        GlyphStyle::Tint(c) => (c, BRAND_GREEN, 255u8),
+        // Busy: the brand badge, dimmed.
+        GlyphStyle::Template(o) if o < 255 => (BRAND_GREEN, TINT_RECORDING, o),
+        GlyphStyle::Template(_) => (BRAND_GREEN, TINT_RECORDING, 255),
+    };
+
+    // Ground: a rounded square with the app icon's corner ratio (22%).
+    let mut img = image::RgbaImage::new(size, size);
+    let r = (size as f32 * 0.22).round();
+    let (w, h) = (size as f32, size as f32);
+    for (x, y, px) in img.enumerate_pixels_mut() {
+        let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+        // Distance outside the rounded rect, for a 1 px antialiased edge.
+        let dx = (r - fx).max(fx - (w - r)).max(0.0);
+        let dy = (r - fy).max(fy - (h - r)).max(0.0);
+        let d = (dx * dx + dy * dy).sqrt() - r;
+        let cover = (0.5 - d).clamp(0.0, 1.0);
+        *px = image::Rgba([
+            ground[0],
+            ground[1],
+            ground[2],
+            (cover * alpha as f32) as u8,
+        ]);
+    }
+
+    // Ink: the one master glyph, scaled to ~66% and composited on top.
+    let glyph_px = (size as f32 * 0.66).round().max(8.0) as u32;
+    let glyph = image::load_from_memory(ICON_GLYPH)
+        .ok()?
+        .resize_exact(glyph_px, glyph_px, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let off = ((size - glyph_px) / 2) as i64;
+    for (gx, gy, gp) in glyph.enumerate_pixels() {
+        let a = gp[3] as f32 / 255.0;
+        if a <= 0.0 {
+            continue;
+        }
+        let (x, y) = (gx as i64 + off, gy as i64 + off);
+        if x < 0 || y < 0 || x >= size as i64 || y >= size as i64 {
+            continue;
+        }
+        let dst = img.get_pixel_mut(x as u32, y as u32);
+        for i in 0..3 {
+            dst[i] = (ink[i] as f32 * a + dst[i] as f32 * (1.0 - a)) as u8;
+        }
+        dst[3] = dst[3].max((a * alpha as f32) as u8);
+    }
+
+    Some(img)
+}
+
+/// Pixel size to render the tray icon at. Windows tells us exactly what the
+/// notification area wants (16 at 100 % DPI, 20/24 when scaled); elsewhere 32 is
+/// a safe source size for panels that scale it themselves.
+fn platform_icon_size() -> u32 {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSMICON};
+        let n = unsafe { GetSystemMetrics(SM_CXSMICON) };
+        // A tiny icon would look ragged and a huge one is a scaling artefact:
+        // clamp to the range the shell actually uses.
+        return (n as u32).clamp(16, 64);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        32
+    }
+}
+
 /// Submenu title showing the current device selection, e.g. "Input: Auto".
 fn device_title(label: &str, value: &str) -> String {
     if value == "auto" {
@@ -68,12 +191,11 @@ fn device_title(label: &str, value: &str) -> String {
     }
 }
 
-// Built-in hotkey presets, per platform. The toggle entries are key *combos*
-// (`cmd+shift+space`), which only the macOS listener parses today — the Linux
-// (evdev) and Windows (WH_KEYBOARD_LL) parsers accept a single token, so a combo
-// preset there would make `start_listener` fail and silently kill dictation.
-// Until the non-macOS parsers learn combos (#6 full), those platforms get
-// single-key presets only.
+// Built-in hotkey presets. Combos ("cmd+shift+space") work on every platform now
+// that the Linux (evdev) and Windows (WH_KEYBOARD_LL) listeners parse and match
+// them through `hotkey::combo`, so the list no longer forks per OS — only the
+// modifier NAMES do, because ⌘/⌥ are Command/Option on a Mac and Win/Alt
+// elsewhere, and a preset must read like the user's own keyboard.
 #[cfg(target_os = "macos")]
 const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Hold: Control", "ctrl", "hold"),
@@ -92,7 +214,9 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Hold: Control", "ctrl", "hold"),
     ("Hold: Right Control", "rctrl", "hold"),
     ("Hold: Right Alt", "ralt", "hold"),
-    ("Hold: Right Super", "rcmd", "hold"),
+    ("Hold: Right Windows", "rcmd", "hold"),
+    ("Toggle: Ctrl+Shift+Space", "ctrl+shift+space", "toggle"),
+    ("Toggle: Alt+Space", "alt+space", "toggle"),
 ];
 
 /// User events forwarded into winit's event loop.
@@ -113,6 +237,17 @@ fn perms_title(status: &crate::permissions::PermissionStatus) -> String {
     } else {
         format!("\u{26a0} Permissions: {} to grant", status.missing_count())
     }
+}
+
+/// One permission row: "✓ Microphone │ Granted". The `│` (never an em dash)
+/// joins the two facts — see the menu-label rule in CLAUDE.md.
+fn perm_label(kind: crate::permissions::PermKind, state: crate::permissions::PermState) -> String {
+    format!(
+        "{} {} \u{2502} {}",
+        state.symbol(),
+        kind.title(),
+        state.label()
+    )
 }
 
 /// How long "Set Custom Hotkey…" stays armed before giving up, so the menu
@@ -194,14 +329,12 @@ struct MenuItems {
     output_ids: Vec<(String, String)>,
     output_device_items: Vec<(CheckMenuItem, String)>,
     output_submenu: Submenu,
-    mic_perm_item: MenuItem,
-    acc_perm_item: MenuItem,
-    input_mon_perm_item: MenuItem,
+    /// One row per permission THIS platform gates (see `permissions::tracked`),
+    /// paired with the kind it opens Settings for. macOS has three, Windows one,
+    /// Linux one — the submenu is built from the list, never hard-coded.
+    perm_items: Vec<(MenuItem, crate::permissions::PermKind)>,
     perms_submenu: Submenu,
 
-    mic_perm_id: String,
-    acc_perm_id: String,
-    input_mon_perm_id: String,
     setup_id: String,
     model_items: Vec<(MenuItem, String)>, // (item, model name = config.model value)
     // Dictionary (adaptive correction)
@@ -321,10 +454,8 @@ impl App {
             let _ = hotkey_submenu.append(&item);
             hotkey_items.push((item, hotkey.to_string(), mode.to_string()));
         }
-        // "Set Custom Hotkey…" relies on live key-combo capture, which today only
-        // exists on macOS. Offer it there; elsewhere the presets cover it and the
-        // item would be a dead end (no HotkeyCaptured ever arrives) — so hide it.
-        #[cfg(target_os = "macos")]
+        // "Set Custom Hotkey…" — live key-combo capture, on every platform
+        // (`hotkey::combo::Capture`, wired into all three listeners).
         let (custom_hotkey_item, custom_hotkey_id) = {
             let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
             // A binding that matches no preset is a custom one: show it here,
@@ -344,8 +475,6 @@ impl App {
             let id = item.id().0.clone();
             (Some(item), id)
         };
-        #[cfg(not(target_os = "macos"))]
-        let (custom_hotkey_item, custom_hotkey_id) = (None, String::new());
 
         // Permissions (computed once here; reused for the Permissions section).
         let perms = crate::permissions::check_all();
@@ -371,7 +500,7 @@ impl App {
             }
         }
         // If the mic is explicitly denied, recording won't work — hint the user.
-        if perms.microphone == crate::permissions::PermState::Denied {
+        if perms.microphone() == crate::permissions::PermState::Denied {
             let _ = input_submenu.append(&PredefinedMenuItem::separator());
             let _ = input_submenu.append(&MenuItem::new(
                 "\u{26a0} Microphone denied: grant to record",
@@ -425,28 +554,20 @@ impl App {
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
         // Permissions (perms already computed above for the input picker gate)
-        let mic_label = format!(
-            "{} Microphone \u{2502} {}",
-            perms.microphone.symbol(),
-            perms.microphone.label()
-        );
-        let acc_label = format!(
-            "{} Accessibility \u{2502} {}",
-            perms.accessibility.symbol(),
-            perms.accessibility.label()
-        );
-        let input_mon_label = format!(
-            "{} Input Monitoring \u{2502} {}",
-            perms.input_monitoring.symbol(),
-            perms.input_monitoring.label()
-        );
-        let mic_perm_item = MenuItem::new(&mic_label, true, None);
-        let acc_perm_item = MenuItem::new(&acc_label, true, None);
-        let input_mon_perm_item = MenuItem::new(&input_mon_label, true, None);
         let perms_submenu = Submenu::new(perms_title(&perms), true);
-        let _ = perms_submenu.append(&mic_perm_item);
-        let _ = perms_submenu.append(&acc_perm_item);
-        let _ = perms_submenu.append(&input_mon_perm_item);
+        let perm_items: Vec<(MenuItem, crate::permissions::PermKind)> = perms
+            .items
+            .iter()
+            .map(|p| {
+                let item = MenuItem::new(
+                    perm_label(p.kind, p.state),
+                    p.state != crate::permissions::PermState::Granted,
+                    None,
+                );
+                let _ = perms_submenu.append(&item);
+                (item, p.kind)
+            })
+            .collect();
         let _ = perms_submenu.append(&PredefinedMenuItem::separator());
         let setup_item = MenuItem::new("\u{2699} Run Guided Setup\u{2026}", true, None);
         let _ = perms_submenu.append(&setup_item);
@@ -615,13 +736,8 @@ impl App {
             notif_id: notifications_item.id().0.clone(),
             sound_id: sound_item.id().0.clone(),
             debug_id: debug_item.id().0.clone(),
-            mic_perm_id: mic_perm_item.id().0.clone(),
-            acc_perm_id: acc_perm_item.id().0.clone(),
-            input_mon_perm_id: input_mon_perm_item.id().0.clone(),
             setup_id: setup_item.id().0.clone(),
-            mic_perm_item,
-            acc_perm_item,
-            input_mon_perm_item,
+            perm_items,
             perms_submenu,
             model_items,
             update_item,
@@ -694,7 +810,32 @@ impl App {
             Err(e) => {
                 warn!("Failed to create tray icon ({e}) — running without a menu bar item");
                 self.tray = None;
+                // On Linux this is usually a desktop with no StatusNotifier host
+                // (vanilla GNOME without the AppIndicator extension). The app
+                // still dictates, but its only UI is gone — say so, or it looks
+                // like nothing launched.
+                #[cfg(target_os = "linux")]
+                crate::notify::app(
+                    "Whisper Push is running, but your desktop shows no tray icon. \
+                     On GNOME, install the AppIndicator extension \
+                     (gnome-shell-extension-appindicator) and log back in. \
+                     Dictation works meanwhile: hold your hotkey and speak.",
+                );
             }
+        }
+        // Windows 11 files every new notification-area icon into the overflow
+        // flyout until the user drags it out. Explorer writes our entry when the
+        // icon registers, so promote it just after — and once more shortly
+        // after, since the entry can appear a beat later.
+        #[cfg(target_os = "windows")]
+        windows_shell::register_app_id();
+        #[cfg(target_os = "windows")]
+        if self.tray.is_some() {
+            windows_shell::promote();
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(3));
+                windows_shell::promote();
+            });
         }
 
         // Prompt permissions after a short delay
@@ -935,17 +1076,12 @@ impl App {
                     crate::util::exit_clean();
                 }
                 if id == &mi.uninstall_id {
-                    // Free the server-side device slot before wiping local state.
-                    let _ = crate::license::deactivate();
-                    // Uninstall: remove data dir, autostart, and notify
-                    let data_dir = crate::config::data_dir();
-                    if data_dir.exists() {
-                        let _ = std::fs::remove_dir_all(&data_dir);
-                        info!("Removed data dir: {}", data_dir.display());
-                    }
-                    crate::autostart::disable();
-                    crate::notify::app("Uninstalled. You can delete the app from Applications.");
-                    crate::util::exit_clean();
+                    // This deletes the downloaded models, the learned
+                    // dictionary and the license activation — several GB and a
+                    // device slot — so it asks first. It used to go on one
+                    // click, from a menu item sitting next to "Quit".
+                    std::thread::spawn(uninstall_dialog);
+                    return;
                 }
                 if id == &mi.template_add_id {
                     // osascript dialogs block → run off the UI thread. The list
@@ -997,19 +1133,12 @@ impl App {
                     }
                     return;
                 }
-                if id == &mi.mic_perm_id {
-                    #[cfg(target_os = "macos")]
-                    crate::permissions::open_settings("Privacy_Microphone");
-                    return;
-                }
-                if id == &mi.acc_perm_id {
-                    #[cfg(target_os = "macos")]
-                    crate::permissions::open_settings("Privacy_Accessibility");
-                    return;
-                }
-                if id == &mi.input_mon_perm_id {
-                    #[cfg(target_os = "macos")]
-                    crate::permissions::open_settings("Privacy_ListenEvent");
+                // A permission row: take the user where it is granted. On
+                // Linux that IS the grant (a polkit `usermod`), hence
+                // `request_one` rather than only opening Settings.
+                if let Some((_, kind)) = mi.perm_items.iter().find(|(it, _)| id == &it.id().0) {
+                    crate::permissions::request_one(*kind);
+                    crate::permissions::open_settings_for(*kind);
                     return;
                 }
                 if id == &mi.setup_id {
@@ -1191,16 +1320,10 @@ impl App {
                         let disp = format_hotkey_display(hotkey, mode);
                         mi.status_item.set_text(&format!("Whisper Push ({disp})"));
                         mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
-                        crate::hotkey::rebind(hotkey, mode); // live on macOS
-                        // The live rebind only takes effect immediately on macOS;
-                        // the Linux/Windows listeners read their key once at start,
-                        // so be honest that a restart is needed there (#3).
-                        #[cfg(target_os = "macos")]
+                        // Live on every platform: the listeners hold a mutable
+                        // matcher, so no restart is needed anywhere.
+                        crate::hotkey::rebind(hotkey, mode);
                         crate::notify::app(&format!("Hotkey set to {disp}"));
-                        #[cfg(not(target_os = "macos"))]
-                        crate::notify::app(&format!(
-                            "Hotkey saved ({disp}) \u{2014} restart Whisper Push to apply."
-                        ));
                         return;
                     }
                 }
@@ -1376,38 +1499,14 @@ impl App {
             Event::RefreshPermissions => {
                 let status = crate::permissions::check_all();
                 if let Some(mi) = &self.menu_items {
-                    let mic_label = format!(
-                        "{} Microphone \u{2502} {}",
-                        status.microphone.symbol(),
-                        status.microphone.label()
-                    );
-                    let acc_label = format!(
-                        "{} Accessibility \u{2502} {}",
-                        status.accessibility.symbol(),
-                        status.accessibility.label()
-                    );
-                    let input_mon_label = format!(
-                        "{} Input Monitoring \u{2502} {}",
-                        status.input_monitoring.symbol(),
-                        status.input_monitoring.label()
-                    );
-                    mi.mic_perm_item.set_text(&mic_label);
-                    mi.mic_perm_item
-                        .set_enabled(status.microphone != crate::permissions::PermState::Granted);
-                    mi.acc_perm_item.set_text(&acc_label);
-                    mi.acc_perm_item.set_enabled(
-                        status.accessibility != crate::permissions::PermState::Granted,
-                    );
-                    mi.input_mon_perm_item.set_text(&input_mon_label);
-                    mi.input_mon_perm_item.set_enabled(
-                        status.input_monitoring != crate::permissions::PermState::Granted,
-                    );
+                    for (item, kind) in &mi.perm_items {
+                        let state = status.state(*kind);
+                        item.set_text(perm_label(*kind, state));
+                        item.set_enabled(state != crate::permissions::PermState::Granted);
+                    }
                     mi.perms_submenu.set_text(perms_title(&status));
                 }
-                info!(
-                    "Permissions refreshed: mic={:?} acc={:?}",
-                    status.microphone, status.accessibility
-                );
+                info!("Permissions refreshed: {} missing", status.missing_count());
                 // Re-check again in 5s if still not all granted
                 if !status.all_granted() {
                     let tx = self.state.tx.clone();
@@ -2218,7 +2317,7 @@ fn notify_systemic_mic_failure() {
                 is missing the Microphone permission. Open Settings and enable it, then dictate again.";
     #[cfg(target_os = "macos")]
     crate::notify::app_action(body, "Open Settings", || {
-        crate::permissions::open_settings("Privacy_Microphone")
+        crate::permissions::open_settings_for(crate::permissions::PermKind::Microphone)
     });
     #[cfg(not(target_os = "macos"))]
     crate::notify::app(body);
@@ -2388,17 +2487,9 @@ fn stop_and_transcribe(
     }
 }
 
-/// Open a file with the OS default handler (cross-platform).
+/// Open a file with the OS default handler.
 fn open_path(path: &std::path::Path) {
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(path).spawn();
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .spawn();
+    crate::util::open_external(path);
 }
 
 /// Build the recent-dictation entries for the History submenu. Returns
@@ -2467,9 +2558,8 @@ fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
 }
 
 /// "Add Template…" dialog: ask for the trigger, then the content, then save.
-#[cfg(target_os = "macos")]
 fn add_template_dialog() {
-    let Some(trigger) = osascript_input(
+    let Some(trigger) = crate::dialog::text_input(
         "Add a template \u{2014} the word/phrase you'll say to paste it. \
          (For long or multi-line content, edit templates.toml instead.)",
         "",
@@ -2480,7 +2570,7 @@ fn add_template_dialog() {
     if trigger.is_empty() {
         return;
     }
-    let Some(content) = osascript_input(
+    let Some(content) = crate::dialog::text_input(
         &format!("Text to paste when you say \u{201c}{trigger}\u{201d}:"),
         "",
     ) else {
@@ -2492,16 +2582,10 @@ fn add_template_dialog() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn add_template_dialog() {
-    crate::notify::app("Add templates by editing templates.toml (the dialog is macOS-only).");
-}
-
 /// Per-template menu click → Edit (open the file for full multi-line/formatting
 /// control) or Delete.
-#[cfg(target_os = "macos")]
 fn template_action_dialog(trigger: &str) {
-    match osascript_choice(
+    match crate::dialog::choice(
         &format!("Template \u{201c}{trigger}\u{201d}"),
         &["Cancel", "Edit", "Delete"],
     )
@@ -2519,15 +2603,9 @@ fn template_action_dialog(trigger: &str) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn template_action_dialog(_trigger: &str) {
-    open_path(&crate::templates::ensure_file());
-}
-
 /// Per-word dictionary menu click → Edit (open the file) or Delete.
-#[cfg(target_os = "macos")]
 fn dict_action_dialog(term: &str, tx: crossbeam_channel::Sender<Event>) {
-    match osascript_choice(
+    match crate::dialog::choice(
         &format!("Dictionary word \u{201c}{term}\u{201d}"),
         &["Cancel", "Edit", "Delete"],
     )
@@ -2544,46 +2622,6 @@ fn dict_action_dialog(term: &str, tx: crossbeam_channel::Sender<Event>) {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn dict_action_dialog(_term: &str, _tx: crossbeam_channel::Sender<Event>) {
-    open_path(&crate::dictionary::ensure_file());
-}
-
-/// Show a dialog with the given buttons (first = Cancel); returns the clicked
-/// button label, or `None` on Cancel/error. macOS only.
-#[cfg(target_os = "macos")]
-fn osascript_choice(message: &str, buttons: &[&str]) -> Option<String> {
-    let cancel = buttons.first().copied().unwrap_or("Cancel");
-    let btns = buttons
-        .iter()
-        .map(|b| format!("\"{}\"", crate::notify::applescript_escape(b)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let script = format!(
-        "button returned of (display dialog \"{}\" buttons {{{}}} \
-         default button \"{}\" cancel button \"{}\" with title \"Whisper Push\")",
-        crate::notify::applescript_escape(message),
-        btns,
-        crate::notify::applescript_escape(cancel),
-        crate::notify::applescript_escape(cancel),
-    );
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None; // Cancel → non-zero exit
-    }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches(['\n', '\r'])
-            .to_string(),
-    )
-}
-
-/// Append one (removable) menu item per dictionary entry; returns them paired
-/// with their term so clicks map back. A disabled placeholder (empty term) is
 /// shown when the dictionary is empty or truncated.
 fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
     const MAX: usize = 40;
@@ -2625,7 +2663,7 @@ fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
         crate::notify::app("No recent dictation to correct.");
         return;
     };
-    let corrected = match osascript_input(
+    let corrected = match crate::dialog::text_input(
         "Edit the last dictation — fix any wrong words:",
         &last.finalized,
     ) {
@@ -2668,7 +2706,7 @@ fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
 
 /// Native dialog to add a word manually: "Correct = heard1, heard2".
 fn add_word_dialog(tx: crossbeam_channel::Sender<Event>) {
-    let Some(input) = osascript_input(
+    let Some(input) = crate::dialog::text_input(
         "Add a word — just type the correct spelling; the app catches misheard \
          versions by sound. (Optional: Word = misheard1, misheard2)",
         "",
@@ -2703,7 +2741,7 @@ fn add_word_dialog(tx: crossbeam_channel::Sender<Event>) {
 
 /// Two-step dialog (key, then email) → activate. Runs off the UI thread.
 fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
-    let Some(key) = osascript_input("Enter your Whisper Push license key:", "") else {
+    let Some(key) = crate::dialog::text_input("Enter your Whisper Push license key:", "") else {
         return;
     };
     if key.trim().is_empty() {
@@ -2721,7 +2759,7 @@ fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
 
 /// Confirm, then free this device's slot. Runs off the UI thread.
 fn license_deactivate_dialog(tx: crossbeam_channel::Sender<Event>) {
-    if !osascript_confirm(
+    if !crate::dialog::confirm(
         "Deactivate Whisper Push on this device? This frees one of your device slots; you can re-activate anytime.",
         "Deactivate",
     ) {
@@ -2738,62 +2776,60 @@ fn license_deactivate_dialog(tx: crossbeam_channel::Sender<Event>) {
     let _ = tx.send(Event::LicenseChanged);
 }
 
-/// Native yes/no dialog (macOS). Returns true if the confirm button was clicked.
-#[cfg(target_os = "macos")]
-fn osascript_confirm(message: &str, confirm_btn: &str) -> bool {
-    let script = format!(
-        "display dialog \"{}\" with title \"Whisper Push\" buttons {{\"Cancel\", \"{}\"}} \
-         default button \"Cancel\" cancel button \"Cancel\"",
-        crate::notify::applescript_escape(message),
-        crate::notify::applescript_escape(confirm_btn),
-    );
-    std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn osascript_confirm(_message: &str, _confirm_btn: &str) -> bool {
-    false
-}
-
-/// Native text-input dialog (macOS). Returns `None` if the user cancels.
-#[cfg(target_os = "macos")]
-fn osascript_input(message: &str, prefill: &str) -> Option<String> {
-    let script = format!(
-        "display dialog \"{}\" default answer \"{}\" with title \"Whisper Push\" \
-         buttons {{\"Cancel\", \"Save\"}} default button \"Save\" cancel button \"Cancel\"\n\
-         text returned of result",
-        crate::notify::applescript_escape(message),
-        crate::notify::applescript_escape(prefill)
-    );
-    let out = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None; // Cancel → osascript exits non-zero
+/// Wipe local state after confirming, then quit. Runs off the UI thread (the
+/// dialog blocks) — never on the winit main thread.
+fn uninstall_dialog() {
+    // Where the app itself lives differs per platform, and that is the part the
+    // user has to finish by hand.
+    let removal = if cfg!(target_os = "macos") {
+        "Afterwards, drag Whisper Push out of Applications."
+    } else if cfg!(target_os = "windows") {
+        "Afterwards, remove Whisper Push from Settings \u{203a} Apps."
+    } else {
+        "Afterwards, remove the package (sudo apt remove whisper-push)."
+    };
+    if !crate::dialog::confirm(
+        &format!(
+            "Remove Whisper Push's data? This deletes your downloaded models, your \
+             learned dictionary and this device's license activation. {removal}"
+        ),
+        "Remove data",
+    ) {
+        return;
     }
-    Some(
-        String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches(['\n', '\r'])
-            .to_string(),
-    )
+    // Free the server-side device slot before wiping local state.
+    let _ = crate::license::deactivate();
+    let data_dir = crate::config::data_dir();
+    if data_dir.exists() {
+        let _ = std::fs::remove_dir_all(&data_dir);
+        info!("Removed data dir: {}", data_dir.display());
+    }
+    crate::autostart::disable();
+    crate::notify::app(&format!("Whisper Push data removed. {removal}"));
+    crate::util::exit_clean();
 }
 
-#[cfg(not(target_os = "macos"))]
-fn osascript_input(_message: &str, _prefill: &str) -> Option<String> {
-    crate::notify::app(
-        "In-app dictionary editing is macOS-only for now — use `whisper-push dict`.",
-    );
-    None
-}
-
+/// Render a binding for the menu. macOS writes modifiers as its own glyphs
+/// (⌃⌥⇧⌘, which is what every Mac menu shows); Windows and Linux spell them out,
+/// because ⌘ means nothing on a keyboard whose key says "Ctrl".
 pub fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
+    #[cfg(not(target_os = "macos"))]
+    let symbols: &[(&str, &str)] = &[
+        ("cmd", "Win"),
+        ("shift", "Shift"),
+        ("alt", "Alt"),
+        ("ctrl", "Ctrl"),
+        ("rctrl", "Right Ctrl"),
+        ("rcmd", "Right Win"),
+        ("ralt", "Right Alt"),
+        ("rshift", "Right Shift"),
+        ("lctrl", "Left Ctrl"),
+        ("lcmd", "Left Win"),
+        ("lalt", "Left Alt"),
+        ("lshift", "Left Shift"),
+        ("space", "Space"),
+    ];
+    #[cfg(target_os = "macos")]
     let symbols: &[(&str, &str)] = &[
         ("cmd", "\u{2318}"),
         ("shift", "\u{21e7}"),
@@ -2826,4 +2862,68 @@ pub fn format_hotkey_display(hotkey: &str, mode: &str) -> String {
         }
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Windows/Linux tray icon must carry its own background: a template
+    /// (black + alpha) glyph is invisible on the default dark Windows taskbar,
+    /// which is exactly the bug this badge exists to fix. Assert the real
+    /// composed image: opaque brand ground in the middle, corners rounded away,
+    /// and citron ink somewhere inside.
+    #[test]
+    fn badge_icon_is_opaque_with_rounded_corners() {
+        let img = badge_image(GlyphStyle::Template(255)).expect("badge builds");
+        let size = img.width();
+        assert_eq!(img.height(), size, "the badge is square");
+        assert_eq!(
+            img.get_pixel(size / 2, size / 2)[3],
+            255,
+            "the centre of the badge must be fully opaque"
+        );
+        assert_eq!(
+            img.get_pixel(0, 0)[3],
+            0,
+            "the corners must be rounded away"
+        );
+        // The ground is racing green…
+        assert_eq!(
+            [img.get_pixel(size / 2, 2)[0], img.get_pixel(size / 2, 2)[1]],
+            [BRAND_GREEN[0], BRAND_GREEN[1]],
+            "the ground must be the brand green"
+        );
+        // …and the waves are citron: at least one pixel is clearly yellower.
+        let inked = img
+            .pixels()
+            .any(|p| p[1] > BRAND_GREEN[1] + 60 && p[3] > 200);
+        assert!(inked, "the glyph must be drawn on the badge");
+    }
+
+    /// Recording inverts the badge (citron ground) so "live" reads at 16 px.
+    #[test]
+    fn recording_badge_inverts() {
+        let img = badge_image(GlyphStyle::Tint(TINT_RECORDING)).expect("badge builds");
+        let size = img.width();
+        let ground = img.get_pixel(size / 2, 2);
+        assert_eq!(
+            [ground[0], ground[1], ground[2]],
+            TINT_RECORDING,
+            "recording paints the citron ground"
+        );
+    }
+
+    /// Every state must produce an icon of the SAME size, so the tray item never
+    /// resizes as the app moves between idle / busy / recording.
+    #[test]
+    fn every_state_icon_has_one_size() {
+        for style in [
+            GlyphStyle::Template(255),
+            GlyphStyle::Template(BUSY_OPACITY),
+            GlyphStyle::Tint(TINT_RECORDING),
+        ] {
+            assert!(glyph_icon(style).is_some());
+        }
+    }
 }

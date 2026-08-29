@@ -69,6 +69,20 @@ dirs = "6"
 # Icons
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Cross-platform setup UI (onboarding wizard + license modal). Rendered with
+# egui/eframe so Windows and Linux get the *same* branded wizard macOS gets from
+# its SwiftUI helper — same screens, same palette, same flow. `glow` (OpenGL)
+# instead of the default wgpu backend: wgpu is already in the tree via burn at a
+# different version, and a second copy would double an already heavy build for a
+# 520x440 window. The wizard always runs in its OWN process (see src/setup), so
+# its winit event loop never fights the tray's.
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+
 # Notifications
 notify-rust = "4"
 
@@ -150,7 +164,28 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
+    # Microphone consent (CapabilityAccessManager) + pinning the tray icon out
+    # of the Windows 11 overflow flyout (NotifyIconSettings\…\IsPromoted).
+    "Win32_System_Registry",
+    # Attaching to the parent console so CLI subcommands still print once the
+    # binary is a GUI-subsystem app (no console window on a shortcut launch).
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    # Theme-aware tray glyph: SM_CXSMICON for the exact icon size.
+    "Win32_Graphics_Gdi",
+    # Installed RAM, for the model picker's "needs 16 GB+" warning.
+    "Win32_System_SystemInformation",
+    # AppUserModelID: toasts attributed to Whisper Push, not to PowerShell.
+    "Win32_UI_Shell",
 ] }
+
+# Embed the app icon + version info into whisper-push.exe, so Explorer, the
+# taskbar, Task Manager and alt-tab show the brand mark instead of the blank
+# default. Needs rc.exe (Windows SDK) or llvm-rc; build.rs treats a failure as a
+# warning so a machine without either still builds.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
@@ -189,7 +224,15 @@ your words are typed wherever your cursor is. Three transcription engines
 (Whisper, Parakeet, Voxtral), every platform optimized, no cloud."""
 section = "sound"
 priority = "optional"
-depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0"
+# libayatana-appindicator3-1 is NOT optional: tray-icon links it, so without it
+# the binary fails to start at all (ld.so can't find libayatana-appindicator3.so.1)
+# — the app looked "installed but dead". libnotify is what carries desktop
+# notifications on the panels that don't implement the D-Bus spec themselves.
+depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0, libayatana-appindicator3-1"
+# GNOME shows no tray at all without the AppIndicator extension (Ubuntu ships it
+# preinstalled, vanilla GNOME does not). Recommended, not required: KDE, XFCE,
+# Cinnamon and the rest need nothing.
+recommends = "gnome-shell-extension-appindicator"
 assets = [
     ["target/release/whisper-push", "usr/bin/", "755"],
     ["packaging/linux/whisper-push.desktop", "usr/share/applications/", "644"],

@@ -125,6 +125,222 @@ pub fn model_for_backend(backend: &str) -> &'static str {
     }
 }
 
+// ── Downloading ──────────────────────────────────────────────────────────────
+// ONE place that knows where a model comes from and how it lands on disk. The
+// onboarding wizard (all platforms), the tray's "download this engine" click and
+// the lazy first-use download in `transcribe` all go through here, so a changed
+// repo or filename is a one-line edit instead of a hunt through three modules.
+
+/// One remote file of a model: where to fetch it and where it lands.
+#[derive(Debug, Clone)]
+pub struct DownloadFile {
+    pub url: String,
+    pub dest: PathBuf,
+}
+
+/// Progress of a running download, reported per chunk.
+#[derive(Debug, Clone)]
+pub struct Progress {
+    /// 0-based index of the file being fetched, within this model's plan.
+    pub file_index: usize,
+    /// File name being written (not the full path).
+    pub file_name: String,
+    pub downloaded: u64,
+    /// 0 when the server sends no Content-Length.
+    pub total: u64,
+}
+
+const HF: &str = "https://huggingface.co";
+/// Parakeet ONNX export we ship. NB: `nvidia/…` is `.nemo` only and
+/// `onnx-community/parakeet-ctc-0.6b-ONNX` is CTC English-only — never "restore"
+/// either one (see src/transcribe/parakeet.rs).
+const PARAKEET_REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
+
+/// Every file `model` needs, in fetch order. Empty for an unknown name.
+pub fn download_plan(model: &str) -> Vec<DownloadFile> {
+    let file = |url: String, dest: PathBuf| DownloadFile { url, dest };
+    match model {
+        "ggml-large-v3-turbo-q5_0.bin" | "ggml-large-v3-turbo.bin" | "ggml-small-q5_1.bin" => {
+            vec![file(
+                format!("{HF}/ggerganov/whisper.cpp/resolve/main/{model}"),
+                crate::config::whisper_model_path(model),
+            )]
+        }
+        // int8 graphs are self-contained; fp32 ships a large `.onnx.data`
+        // sidecar. Either way they are saved under the fixed names parakeet-rs
+        // expects — ONNX Runtime executes the quantised ops transparently.
+        "parakeet-tdt-0.6b-v3-int8" | "parakeet-tdt-0.6b-v3" => {
+            let int8 = model.ends_with("-int8");
+            let dir = crate::config::parakeet_dir();
+            let base = format!("{HF}/{PARAKEET_REPO}/resolve/main");
+            let names: &[(&str, &str)] = if int8 {
+                &[
+                    ("encoder-model.int8.onnx", "encoder-model.onnx"),
+                    ("decoder_joint-model.int8.onnx", "decoder_joint-model.onnx"),
+                    ("vocab.txt", "vocab.txt"),
+                ]
+            } else {
+                &[
+                    ("encoder-model.onnx", "encoder-model.onnx"),
+                    ("encoder-model.onnx.data", "encoder-model.onnx.data"),
+                    ("decoder_joint-model.onnx", "decoder_joint-model.onnx"),
+                    ("vocab.txt", "vocab.txt"),
+                ]
+            };
+            names
+                .iter()
+                .map(|(src, dst)| file(format!("{base}/{src}"), dir.join(dst)))
+                .collect()
+        }
+        "voxtral-q4.gguf" => {
+            let dir = crate::config::voxtral_dir();
+            let base = format!("{HF}/TrevorJS/voxtral-mini-realtime-gguf/resolve/main");
+            ["voxtral-q4.gguf", "tekken.json"]
+                .iter()
+                .map(|n| file(format!("{base}/{n}"), dir.join(n)))
+                .collect()
+        }
+        // Unknown name: try it as a whisper.cpp ggml file, which is what the
+        // lazy loader used to do.
+        other => vec![file(
+            format!("{HF}/ggerganov/whisper.cpp/resolve/main/{other}"),
+            crate::config::whisper_model_path(other),
+        )],
+    }
+}
+
+/// The plan minus what is already on disk.
+pub fn missing_files(model: &str) -> Vec<DownloadFile> {
+    let plan = download_plan(model);
+    // A Parakeet variant switch keeps the same filenames, so "the file exists"
+    // is the wrong question — the whole set has to come down again.
+    if stale_parakeet_variant(model) {
+        return plan;
+    }
+    plan.into_iter().filter(|f| !f.dest.exists()).collect()
+}
+
+/// Is `models/parakeet/` populated with the *other* variant than `model` asks
+/// for? Both variants share one directory and identical filenames; only the
+/// `.variant` marker tells them apart.
+fn stale_parakeet_variant(model: &str) -> bool {
+    let Some(suffix) = model.strip_prefix("parakeet-tdt-0.6b-v3") else {
+        return false;
+    };
+    let want = if suffix == "-int8" { "int8" } else { "fp32" };
+    let dir = crate::config::parakeet_dir();
+    if !dir.join("vocab.txt").exists() {
+        return false; // nothing there yet — a normal first download
+    }
+    let on_disk = std::fs::read_to_string(dir.join(".variant"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "fp32".into());
+    on_disk != want
+}
+
+/// Download every missing file of `model`, calling `on_progress` as bytes land.
+/// Each file is written to `<dest>.part` and renamed on completion, so an
+/// interrupted run never leaves a truncated model that looks installed.
+pub fn download(model: &str, on_progress: &mut dyn FnMut(Progress)) -> anyhow::Result<()> {
+    // Swapping Parakeet variants overwrites the same filenames — clear the old
+    // set first so a failed pull can't leave a half-int8, half-fp32 directory
+    // that loads and then produces garbage.
+    if stale_parakeet_variant(model) {
+        let dir = crate::config::parakeet_dir();
+        tracing::info!("Parakeet variant switch — clearing {}", dir.display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let files = missing_files(model);
+    let count = files.len();
+    if count == 0 {
+        return Ok(());
+    }
+    for (index, f) in files.iter().enumerate() {
+        let name = f
+            .dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        tracing::info!("Downloading {} → {}", f.url, f.dest.display());
+        fetch(f, &mut |downloaded, total| {
+            on_progress(Progress {
+                file_index: index,
+                file_name: name.clone(),
+                downloaded,
+                total,
+            })
+        })?;
+    }
+    // Record which Parakeet variant is on disk — both share models/parakeet/
+    // with identical filenames, so only this marker tells them apart.
+    if let Some(variant) = model.strip_prefix("parakeet-tdt-0.6b-v3") {
+        let variant = if variant == "-int8" { "int8" } else { "fp32" };
+        let dir = crate::config::parakeet_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(".variant"), variant);
+    }
+    // Final tick so a watcher lands on 100% for this model.
+    on_progress(Progress {
+        file_index: count,
+        file_name: String::new(),
+        downloaded: 0,
+        total: 0,
+    });
+    Ok(())
+}
+
+/// Stream one file to disk. `on_bytes(downloaded, total)` fires per chunk.
+fn fetch(f: &DownloadFile, on_bytes: &mut dyn FnMut(u64, u64)) -> anyhow::Result<()> {
+    use std::io::{Read, Write};
+
+    if let Some(parent) = f.dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let resp = ureq::get(&f.url)
+        .config()
+        // Bounded, but generous: a 2.5 GB model on a slow line is legitimate.
+        // Without a ceiling a half-open socket would hang the caller forever.
+        .timeout_global(Some(std::time::Duration::from_secs(3600)))
+        .build()
+        .header(
+            "User-Agent",
+            &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),
+        )
+        .call()
+        .map_err(|e| anyhow::anyhow!("{}: {e}", f.url))?;
+
+    let total: u64 = resp
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    let part = f.dest.with_extension("part");
+    let mut out = std::fs::File::create(&part)?;
+    let mut reader = resp.into_body().into_reader();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut done: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])?;
+        done += n as u64;
+        on_bytes(done, total);
+    }
+    out.flush()?;
+    drop(out);
+    if total > 0 && done < total {
+        let _ = std::fs::remove_file(&part);
+        anyhow::bail!("{} ended early ({done} of {total} bytes)", f.dest.display());
+    }
+    std::fs::rename(&part, &f.dest)?;
+    Ok(())
+}
+
 /// Resolve a model name to a transcribe::Backend enum.
 pub fn resolve_backend(model: &str) -> crate::transcribe::Backend {
     match backend_for_model(model) {

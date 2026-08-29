@@ -55,8 +55,16 @@ whisper-push/
 │   │   └── windows.rs        # WH_KEYBOARD_LL hook
 │   ├── paste/
 │   │   └── mod.rs            # arboard clipboard + enigo keystroke (Cmd/Ctrl+V)
+│   ├── setup/                # Cross-platform wizard + license modal (egui)
+│   │   ├── mod.rs            # screens, flow, --setup-ui entry, screenshot mode
+│   │   ├── theme.rs          # port of the SwiftUI Theme.swift (palette/widgets)
+│   │   ├── icons.rs          # Lucide glyphs drawn as paths
+│   │   └── dialog.rs         # the branded Add Word… / Edit-Delete dialogs
+│   ├── dialog.rs             # one dialog API (osascript on macOS, egui elsewhere)
+│   ├── hotkey/combo.rs       # shared parse/match/capture for Windows + Linux
 │   └── tray/
-│       └── mod.rs            # tray-icon + muda menu + event loop orchestration
+│       ├── mod.rs            # tray-icon + muda menu + event loop orchestration
+│       └── windows_shell.rs  # Win11 tray un-hiding + AppUserModelID
 ├── resources/
 │   ├── Info.plist            # macOS app bundle metadata
 │   └── entitlements.plist    # macOS entitlements
@@ -131,8 +139,22 @@ make dmg     # create distributable DMG
 - **whisper-rs build**: requires cmake for whisper.cpp compilation
 - **macOS keyboard CGEventTap**: needs **Accessibility AND Input Monitoring** (kTCCServiceListenEvent). Accessibility alone is not enough — the tap silently receives nothing. The app checks both via `IOHIDCheckAccess` and requests them via `IOHIDRequestAccess`. The tap must be born *after* the grants → `permissions::guided_setup()` restarts the daemon (`launchctl kickstart -k`) once everything is granted.
 - **Ad-hoc TCC reset**: every rebuild changes the binary's cdhash, so macOS invalidates the TCC grants. `guided_setup` is what makes the re-grant tolerable — it opens the right panes, polls, and auto-restarts. A real Developer ID would stop the resets entirely.
-- **evdev on Linux**: requires user in 'input' group (`sudo usermod -aG input $USER`)
+- **evdev on Linux**: requires user in 'input' group (`sudo usermod -aG input $USER`).
+  This is a real, checkable permission — `permissions::check_input_group` opens a
+  `/dev/input/event*` node rather than reading `id -nG`, because the running
+  session keeps its old groups after a `usermod` and would report a lie.
+- **Linux tray needs `libayatana-appindicator3-1` at RUNTIME.** tray-icon links
+  it, so a machine without it can't even start the binary (ld.so error) — the
+  app looks installed and dead. It is in the `.deb` `depends` for that reason,
+  never as a "recommends". On GNOME the *host* is also missing without the
+  AppIndicator extension (Ubuntu preinstalls it, vanilla GNOME doesn't): the
+  tray build then fails and the app notifies instead of dying quietly.
 - **Windows keyboard hook**: WH_KEYBOARD_LL needs a message loop on the hook thread
+- **Windows: never spawn a console program from the daemon.** It is a
+  GUI-subsystem binary (see below), so `reg.exe`, `nvidia-smi`, `cmd /C start`
+  each flash a black window on the user's screen. Use `util::quiet_command`
+  (CREATE_NO_WINDOW) or `util::open_external` (ShellExecuteW), and prefer the
+  registry API over `reg.exe` outright.
 - **Voxtral GPU shaders**: `transcribe_streaming` on silence hangs on M4 Pro Metal → warmup skipped, shaders compile lazily on first real transcription (~15s). Streaming mode disabled (blocks feed_chunk loop during compilation); batch mode works. cubecl stores autotune cache in `CWD/target/` → `load_model()` does `set_current_dir(data_dir)` so cache lands in `<data_dir>/target/autotune/`.
 
 ## Logging
@@ -293,6 +315,134 @@ Enhancements layered on top of the existing modules — no new architectural pie
   clicking it away, not a bug (that mistake cost an hour of chasing a phantom).
   `pkill` without `-9` may not have finished before the next query: a stale
   instance answers System Events and looks like the new one on the wrong screen.
+
+## Windows & Linux parity — onboarding, tray, packaging
+
+Everything below exists because the Windows experience was: install an MSI that
+only drops a binary on `PATH`, discover you have to *type a command* in a
+terminal to start it, get no wizard, and then find no icon in the notification
+area. The Linux build had the same holes plus one that stopped it from starting
+at all. The fix is parity, not a second product: the same six screens, the same
+menu, the same actions.
+
+### The setup UI is one Rust wizard (`src/setup/`), run as a child process
+
+- **egui/eframe**, drawn to be the SwiftUI wizard: `theme.rs` is a port of
+  `Theme.swift` (same four brand colours, same radii, paddings and type scale)
+  and `icons.rs` draws Lucide glyphs as paths the way `LucideIcon.swift` does.
+  Change one side, change the other — the numbers in `theme.rs` ARE the numbers
+  in `Theme.swift`.
+- **Always a child process** (`whisper-push --setup-ui`). A winit event loop can
+  only be built once per process and the tray owns the daemon's for its whole
+  life, so the wizard could never share it; being a child also means closing the
+  window can't take the daemon down. It reports the same JSON line the macOS
+  helper prints, so `onboarding` parses ONE format.
+- **Same binary**, so it calls `model_manager`, `permissions`, `license` and
+  `autostart` directly — no JSON round-trip, and no second downloader (the
+  SwiftUI wizard re-implements model downloading in Swift; this one doesn't).
+- **It compiles on macOS too**, and the shipped macOS app still prefers the
+  SwiftUI helper — falling back to this one when the helper isn't bundled (dev
+  builds), which beats the bare popup that used to be there. That's also what
+  makes "exactly like macOS" checkable rather than asserted:
+  `whisper-push --setup-ui --screenshot-to DIR` renders **every screen to PNG**
+  (through the real GL path, not a system screen grab) so the two can be put
+  side by side. `--design-preview` poses the screens (permission rows ungranted,
+  a download at 42 %) without touching the daemon.
+- **The license modal is the same window** (`--setup-ui license [--activate]`),
+  so Windows and Linux finally *have* one: `run_license_window` used to return
+  `false` there and the fallback dialog was macOS-only, which meant a paying
+  Windows user could not enter their key anywhere but the CLI. The one
+  difference from macOS: checkout opens in the browser instead of an embedded
+  WKWebView (there is no in-process web view), and the screen says so.
+- **`crate::dialog`** is the one dialog surface (text / choice / confirm):
+  AppleScript on macOS, the branded egui dialog elsewhere. That is what unlocked
+  Dictionary "Add Word…", the per-word and per-template Edit/Delete menus, and
+  the new uninstall confirmation on every platform.
+
+### Tray icon: a badge, not a template
+
+`glyph_icon` now forks. macOS keeps the bare template glyph (the menu bar
+recolours it). **Windows and Linux get the brand badge** — the glyph on a
+rounded racing-green square — because nothing recolours a template there: the
+pure-black glyph this ships was invisible on the default dark Windows taskbar,
+which is precisely what "WhisperPush ne se met pas dans la barre" was. A badge
+carries its own background, so it reads on any panel, and recording inverts it
+(citron ground, green waves). It is rendered at `SM_CXSMICON` on Windows rather
+than handing Shell_NotifyIcon a 128 px image to downscale, which washed the
+3 px waves out to nothing. Invariants are unit-tested (`badge_image`).
+
+**Windows 11 hides every new notification-area icon** in the overflow flyout
+until the user drags it out. `tray/windows_shell.rs::promote` finds our subkey
+under `HKCU\Control Panel\NotifyIconSettings` (matched by `ExecutablePath`) and
+sets `IsPromoted=1` — the same thing the drag does. Explorer writes that key
+when the icon registers, so it runs after the tray is up and again 3 s later.
+Windows 10 keeps the equivalent in an opaque `IconStreams` blob with no
+supported writer; there the Ready screen just says where to look.
+
+The same module claims the **AppUserModelID** `com.whisper-push.app`
+(`SetCurrentProcessExplicitAppUserModelID` + an HKCU
+`Software\Classes\AppUserModelId` entry, and the MSI shortcut carries the
+matching property). Without it `notify-rust` falls back to PowerShell's AUMID
+and every notification looks like it came from PowerShell — or never appears.
+
+### Hotkeys: live rebind and capture everywhere
+
+`hotkey/combo.rs` holds the parts that were about to be written twice: parsing
+(`"cmd+shift+space"`), matching (sides, combos, hold vs toggle, auto-repeat) and
+the capture gesture (tap a modifier ⇒ hold binding; modifiers+key ⇒ toggle). The
+Windows hook and the Linux evdev readers now only translate their native codes
+to `combo::Key` and feed edges to a shared `Matcher` behind a `Mutex` — so
+**"Set Custom Hotkey…" and instant rebinding work on all three platforms**
+(they were macOS-only, and the menu said "restart to apply" elsewhere), and the
+combo presets are no longer hidden off macOS. It is pure logic with unit tests,
+which is the only honest way to write it on a Mac.
+
+### Windows packaging
+
+- **GUI subsystem** (`#![cfg_attr(windows, windows_subsystem = "windows")]`): a
+  shortcut launch no longer opens a console window, and closing a terminal can't
+  kill the daemon. `attach_parent_console()` re-hooks stdout/stderr when we WERE
+  started from a terminal, so `--doctor`, `dict list` and the wizard's JSON still
+  print — it must run before clap, which writes `--help` itself.
+- **`wix/main.wxs` rewritten**: product name "Whisper Push", **per-user install**
+  into `%LOCALAPPDATA%\Programs` (no UAC prompt, and the in-app updater can
+  replace files), a **Start Menu shortcut** carrying the AppUserModelID, the app
+  icon in Add/Remove Programs, and **"Launch Whisper Push" ticked on the last
+  page** — the first launch is what runs the wizard. The MSI deliberately does
+  NOT write the autostart value: `src/autostart.rs` owns that key, and two
+  owners means a repair silently re-enables what the user turned off.
+- **`wix/whisper-push.ico`** is committed (like the DMG artwork) and embedded
+  into the .exe by `build.rs` via `winresource`, so Explorer, the taskbar and
+  alt-tab show the brand mark. Re-derive it with `make windows-icon`
+  (`scripts/make-ico.py` packs PNGs into a Vista-style .ico — no image library).
+
+### Linux packaging
+
+`libayatana-appindicator3-1` is now in `depends` (see Pièges — without it the
+binary doesn't start), `gnome-shell-extension-appindicator` is a `recommends`,
+and the `.desktop` file sets `StartupNotify=false` (a tray app never opens a
+window, so the launcher spun a "starting…" cursor for 30 s).
+
+### Permissions are a per-platform list
+
+`PermissionStatus` is a `Vec<Perm>`, not three macOS-shaped fields: macOS gates
+Microphone + Accessibility + Input Monitoring, Windows gates the microphone
+(`CapabilityAccessManager` consent, opened with `ms-settings:privacy-microphone`),
+Linux gates keyboard access (`input` group, granted through `pkexec usermod`).
+The tray submenu, the wizard rows, `--permissions-json` and `guided_setup` all
+iterate that list, so adding or dropping one per platform is a one-line change
+in `permissions.rs`. The JSON keys stay `microphone` / `accessibility` /
+`input_monitoring` because the macOS SwiftUI wizard reads them.
+
+### One downloader
+
+`model_manager::{download_plan, missing_files, download}` is now the single
+place that knows where a model comes from. It replaced the two `hf-hub` copies
+in `transcribe` and `parakeet` (which also cached every model twice on disk),
+reports progress for the wizard, writes to `<dest>.part` and renames, and owns
+the Parakeet int8↔fp32 variant swap (same filenames, so "the file exists" is the
+wrong question — it wipes the directory first). Voxtral had no Rust downloader
+at all before this, so it was macOS-wizard-only.
 
 ## Adaptive dictation (learned word correction)
 

@@ -40,7 +40,15 @@ jobs:
         run: cargo check ${{ matrix.cargo_flags }}
       - name: Build
         run: cargo build ${{ matrix.cargo_flags }}
+      # Run the unit tests on EVERY platform, not just macOS: the hotkey key
+      # tables, the tray badge and the permission model are all `#[cfg]`-gated,
+      # so a macOS-only test run never compiles — let alone exercises — the
+      # Windows and Linux halves of them.
+      - name: Unit tests
+        run: cargo test --lib ${{ matrix.cargo_flags }}
 
+  # macOS runs the same unit tests with Metal enabled (the check matrix above
+  # builds macOS without an explicit feature flag).
   test:
     runs-on: macos-14
     name: Tests (macOS)

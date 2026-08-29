@@ -28,12 +28,15 @@ pub fn send(title: &str, body: &str) {
 
     #[cfg(not(target_os = "macos"))]
     {
-        if let Err(e) = notify_rust::Notification::new()
-            .summary(title)
-            .body(body)
-            .appname("Whisper Push")
-            .show()
-        {
+        let mut n = notify_rust::Notification::new();
+        n.summary(title).body(body).appname(APP_NAME);
+        // Windows attributes a toast to an AppUserModelID. Without ours,
+        // notify-rust falls back to PowerShell's — the toast then looks like it
+        // came from PowerShell, or doesn't appear at all where those are off.
+        // `tray::windows_app_id` registers it at startup.
+        #[cfg(target_os = "windows")]
+        n.app_id(crate::tray::windows_app_id());
+        if let Err(e) = n.show() {
             warn!("Notification failed: {e}");
         }
     }

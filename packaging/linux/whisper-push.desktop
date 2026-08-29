@@ -6,6 +6,9 @@ Comment=Push-to-talk voice dictation, 100% local
 Exec=whisper-push
 Icon=whisper-push
 Terminal=false
-StartupNotify=true
+# The app has no window of its own: it lives in the tray, so the launcher must
+# not wait for one (StartupNotify=true left the cursor spinning for 30 s).
+StartupNotify=false
 Categories=AudioVideo;Audio;Utility;
 Keywords=dictation;voice;speech;whisper;transcription;
+X-GNOME-UsesNotifications=true

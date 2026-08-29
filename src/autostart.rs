@@ -125,36 +125,74 @@ mod linux {
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use tracing::info;
+    //! The HKCU Run value. Written through the registry API rather than by
+    //! shelling out to `reg.exe`: the daemon is a GUI-subsystem binary, so
+    //! spawning a console program flashes a black window on the user's screen —
+    //! and this runs at the end of onboarding, right as they finish setup.
+    //!
+    //! This module is the ONE owner of the value; the MSI deliberately doesn't
+    //! write it, so a repair or reinstall can't silently re-enable an autostart
+    //! the user turned off.
+    use tracing::{info, warn};
+    use windows::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
+        RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW,
+    };
+    use windows::core::HSTRING;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE: &str = "WhisperPush";
 
     pub fn enable() {
         let exe = std::env::current_exe().unwrap_or_default();
-        let _ = std::process::Command::new("reg")
-            .args([
-                "add",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "WhisperPush",
-                "/t",
-                "REG_SZ",
-                "/d",
-                &exe.display().to_string(),
-                "/f",
-            ])
-            .output();
-        info!("Auto-start enabled (Registry)");
+        // Quoted: the install path contains a space ("…\Whisper Push\bin\…"),
+        // and an unquoted Run value would be parsed as a command plus arguments.
+        let command = format!("\"{}\"", exe.display());
+        unsafe {
+            let mut hkey = HKEY::default();
+            let opened = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(RUN_KEY),
+                Some(0),
+                None,
+                REG_OPTION_NON_VOLATILE,
+                KEY_SET_VALUE,
+                None,
+                &mut hkey,
+                None,
+            );
+            if opened.is_err() {
+                warn!("Auto-start: can't open the Run key");
+                return;
+            }
+            let wide: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
+            let bytes = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
+            let ok = RegSetValueExW(hkey, &HSTRING::from(VALUE), Some(0), REG_SZ, Some(bytes));
+            let _ = RegCloseKey(hkey);
+            match ok {
+                Ok(()) => info!("Auto-start enabled: {command}"),
+                Err(e) => warn!("Auto-start: {e}"),
+            }
+        }
     }
 
     pub fn disable() {
-        let _ = std::process::Command::new("reg")
-            .args([
-                "delete",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-                "/v",
-                "WhisperPush",
-                "/f",
-            ])
-            .output();
+        unsafe {
+            let mut hkey = HKEY::default();
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(RUN_KEY),
+                Some(0),
+                KEY_SET_VALUE,
+                &mut hkey,
+            )
+            .is_err()
+            {
+                return;
+            }
+            let _ = RegDeleteValueW(hkey, &HSTRING::from(VALUE));
+            let _ = RegCloseKey(hkey);
+        }
         info!("Auto-start disabled");
     }
 }

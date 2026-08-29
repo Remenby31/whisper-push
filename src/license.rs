@@ -736,38 +736,76 @@ pub fn submenu_title() -> String {
     }
 }
 
+/// The license as every UI needs it: the daemon's verdict plus the display
+/// fields (plan, purchase email, renewal date, the key itself). ONE producer —
+/// `status_json` is this serialized, and the in-process setup UI reads the
+/// struct directly instead of parsing its own output back.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LicenseSnapshot {
+    /// licensed | trial | grace_offline | expired | disabled | locked
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub days_left: Option<u64>,
+    /// lifetime | subscription — empty unless licensed.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// YYYY-MM-DD, subscriptions only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub renews: Option<String>,
+    /// The user's own key, so a second device can be activated without digging
+    /// through the purchase email. Local-only: it already sits in license.json.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl LicenseSnapshot {
+    pub fn licensed(&self) -> bool {
+        self.status == "licensed"
+    }
+}
+
+/// Current license, as a struct.
+pub fn snapshot() -> LicenseSnapshot {
+    let mut snap = LicenseSnapshot::default();
+    match status() {
+        LicenseStatus::Trial { days_left } => {
+            snap.status = "trial".into();
+            snap.days_left = Some(days_left);
+        }
+        LicenseStatus::Licensed(kind) => {
+            let s = read();
+            snap.status = "licensed".into();
+            snap.kind = match kind {
+                LicensedKind::Lifetime => "lifetime",
+                LicensedKind::Subscription { .. } => "subscription",
+            }
+            .into();
+            snap.email = s.customer_email.clone();
+            snap.renews = s
+                .expires_at_raw
+                .as_deref()
+                .and_then(|d| d.get(0..10))
+                .map(str::to_string);
+            snap.key = s.license_key.clone();
+        }
+        LicenseStatus::GraceOffline { days_left } => {
+            snap.status = "grace_offline".into();
+            snap.days_left = Some(days_left);
+        }
+        LicenseStatus::Expired => snap.status = "expired".into(),
+        LicenseStatus::Disabled => snap.status = "disabled".into(),
+        LicenseStatus::Locked => snap.status = "locked".into(),
+    }
+    snap
+}
+
 /// Machine-readable status (for the CLI / Swift onboarding). Licensed states
 /// also carry the purchase email and, for subscriptions, the renewal date, so
 /// the modal can show "Licensed to …" without a second round-trip.
 pub fn status_json() -> String {
-    use serde_json::json;
-    let v = match status() {
-        LicenseStatus::Trial { days_left } => json!({"status": "trial", "days_left": days_left}),
-        LicenseStatus::Licensed(kind) => {
-            let s = read();
-            let renews = s.expires_at_raw.as_deref().and_then(|d| d.get(0..10));
-            json!({
-                "status": "licensed",
-                "kind": match kind {
-                    LicensedKind::Lifetime => "lifetime",
-                    LicensedKind::Subscription { .. } => "subscription",
-                },
-                "email": s.customer_email,
-                "renews": renews,
-                // The user's own key, so they can copy it onto another device
-                // without digging through their purchase email. Local-only: it
-                // already sits in license.json next to this binary.
-                "key": s.license_key,
-            })
-        }
-        LicenseStatus::GraceOffline { days_left } => {
-            json!({"status": "grace_offline", "days_left": days_left})
-        }
-        LicenseStatus::Expired => json!({"status": "expired"}),
-        LicenseStatus::Disabled => json!({"status": "disabled"}),
-        LicenseStatus::Locked => json!({"status": "locked"}),
-    };
-    v.to_string()
+    serde_json::to_string(&snapshot()).unwrap_or_else(|_| "{\"status\":\"locked\"}".into())
 }
 
 /// A key as it may appear in a log or a support paste: enough to tell two keys

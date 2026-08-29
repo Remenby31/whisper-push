@@ -1,5 +1,5 @@
 # Whisper Push — Rust build helpers
-.PHONY: dmg-artwork build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
+.PHONY: dmg-artwork windows-icon setup-shots build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
@@ -189,6 +189,30 @@ dmg-artwork:
 	@tiffutil -cathidpicheck resources/dmg-background.png resources/dmg-background@2x.png \
 		-out resources/dmg-background.tiff > /dev/null
 	@echo "✓ DMG artwork re-rendered (1x + 2x → resources/dmg-background.tiff)"
+
+# Re-derive the committed Windows icon from the brand master. The .ico is the
+# app's face on Windows: embedded into whisper-push.exe by build.rs (Explorer,
+# taskbar, alt-tab), used by the Start Menu shortcut and by Add/Remove Programs.
+# Committed like the DMG artwork, so a Windows build needs no macOS tooling.
+windows-icon:
+	@rm -rf build/ico && mkdir -p build/ico
+	@for s in 16 32 48 64 128 256; do \
+		sips -Z $$s -s format png macos/Onboarding/Sources/Resources/AppIcon.png \
+			--out build/ico/$$s.png > /dev/null; \
+	done
+	@python3 scripts/make-ico.py wix/whisper-push.ico \
+		16:build/ico/16.png 32:build/ico/32.png 48:build/ico/48.png \
+		64:build/ico/64.png 128:build/ico/128.png 256:build/ico/256.png
+	@echo "✓ wix/whisper-push.ico re-rendered (6 sizes)"
+
+# Screenshot every screen of the cross-platform setup wizard (src/setup) so it
+# can be compared side by side with the SwiftUI one. Renders through the real
+# GL path — no system screen-recording permission needed.
+setup-shots:
+	@cargo build 2>/dev/null
+	@rm -rf build/setup-shots
+	@./target/debug/whisper-push --setup-ui --screenshot-to build/setup-shots 2>/dev/null
+	@echo "✓ wizard screens → build/setup-shots/"
 
 # Create a ZIP of the signed .app bundle (for auto-updater downloads).
 # Uses ditto to preserve code signatures and extended attributes.
