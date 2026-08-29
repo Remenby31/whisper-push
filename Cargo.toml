@@ -2,6 +2,9 @@
 name = "whisper-push"
 version = "1.2.7"
 edition = "2024"
+# eframe 0.36 (the setup wizard) sets the floor; without this, a older
+# toolchain fails somewhere inside egui instead of saying what it needs.
+rust-version = "1.95"
 authors = ["Whisper Push contributors <hello@whisperpush.com>"]
 description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
 license = "MIT"

@@ -5,7 +5,7 @@ Push-to-talk voice dictation, 100% local. Cross-platform (macOS, Linux, Windows)
 ## Build & Run
 
 ```bash
-# Prerequisites: Rust 1.83+, cmake
+# Prerequisites: Rust 1.95+ (eframe 0.36, used by the setup wizard), cmake
 
 # Build (debug)
 cargo build
@@ -28,6 +28,14 @@ make dmg
 # Run directly
 cargo run -- --doctor    # check environment
 cargo run                # start daemon
+
+# Cross-platform setup wizard (src/setup) — runs on macOS too, for review
+make setup-shots                                  # every screen → build/setup-shots/
+cargo run -- --setup-ui --design-preview          # click through it (← / → to sweep)
+cargo run -- --setup-ui license                   # just the license modal
+
+# Windows app icon, re-derived from the brand master (needs sips + python3)
+make windows-icon
 ```
 
 ## Structure
@@ -49,25 +57,28 @@ whisper-push/
 │   ├── transcribe/
 │   │   └── mod.rs            # whisper-rs load/unload/transcribe + HF model download
 │   ├── hotkey/
-│   │   ├── mod.rs            # Platform dispatch
+│   │   ├── mod.rs            # Platform dispatch (start / rebind / capture)
+│   │   ├── combo.rs          # shared parse + match + capture (Windows & Linux)
 │   │   ├── macos.rs          # NSEvent global monitor (objc2 + block2)
 │   │   ├── linux.rs          # evdev keyboard reading
 │   │   └── windows.rs        # WH_KEYBOARD_LL hook
 │   ├── paste/
 │   │   └── mod.rs            # arboard clipboard + enigo keystroke (Cmd/Ctrl+V)
+│   ├── dialog.rs             # one dialog API (osascript on macOS, egui elsewhere)
 │   ├── setup/                # Cross-platform wizard + license modal (egui)
 │   │   ├── mod.rs            # screens, flow, --setup-ui entry, screenshot mode
 │   │   ├── theme.rs          # port of the SwiftUI Theme.swift (palette/widgets)
 │   │   ├── icons.rs          # Lucide glyphs drawn as paths
 │   │   └── dialog.rs         # the branded Add Word… / Edit-Delete dialogs
-│   ├── dialog.rs             # one dialog API (osascript on macOS, egui elsewhere)
-│   ├── hotkey/combo.rs       # shared parse/match/capture for Windows + Linux
 │   └── tray/
 │       ├── mod.rs            # tray-icon + muda menu + event loop orchestration
 │       └── windows_shell.rs  # Win11 tray un-hiding + AppUserModelID
 ├── resources/
 │   ├── Info.plist            # macOS app bundle metadata
 │   └── entitlements.plist    # macOS entitlements
+├── wix/
+│   ├── main.wxs              # Windows MSI (per-user, Start Menu, launch-at-end)
+│   └── whisper-push.ico      # app icon (make windows-icon re-derives it)
 ├── sounds/
 │   ├── start.wav             # Recording start sound
 │   └── stop.wav              # Recording stop sound

@@ -111,7 +111,7 @@ Settings are in the menu bar. Config file location:
 ## Building from Source
 
 ```bash
-# Prerequisites: Rust 1.83+, cmake
+# Prerequisites: Rust 1.95+, cmake
 
 # macOS (all engines included by default)
 cargo build --release
