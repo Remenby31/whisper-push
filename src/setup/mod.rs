@@ -1612,10 +1612,11 @@ fn grant(kind: PermKind) {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        // No one-tap prompt exists off macOS: Windows' microphone switch is a
+        // Settings toggle, and Linux's grant IS the polkit dialog `request_one`
+        // raises. Fire both — `open_settings_for` is a no-op on Linux.
         crate::permissions::request_one(kind);
-        if crate::permissions::check(kind) != PermState::Granted {
-            crate::permissions::open_settings_for(kind);
-        }
+        crate::permissions::open_settings_for(kind);
     }
 }
 
