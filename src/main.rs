@@ -19,6 +19,7 @@ mod history;
 mod hotkey;
 mod license;
 mod model_manager;
+mod net;
 mod notify;
 mod onboarding;
 mod overlay;

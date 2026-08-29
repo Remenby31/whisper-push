@@ -110,8 +110,11 @@ crossbeam-channel = "0.5"
 # Single instance
 fs4 = "0.12"
 
-# HTTP client (sync, lightweight) — update checker, license API, enrichment
-ureq = "3"
+# HTTP client (sync, lightweight) — update checker, license API, model
+# downloads, enrichment. `platform-verifier`: verify TLS against the OS trust
+# store instead of ureq's bundled Mozilla roots, so a managed machine that
+# intercepts TLS (corporate proxy) can still reach anything at all. See src/net.rs.
+ureq = { version = "3", features = ["platform-verifier"] }
 
 # Error handling
 anyhow = "1"
@@ -231,8 +234,9 @@ priority = "optional"
 # the binary fails to start at all (ld.so can't find libayatana-appindicator3.so.1)
 # — the app looked "installed but dead". libgl1 is for the setup wizard's OpenGL
 # window (src/setup); without it the wizard can't open and onboarding falls back
-# to the popup.
-depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0, libayatana-appindicator3-1, libgl1"
+# to the popup. ca-certificates because TLS is now verified against the system
+# trust store (src/net.rs), which on Linux means /etc/ssl/certs.
+depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0, libayatana-appindicator3-1, libgl1, ca-certificates"
 # GNOME shows no tray at all without the AppIndicator extension (Ubuntu ships it
 # preinstalled, vanilla GNOME does not). Recommended, not required: KDE, XFCE,
 # Cinnamon and the rest need nothing.

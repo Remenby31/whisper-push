@@ -12,6 +12,7 @@ pub mod history;
 pub mod hotkey;
 pub mod license;
 pub mod model_manager;
+pub mod net;
 pub mod notify;
 pub mod onboarding;
 pub mod overlay;

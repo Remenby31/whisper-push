@@ -297,16 +297,9 @@ fn fetch(f: &DownloadFile, on_bytes: &mut dyn FnMut(u64, u64)) -> anyhow::Result
     if let Some(parent) = f.dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let resp = ureq::get(&f.url)
-        .config()
-        // Bounded, but generous: a 2.5 GB model on a slow line is legitimate.
-        // Without a ceiling a half-open socket would hang the caller forever.
-        .timeout_global(Some(std::time::Duration::from_secs(3600)))
-        .build()
-        .header(
-            "User-Agent",
-            &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),
-        )
+    // Bounded, but generous: a 2.5 GB model on a slow line is legitimate.
+    // Without a ceiling a half-open socket would hang the caller forever.
+    let resp = crate::net::get(&f.url, std::time::Duration::from_secs(3600))
         .call()
         .map_err(|e| anyhow::anyhow!("{}: {e}", f.url))?;
 

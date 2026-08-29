@@ -277,6 +277,13 @@ fn custom_hotkey_label(current: Option<String>) -> String {
 /// `pending_release_page` (click then opens the releases page).
 const OPEN_RELEASES_HINT: &str = "open download page";
 
+/// Menu text for "a newer version exists, but this platform installs it by
+/// hand". The trailing hint is load-bearing: `Event::UpdateStatus` matches on it
+/// to arm the click that opens the download page instead of an in-app install.
+pub fn manual_update_label(version: &str) -> String {
+    format!("\u{2b06} v{version} available \u{2502} {OPEN_RELEASES_HINT}")
+}
+
 /// The application struct that implements winit's ApplicationHandler.
 struct App {
     state: AppState,
@@ -1200,12 +1207,12 @@ impl App {
                                     }
                                     Ok(UpdateCheck::NoAsset { version }) => {
                                         crate::notify::app(&format!(
-                                            "v{version} is out, but the update package for \
-                                             this platform wasn't found in the release. Use \
-                                             the menu to open the download page."
+                                            "v{version} is out. Whisper Push updates itself \
+                                             only on macOS \u{2014} use the menu to open the \
+                                             download page."
                                         ));
-                                        let _ = tx.send(Event::UpdateStatus(format!(
-                                            "\u{2b06} v{version} available \u{2502} {OPEN_RELEASES_HINT}"
+                                        let _ = tx.send(Event::UpdateStatus(manual_update_label(
+                                            &version,
                                         )));
                                     }
                                     Err(e) => {

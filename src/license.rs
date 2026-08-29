@@ -423,11 +423,12 @@ enum NetErr {
 /// `http_status_as_error(false)` makes ureq hand back non-2xx responses (LS uses
 /// 400 with a JSON `error` body) instead of erroring, so we can read the body.
 fn post_form(url: &str, params: &[(&str, &str)]) -> Result<Value, NetErr> {
-    let mut resp = ureq::post(url)
+    let mut resp = crate::net::post(url, HTTP_TIMEOUT)
         .header("Accept", "application/json")
         .config()
+        // Hand back non-2xx responses (LS uses 400 with a JSON `error` body)
+        // instead of erroring, so we can read the body.
         .http_status_as_error(false)
-        .timeout_global(Some(HTTP_TIMEOUT))
         .build()
         .send_form(params.iter().copied())
         .map_err(|_| NetErr::Offline)?;
