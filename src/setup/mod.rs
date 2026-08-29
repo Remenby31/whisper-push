@@ -62,7 +62,7 @@ pub fn run(
 ) -> anyhow::Result<()> {
     // A dialog is its own tiny window, not a wizard screen.
     if let Mode::Dialog(spec) = mode {
-        return dialog::run(spec);
+        return dialog::run(spec, shots);
     }
     let icon = theme::app_icon_rgba(64).map(|(w, h, rgba)| egui::IconData {
         rgba,
@@ -213,17 +213,7 @@ impl App {
         design_preview: bool,
         shots: Option<std::path::PathBuf>,
     ) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
-        // The wizard is a light, branded surface (racing green on cream) in both
-        // OS themes: a dark-mode machine must not get dark-on-dark, and the
-        // screens must look the same everywhere. Same call as the SwiftUI
-        // wizard's `.preferredColorScheme(.light)`.
-        cc.egui_ctx.all_styles_mut(|style| {
-            style.visuals.panel_fill = theme::CREAM;
-            style.visuals.window_fill = theme::CREAM;
-            style.visuals.override_text_color = Some(theme::GREEN);
-            style.spacing.item_spacing = Vec2::new(8.0, 8.0);
-        });
+        theme::apply(&cc.egui_ctx);
 
         let hw = crate::hardware::detect();
         let recommended =

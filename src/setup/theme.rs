@@ -55,11 +55,37 @@ pub fn mono(size: f32) -> FontId {
     FontId::new(size, egui::FontFamily::Name(MONO.into()))
 }
 
+/// Install the fonts and the brand palette on a context. Both windows (the
+/// wizard and the dialogs) go through here, so a text field's focus ring can't
+/// end up egui's default blue in one of them and racing green in the other.
+///
+/// The wizard is a light, branded surface in BOTH OS themes — a dark-mode
+/// machine must not get dark-on-dark, and the screens must look the same
+/// everywhere. Same intent as the SwiftUI wizard's `.preferredColorScheme(.light)`.
+pub fn apply(ctx: &egui::Context) {
+    install_fonts(ctx);
+    ctx.all_styles_mut(|style| {
+        let v = &mut style.visuals;
+        v.panel_fill = CREAM;
+        v.window_fill = CREAM;
+        v.override_text_color = Some(GREEN);
+        // Text selection and focus: brand green, never egui's blue.
+        v.selection.bg_fill = blend(CITRON, WHITE, 0.6);
+        v.selection.stroke = Stroke::new(1.0, GREEN);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, green_a(0.15));
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, green_a(0.2));
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, green_a(0.45));
+        v.widgets.active.bg_stroke = Stroke::new(1.5, GREEN);
+        v.widgets.open.bg_stroke = Stroke::new(1.0, green_a(0.3));
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+    });
+}
+
 /// Load the platform's UI font so the wizard reads as a native app on each OS
 /// (Segoe UI on Windows, the fontconfig `sans-serif` on Linux, SF on macOS)
 /// rather than egui's bundled Ubuntu. Falls back to egui's own faces for any
 /// slot we can't resolve — a missing font must never leave the wizard blank.
-pub fn install_fonts(ctx: &egui::Context) {
+fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
 
     let mut register = |name: &str, candidates: &[String], fallback: &egui::FontFamily| {

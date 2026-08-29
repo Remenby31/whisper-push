@@ -111,7 +111,8 @@ struct Cli {
     design_preview: bool,
 
     /// With `--setup-ui`: render every screen to PNGs in this directory and
-    /// exit. Implies --design-preview.
+    /// exit (with `--setup-ui dialog`, the PATH of the single PNG to write).
+    /// Implies --design-preview.
     #[arg(long, hide = true, value_name = "DIR")]
     screenshot_to: Option<PathBuf>,
 }

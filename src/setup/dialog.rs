@@ -9,11 +9,15 @@ use super::theme;
 use crate::dialog::{Kind, Spec};
 use eframe::egui::{self, Rect};
 
-/// Show the dialog and block until it is answered or closed.
-pub fn run(spec: Spec) -> anyhow::Result<()> {
+/// Show the dialog and block until it is answered or closed. `shot` renders one
+/// frame to that PNG and exits instead — this window only ever runs on Windows
+/// and Linux, so a way to look at it from a Mac is the difference between
+/// reviewing it and hoping.
+pub fn run(spec: Spec, shot: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    // Sized to the content: a message, maybe a field, and one row of buttons.
     let (w, h) = match spec.kind {
-        Kind::Text => (420.0, 190.0),
-        _ => (420.0, 160.0),
+        Kind::Text => (420.0, 172.0),
+        _ => (420.0, 132.0),
     };
     let icon = theme::app_icon_rgba(64).map(|(iw, ih, rgba)| egui::IconData {
         rgba,
@@ -38,7 +42,7 @@ pub fn run(spec: Spec) -> anyhow::Result<()> {
             centered: true,
             ..Default::default()
         },
-        Box::new(move |cc| Ok(Box::new(DialogApp::new(cc, spec)))),
+        Box::new(move |cc| Ok(Box::new(DialogApp::new(cc, spec, shot)))),
     )
     .map_err(|e| anyhow::anyhow!("dialog failed: {e}"))
 }
@@ -47,19 +51,21 @@ struct DialogApp {
     spec: Spec,
     value: String,
     done: bool,
+    /// Screenshot mode: where to write, and how many frames to let settle first
+    /// (fonts upload on frame 1).
+    shot: Option<std::path::PathBuf>,
+    frames: u32,
 }
 
 impl DialogApp {
-    fn new(cc: &eframe::CreationContext<'_>, spec: Spec) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
-        cc.egui_ctx.all_styles_mut(|style| {
-            style.visuals.panel_fill = theme::CREAM;
-            style.visuals.override_text_color = Some(theme::GREEN);
-        });
+    fn new(cc: &eframe::CreationContext<'_>, spec: Spec, shot: Option<std::path::PathBuf>) -> Self {
+        theme::apply(&cc.egui_ctx);
         Self {
             value: spec.prefill.clone(),
             spec,
             done: false,
+            shot,
+            frames: 0,
         }
     }
 
@@ -89,6 +95,9 @@ impl eframe::App for DialogApp {
             return;
         }
         let ctx = ui.ctx().clone();
+        if self.shot.is_some() {
+            self.drive_screenshot(&ctx);
+        }
         // Escape always cancels, in every kind.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.answer(&ctx, None);
@@ -168,5 +177,44 @@ impl eframe::App for DialogApp {
                     self.answer(&ctx, value);
                 }
             });
+    }
+}
+
+impl DialogApp {
+    /// Grab one frame and quit — see `run`'s `shot`.
+    fn drive_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.shot.clone() else {
+            return;
+        };
+        let image = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        if let Some(image) = image {
+            let rgba: Vec<u8> = image
+                .pixels
+                .iter()
+                .flat_map(|p| [p.r(), p.g(), p.b(), p.a()])
+                .collect();
+            if let Some(img) =
+                image::RgbaImage::from_raw(image.width() as u32, image.height() as u32, rgba)
+            {
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = img.save(&path);
+                println!("{}", path.display());
+            }
+            self.done = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        self.frames += 1;
+        if self.frames >= 3 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        ctx.request_repaint();
     }
 }
