@@ -151,6 +151,21 @@
                             Type='integer'
                             Value='1'
                             KeyPath='yes'/>
+
+                        <!-- Clean up what the APP wrote, on uninstall only. The
+                             installer must never create these: src/autostart.rs
+                             owns the Run value (the wizard's "Launch at login"
+                             toggle), and two owners means a repair silently
+                             re-enables what the user turned off. But leaving them
+                             behind means a startup entry pointing at a deleted
+                             binary, which Windows then reports as a broken
+                             startup item forever. -->
+                        <RemoveRegistryValue Root='HKCU'
+                            Key='Software\Microsoft\Windows\CurrentVersion\Run'
+                            Name='WhisperPush'/>
+                        <RemoveRegistryKey Root='HKCU'
+                            Key='Software\Classes\AppUserModelId\com.whisper-push.app'
+                            Action='removeOnUninstall'/>
                     </Component>
                 </Directory>
             </Directory>

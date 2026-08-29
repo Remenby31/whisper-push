@@ -32,8 +32,8 @@ pub fn paste_text(text: &str) -> Result<()> {
     // Save current clipboard content
     let saved = clipboard.get_text().ok();
 
-    // Set our text
-    clipboard.set_text(text)?;
+    // Set our text.
+    set_text_retrying(&mut clipboard, text)?;
 
     // Small delay for clipboard to be ready
     std::thread::sleep(CLIPBOARD_SETTLE);
@@ -50,7 +50,7 @@ pub fn paste_text(text: &str) -> Result<()> {
     if let Some(old) = saved {
         // Brief delay before restoring
         std::thread::sleep(RESTORE_SETTLE);
-        if let Err(e) = clipboard.set_text(&old) {
+        if let Err(e) = set_text_retrying(&mut clipboard, &old) {
             warn!("Could not restore clipboard: {e}");
         }
     }
@@ -61,6 +61,39 @@ pub fn paste_text(text: &str) -> Result<()> {
     // Snapshot this field so a later edit can be auto-learned.
     crate::dictionary::arm_correction_capture();
     Ok(())
+}
+
+/// Number of attempts at writing the clipboard, and the pause between them.
+/// On Windows the clipboard is a single global lock: `OpenClipboard` fails with
+/// ACCESS_DENIED while any other process holds it, and clipboard managers,
+/// Office and browsers all grab it for a few milliseconds at a time. One failed
+/// attempt used to mean a whole dictation thrown away, so retry briefly — the
+/// total is well under the paste latency the user already waits through.
+const CLIPBOARD_TRIES: u32 = 6;
+const CLIPBOARD_RETRY: Duration = Duration::from_millis(40);
+
+/// Write the clipboard, retrying while another process holds it.
+fn set_text_retrying(clipboard: &mut arboard::Clipboard, text: &str) -> Result<()> {
+    let mut last = None;
+    for attempt in 0..CLIPBOARD_TRIES {
+        match clipboard.set_text(text) {
+            Ok(()) => {
+                if attempt > 0 {
+                    info!("Clipboard was busy — set on attempt {}", attempt + 1);
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(CLIPBOARD_RETRY);
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "clipboard stayed locked by another app after {} tries: {}",
+        CLIPBOARD_TRIES,
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 /// Type text progressively at the cursor — for streaming transcription.

@@ -376,7 +376,7 @@ fn attach_parent_console() {
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows::Win32::System::Console::{
-        ATTACH_PARENT_PROCESS, AttachConsole, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
+        ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE,
         STD_OUTPUT_HANDLE, SetStdHandle,
     };
     use windows::core::HSTRING;
@@ -385,12 +385,16 @@ fn attach_parent_console() {
         if AttachConsole(ATTACH_PARENT_PROCESS).is_err() {
             return; // launched from a shortcut / autostart: nothing to attach to
         }
+        // Only fill in handles the shell did NOT give us. `whisper-push --models
+        // > out.txt` passes a real file handle for stdout; overwriting it with
+        // CONOUT$ would send the output to the console and leave the file empty.
+        let missing = |which| GetStdHandle(which).is_none_or(|h| h.is_invalid() || h.0.is_null());
         // Rust's stdio fetches the handle on every write, so replacing the
         // process's std handles is enough — no re-opening of `std::io::stdout`.
-        let open = |name: &str, access: u32| -> Option<HANDLE> {
+        let open = |name: &str| -> Option<HANDLE> {
             let h = CreateFileW(
                 &HSTRING::from(name),
-                access,
+                GENERIC_READ.0 | GENERIC_WRITE.0,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
@@ -400,12 +404,20 @@ fn attach_parent_console() {
             .ok()?;
             (h != INVALID_HANDLE_VALUE).then_some(h)
         };
-        if let Some(h) = open("CONOUT$", GENERIC_READ.0 | GENERIC_WRITE.0) {
-            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
-            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+        if missing(STD_OUTPUT_HANDLE) || missing(STD_ERROR_HANDLE) {
+            if let Some(h) = open("CONOUT$") {
+                if missing(STD_OUTPUT_HANDLE) {
+                    let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+                }
+                if missing(STD_ERROR_HANDLE) {
+                    let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+                }
+            }
         }
-        if let Some(h) = open("CONIN$", GENERIC_READ.0 | GENERIC_WRITE.0) {
-            let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+        if missing(STD_INPUT_HANDLE) {
+            if let Some(h) = open("CONIN$") {
+                let _ = SetStdHandle(STD_INPUT_HANDLE, h);
+            }
         }
     }
 }
@@ -570,6 +582,35 @@ mod doctor {
             println!("\nModel:     ggml-large-v3-turbo-q5_0 (ready)");
         } else {
             println!("\nModel:     not downloaded (will download on first use)");
+        }
+
+        // Where this install actually lives and whether it comes back on login —
+        // the two questions every "it stopped working" report needs answered,
+        // and both are invisible from the menu.
+        println!("\nInstall:");
+        println!(
+            "  Binary:    {}",
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "?".into())
+        );
+        println!("  Data:      {}", crate::config::data_dir().display());
+        println!("  Config:    {}", crate::config::config_path().display());
+        match crate::autostart::registered_exe() {
+            Some(p) => {
+                let current = std::env::current_exe().unwrap_or_default();
+                let stale = p != current;
+                println!(
+                    "  Autostart: on \u{2192} {}{}",
+                    p.display(),
+                    if stale {
+                        "  (STALE — points elsewhere)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            None => println!("  Autostart: off"),
         }
 
         // Permissions — whatever THIS platform gates us on (see permissions.rs).
@@ -1153,6 +1194,19 @@ mod app {
         // and onboarding notifies well before the tray exists.
         #[cfg(target_os = "windows")]
         crate::tray::register_windows_app_id();
+
+        // Auto-start records an absolute path; the app moving (a Windows
+        // installer switching from Program Files to %LOCALAPPDATA%, a portable
+        // build dragged elsewhere) would otherwise leave a login entry aimed at
+        // a file that is gone, and the app just stops coming back after a reboot.
+        crate::autostart::repair();
+
+        // Windows only, and only the once: app data moves out of the roaming
+        // profile (see config::data_dir). Reported here because it is decided
+        // while logging is still being set up.
+        if let Some(note) = crate::config::data_dir_migration_note() {
+            tracing::info!("{note}");
+        }
 
         // Arm the adaptive dictionary (load dictionary.toml, compile tables).
         crate::dictionary::init(cfg.dictionary_enabled);
