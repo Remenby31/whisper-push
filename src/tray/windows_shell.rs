@@ -27,19 +27,57 @@ use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 const ROOT: &str = r"Control Panel\NotifyIconSettings";
 
-/// Promote our notification-area icon out of the Windows 11 overflow flyout.
-/// Best effort and idempotent: any missing key (Windows 10, a locked-down
-/// policy) is logged and ignored — the icon still exists, just in the flyout.
+/// Where we remember that the one-time promotion has happened.
+const OWN_KEY: &str = r"Software\Whisper Push";
+const PROMOTED_VALUE: &str = "TrayPromoted";
+
+/// Delays at which to look for our NotifyIconSettings entry. Explorer creates it
+/// when the icon registers, but not always immediately — and giving up after one
+/// try was the difference between the icon being visible on first run and the
+/// user never finding it.
+const PROMOTE_ATTEMPTS: &[u64] = &[0, 2, 5, 15, 30];
+
+/// Promote our notification-area icon out of the Windows 11 overflow flyout —
+/// **once, ever**.
+///
+/// Once is the important part. Windows records the user's own choice in the same
+/// `IsPromoted` value, so re-promoting on every launch would silently undo a
+/// deliberate "hide this icon" and there would be no way to make it stick. The
+/// first run gets the icon in front of the user (which is the whole problem this
+/// solves); after that the taskbar is theirs.
+///
+/// Best effort throughout: a missing key (Windows 10, a locked-down policy) is
+/// logged and ignored — the icon still exists, just in the flyout.
 pub fn promote() {
+    if reg_str(OWN_KEY, PROMOTED_VALUE).is_some() {
+        debug!("tray pin: already done once — leaving the taskbar to the user");
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
     let exe = exe.to_string_lossy().to_lowercase();
-    match promote_matching(&exe) {
-        Ok(0) => debug!("tray pin: no NotifyIconSettings entry for {exe} (yet)"),
-        Ok(n) => info!("tray pin: promoted {n} notification-area entr{}", plural(n)),
-        Err(e) => warn!("tray pin: {e}"),
-    }
+    std::thread::spawn(move || {
+        for (i, delay) in PROMOTE_ATTEMPTS.iter().enumerate() {
+            if *delay > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(*delay));
+            }
+            match promote_matching(&exe) {
+                Ok(0) => debug!("tray pin: no entry for {exe} yet (attempt {})", i + 1),
+                Ok(n) => {
+                    info!("tray pin: promoted {n} notification-area entr{}", plural(n));
+                    // Remember, so the user's later choice is never overridden.
+                    let _ = set_string(OWN_KEY, PROMOTED_VALUE, "1");
+                    return;
+                }
+                Err(e) => {
+                    warn!("tray pin: {e}");
+                    return;
+                }
+            }
+        }
+        debug!("tray pin: Explorer never listed our icon — it stays in the overflow");
+    });
 }
 
 fn plural(n: usize) -> &'static str {

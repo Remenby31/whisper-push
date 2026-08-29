@@ -842,16 +842,12 @@ impl App {
             }
         }
         // Windows 11 files every new notification-area icon into the overflow
-        // flyout until the user drags it out. Explorer writes our entry when the
-        // icon registers, so promote it just after — and once more shortly
-        // after, since the entry can appear a beat later.
+        // flyout until the user drags it out. `promote` does that for them once,
+        // on its own thread — Explorer writes the entry we need some time after
+        // the icon registers, so it retries with a backoff.
         #[cfg(target_os = "windows")]
         if self.tray.is_some() {
             windows_shell::promote();
-            std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_secs(3));
-                windows_shell::promote();
-            });
         }
 
         // Prompt permissions after a short delay

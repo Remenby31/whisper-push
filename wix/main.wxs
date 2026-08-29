@@ -166,6 +166,12 @@
                         <RemoveRegistryKey Root='HKCU'
                             Key='Software\Classes\AppUserModelId\com.whisper-push.app'
                             Action='removeOnUninstall'/>
+                        <!-- Our own key, which the app also writes to (the
+                             one-shot "the tray icon has been un-hidden" marker).
+                             Removing the whole key leaves no trace behind. -->
+                        <RemoveRegistryKey Root='HKCU'
+                            Key='Software\Whisper Push'
+                            Action='removeOnUninstall'/>
                     </Component>
                 </Directory>
             </Directory>
