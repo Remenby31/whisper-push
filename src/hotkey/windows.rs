@@ -164,13 +164,11 @@ fn on_key(key: Key, pressed: bool) {
         return;
     }
 
-    let action = MATCHER.lock_safe().as_mut().and_then(|m| {
-        let a = m.on_key(key, pressed);
-        a.map(|a| (a, m.is_hold()))
-    });
-    let Some((action, _is_hold)) = action else {
-        return;
-    };
+    let action = MATCHER
+        .lock_safe()
+        .as_mut()
+        .and_then(|m| m.on_key(key, pressed));
+    let Some(action) = action else { return };
     let Some(tx) = TX.lock_safe().clone() else {
         return;
     };

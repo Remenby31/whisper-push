@@ -226,9 +226,10 @@ section = "sound"
 priority = "optional"
 # libayatana-appindicator3-1 is NOT optional: tray-icon links it, so without it
 # the binary fails to start at all (ld.so can't find libayatana-appindicator3.so.1)
-# — the app looked "installed but dead". libnotify is what carries desktop
-# notifications on the panels that don't implement the D-Bus spec themselves.
-depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0, libayatana-appindicator3-1"
+# — the app looked "installed but dead". libgl1 is for the setup wizard's OpenGL
+# window (src/setup); without it the wizard can't open and onboarding falls back
+# to the popup.
+depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0, libayatana-appindicator3-1, libgl1"
 # GNOME shows no tray at all without the AppIndicator extension (Ubuntu ships it
 # preinstalled, vanilla GNOME does not). Recommended, not required: KDE, XFCE,
 # Cinnamon and the rest need nothing.

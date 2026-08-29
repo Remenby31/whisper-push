@@ -167,9 +167,11 @@ mod windows {
             }
             let wide: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
             let bytes = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
-            let ok = RegSetValueExW(hkey, &HSTRING::from(VALUE), Some(0), REG_SZ, Some(bytes));
+            // The Reg* functions return WIN32_ERROR, not Result — `.ok()` is
+            // what turns one into the other.
+            let written = RegSetValueExW(hkey, &HSTRING::from(VALUE), Some(0), REG_SZ, Some(bytes));
             let _ = RegCloseKey(hkey);
-            match ok {
+            match written.ok() {
                 Ok(()) => info!("Auto-start enabled: {command}"),
                 Err(e) => warn!("Auto-start: {e}"),
             }

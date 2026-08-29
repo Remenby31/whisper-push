@@ -338,16 +338,13 @@ impl App {
             .unwrap_or_else(|| self.recommended.clone())
     }
 
-    /// Report the outcome to the daemon and close. The JSON line is the same
-    /// shape the SwiftUI helper prints, so `onboarding` parses one format.
+    /// Report the outcome to the daemon and close.
     fn finish(&mut self) {
         if !self.design_preview {
-            let result = serde_json::json!({
-                "model": self.primary_model(),
-                "download": self.selected,
-                "auto_start": self.auto_start,
-            });
-            println!("{result}");
+            println!(
+                "{}",
+                result_json(&self.primary_model(), &self.selected, self.auto_start)
+            );
         }
         self.finished = true;
     }
@@ -376,6 +373,26 @@ impl eframe::App for App {
         }
         if self.shots.is_some() {
             self.drive_screenshots(&ctx);
+        }
+        // Design preview: sweep the screens with ← / → without filling anything
+        // in, the same affordance the SwiftUI wizard gives with ⌘← / ⌘→.
+        if self.design_preview && self.shots.is_none() {
+            let (back, fwd) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowLeft),
+                    i.key_pressed(egui::Key::ArrowRight),
+                )
+            });
+            if fwd && let Some(next) = self.step.next() {
+                self.step = next;
+            }
+            if back {
+                let i = Step::ORDER
+                    .iter()
+                    .position(|s| *s == self.step)
+                    .unwrap_or(0);
+                self.step = Step::ORDER[i.saturating_sub(1)];
+            }
         }
         self.pump_download(&ctx);
         self.poll_permissions(&ctx);
@@ -1448,6 +1465,19 @@ impl App {
 
 // ── Small helpers ────────────────────────────────────────────────────────────
 
+/// The one line the wizard prints on stdout for its parent. Same shape the
+/// SwiftUI helper prints, so `onboarding::parse_wizard_result` reads ONE format
+/// — the test below is that contract, since the two live in separate processes
+/// and nothing else would catch them drifting apart.
+fn result_json(model: &str, download: &[String], auto_start: bool) -> String {
+    serde_json::json!({
+        "model": model,
+        "download": download,
+        "auto_start": auto_start,
+    })
+    .to_string()
+}
+
 /// Which models to tick by default: the recommended engine, plus whatever else
 /// the box has room for. Mirrors `OnboardingState.init`.
 fn default_selection(models: &[ModelInfo], recommended: &str) -> Vec<String> {
@@ -1757,4 +1787,56 @@ fn plan_card(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the wizard prints must be what the daemon parses. They run in
+    /// separate processes, so nothing else would catch a drift — the daemon
+    /// would just report "setup was closed before finishing" forever.
+    #[test]
+    fn result_line_round_trips_through_the_parser() {
+        let json = result_json(
+            "parakeet-tdt-0.6b-v3-int8",
+            &["parakeet-tdt-0.6b-v3-int8".into(), "voxtral-q4.gguf".into()],
+            true,
+        );
+        let parsed = crate::onboarding::parse_wizard_result(&json).expect("daemon parses it");
+        assert_eq!(parsed.model, "parakeet-tdt-0.6b-v3-int8");
+        assert!(parsed.auto_start);
+    }
+
+    /// Every screen must be reachable, and Ready must be the last one — the CTA
+    /// there is what prints the result.
+    #[test]
+    fn steps_run_from_welcome_to_ready() {
+        let mut step = Step::Welcome;
+        let mut seen = 1;
+        while let Some(next) = step.next() {
+            step = next;
+            seen += 1;
+        }
+        assert_eq!(step, Step::Ready);
+        assert_eq!(seen, Step::ORDER.len());
+    }
+
+    /// The default selection always includes something to run with, whatever
+    /// the disk and RAM say — an empty pick would leave the user with no engine.
+    #[test]
+    fn default_selection_is_never_empty() {
+        let models = crate::model_manager::list_models();
+        let picked = default_selection(&models, "ggml-large-v3-turbo-q5_0.bin");
+        assert!(picked.contains(&"ggml-large-v3-turbo-q5_0.bin".to_string()));
+    }
+
+    /// A masked key shows enough to recognise it and not enough to use it.
+    #[test]
+    fn masking_keeps_the_ends_only() {
+        let masked = masked("C281261E-1111-2222-3333-44444444C7C4");
+        assert!(masked.starts_with("C281261E"));
+        assert!(masked.ends_with("C7C4"));
+        assert!(!masked.contains("1111"));
+    }
 }

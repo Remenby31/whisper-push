@@ -354,6 +354,56 @@ pub fn resolve_backend(model: &str) -> crate::transcribe::Backend {
 mod tests {
     use super::*;
 
+    /// Every model the picker offers must have somewhere to come from — a model
+    /// with an empty plan silently "downloads" nothing and then fails to load.
+    #[test]
+    fn every_listed_model_has_a_download_plan() {
+        for m in list_models() {
+            let plan = download_plan(m.name);
+            assert!(!plan.is_empty(), "{} has no download plan", m.name);
+            for f in plan {
+                assert!(f.url.starts_with("https://"), "{} : {}", m.name, f.url);
+                assert!(
+                    f.dest.starts_with(crate::config::models_dir()),
+                    "{} writes outside models/: {}",
+                    m.name,
+                    f.dest.display()
+                );
+            }
+        }
+    }
+
+    /// The int8 graphs are fetched under their `.int8.onnx` names but must land
+    /// under the plain ones — parakeet-rs looks for those, and nothing else
+    /// would catch the mismatch until a user's first dictation failed.
+    #[test]
+    fn parakeet_int8_lands_under_the_names_the_loader_expects() {
+        let plan = download_plan("parakeet-tdt-0.6b-v3-int8");
+        let names: Vec<String> = plan
+            .iter()
+            .map(|f| f.dest.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"encoder-model.onnx".to_string()));
+        assert!(names.contains(&"decoder_joint-model.onnx".to_string()));
+        assert!(names.contains(&"vocab.txt".to_string()));
+        assert!(
+            plan.iter()
+                .any(|f| f.url.contains("encoder-model.int8.onnx"))
+        );
+        // The int8 graph is self-contained: no external .data sidecar.
+        assert!(!names.iter().any(|n| n.ends_with(".data")));
+    }
+
+    /// fp32 is the variant WITH the sidecar — the two plans must not be the same.
+    #[test]
+    fn parakeet_fp32_carries_its_sidecar() {
+        let plan = download_plan("parakeet-tdt-0.6b-v3");
+        assert!(
+            plan.iter()
+                .any(|f| f.url.ends_with("encoder-model.onnx.data"))
+        );
+    }
+
     #[test]
     fn test_backend_for_model_whisper() {
         assert_eq!(backend_for_model("ggml-large-v3-turbo-q5_0.bin"), "whisper");

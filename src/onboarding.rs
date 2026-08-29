@@ -36,13 +36,13 @@ pub fn parse_wizard_result(json: &str) -> anyhow::Result<WizardResult> {
     serde_json::from_str(json).map_err(|e| anyhow::anyhow!("Failed to parse wizard result: {e}"))
 }
 
-/// Outcome of trying to run the SwiftUI wizard.
-#[cfg(target_os = "macos")]
+/// Outcome of trying to run a wizard — either implementation.
 enum WizardOutcome {
     Completed(WizardResult),
-    /// User closed the window without finishing.
+    /// The window ran and the user closed it before the last screen.
     Killed,
-    /// Wizard binary not installed (dev build, Linux).
+    /// No wizard could run at all: the macOS helper isn't bundled (dev build),
+    /// or there is no display / no GL to open a window on.
     NotInstalled,
 }
 
@@ -57,8 +57,19 @@ pub fn run() -> Option<String> {
     info!("Hardware: {} {}, GPU: {}", hw.os, hw.arch, hw.gpu.label());
     info!("Recommended model: {recommended_model} (backend: {recommended_backend})");
 
+    // The macOS app ships a SwiftUI helper; every other platform — and a macOS
+    // dev build where that helper isn't bundled — runs the in-tree egui wizard,
+    // which draws the same six screens. Both report the same JSON, so this is
+    // ONE outcome to handle rather than two flows.
     #[cfg(target_os = "macos")]
-    match run_swift_wizard(&hw.gpu.label(), recommended_backend) {
+    let outcome = match run_swift_wizard(hw.gpu.label(), recommended_backend) {
+        WizardOutcome::NotInstalled => run_native_wizard(),
+        other => other,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let outcome = run_native_wizard();
+
+    match outcome {
         WizardOutcome::Completed(result) => {
             info!(
                 "Wizard chose model: {} (auto_start: {})",
@@ -73,24 +84,24 @@ pub fn run() -> Option<String> {
             }
             mark_complete();
             crate::permissions::guided_setup();
-            return Some(result.model);
+            Some(result.model)
         }
         WizardOutcome::Killed => {
             info!("Wizard exited without finishing");
             // Don't leave the user without a clue why the app didn't start.
             popup(
                 rfd::MessageLevel::Warning,
-                "Whisper Push — Setup",
+                "Whisper Push \u{2014} Setup",
                 "Setup was closed before finishing, so Whisper Push won't start yet. \
                  Reopen the app to finish setting up."
                     .to_string(),
             );
-            return None;
+            None
         }
-        WizardOutcome::NotInstalled => {}
+        // No GUI at all (a headless box, a broken driver): the popup path, which
+        // itself degrades to a notification when there is no display.
+        WizardOutcome::NotInstalled => Some(run_fallback(recommended_backend, recommended_model)),
     }
-
-    Some(run_fallback(recommended_backend, recommended_model))
 }
 
 /// Bundle id of the onboarding / license helper app (see `resources/Onboarding-Info.plist`).
@@ -197,9 +208,100 @@ pub fn run_license_window(start_activate: bool) -> bool {
     }
 }
 
+/// Run the in-tree (egui) wizard as a child process and read its result.
+///
+/// A child, not a call: a winit event loop can only be built once per process
+/// and the tray owns the daemon's for its whole life. It also means the user
+/// closing the wizard window can't take the daemon down with it.
+fn run_native_wizard() -> WizardOutcome {
+    if !has_display() {
+        return WizardOutcome::NotInstalled;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return WizardOutcome::NotInstalled;
+    };
+    info!("Launching the built-in setup wizard");
+    let output = match std::process::Command::new(&exe)
+        .arg("--setup-ui")
+        .stdout(std::process::Stdio::piped())
+        // Never a pipe nobody drains: the child logs to stderr and would block
+        // once the 64 KB buffer filled with no reader.
+        .stderr(std::process::Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("Failed to spawn the setup wizard: {e}");
+            return WizardOutcome::NotInstalled;
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json_line = stdout.lines().next_back().unwrap_or("");
+    info!("Wizard exit: {} | last line: {json_line}", output.status);
+    if let Ok(r) = parse_wizard_result(json_line) {
+        return WizardOutcome::Completed(r);
+    }
+    // No result line, and the exit code says which of the two reasons it was:
+    // the wizard returns 0 when its window ran and was closed, non-zero when it
+    // could never open one (no GL, no display, a broken driver). Reading the
+    // second as "the user closed it" would leave a machine that CAN'T show a
+    // wizard unable to finish setup at all.
+    if output.status.success() {
+        WizardOutcome::Killed
+    } else {
+        tracing::warn!("Setup wizard couldn't open a window — falling back to the popup");
+        WizardOutcome::NotInstalled
+    }
+}
+
+/// Is there a GUI to draw on? Only Linux can genuinely lack one (a server, or a
+/// daemon started before the graphical session); macOS and Windows always have.
+fn has_display() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Open the license modal (the egui one) and block until it closes. Same
+/// contract as the macOS version: false ⇒ the caller falls back to a dialog.
 #[cfg(not(target_os = "macos"))]
-pub fn run_license_window(_start_activate: bool) -> bool {
-    false
+pub fn run_license_window(start_activate: bool) -> bool {
+    if !has_display() {
+        info!("license window: no display");
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["--setup-ui", "license"]);
+    if start_activate {
+        cmd.arg("--activate");
+    }
+    info!("license window: launching (start_activate={start_activate})");
+    match cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) if status.success() => {
+            info!("license window: closed");
+            true
+        }
+        Ok(status) => {
+            tracing::warn!("license window: exited with {status}");
+            false
+        }
+        Err(e) => {
+            tracing::warn!("license window: couldn't spawn: {e}");
+            false
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

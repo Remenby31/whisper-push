@@ -23,8 +23,7 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_DWORD, RRF_RT_REG_SZ, RegCloseKey,
     RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
 };
-use windows::core::HSTRING;
-use windows::core::PCWSTR;
+use windows::core::{HSTRING, PCWSTR, PWSTR};
 
 const ROOT: &str = r"Control Panel\NotifyIconSettings";
 
@@ -71,7 +70,7 @@ fn promote_matching(exe: &str) -> Result<usize, String> {
             let status = RegEnumKeyExW(
                 root,
                 index,
-                Some(name.as_mut_ptr()),
+                Some(PWSTR(name.as_mut_ptr())),
                 &mut len,
                 None,
                 None,
@@ -195,7 +194,7 @@ pub fn register_app_id() {
     if let Ok(exe) = std::env::current_exe() {
         // The icon shown on the toast. The .exe's own icon resource is used
         // when the path points at a binary.
-        set_string(&key, "IconUri", &exe.to_string_lossy());
+        let _ = set_string(&key, "IconUri", &exe.to_string_lossy());
     }
     unsafe {
         if let Err(e) = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(APP_ID)) {

@@ -172,10 +172,6 @@ impl Matcher {
         self.active = self.satisfied();
     }
 
-    pub fn is_hold(&self) -> bool {
-        self.combo.is_hold
-    }
-
     /// Feed one key edge. Returns the action to emit, if any.
     pub fn on_key(&mut self, key: Key, pressed: bool) -> Option<Action> {
         if pressed {
