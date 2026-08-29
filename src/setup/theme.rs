@@ -65,6 +65,10 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut register = |name: &str, candidates: &[String], fallback: &egui::FontFamily| {
         let loaded = candidates
             .iter()
+            // Skip font *collections*: egui's rasteriser reads a single face, and
+            // handing it a .ttc panics deep in the atlas on first layout rather
+            // than failing here. `fc-match` happily returns one on a CJK desktop.
+            .filter(|p| !is_collection(p))
             .find_map(|p| std::fs::read(p).ok())
             .map(|bytes| std::sync::Arc::new(egui::FontData::from_owned(bytes)));
         match loaded {
@@ -94,6 +98,12 @@ pub fn install_fonts(ctx: &egui::Context) {
     register(MONO, &system_mono(), &egui::FontFamily::Monospace);
 
     ctx.set_fonts(fonts);
+}
+
+/// Is this a TrueType/OpenType *collection* (many faces in one file)?
+fn is_collection(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.ends_with(".ttc") || lower.ends_with(".otc")
 }
 
 /// Candidate paths for the platform UI font, best first.
