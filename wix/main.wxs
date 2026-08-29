@@ -215,11 +215,15 @@
              matters for a per-user app (and for the tray icon to belong to the
              right session). -->
         <Property Id='WixShellExecTarget' Value='[#exe0]'/>
+        <!-- Return='ignore', not 'asyncNoWait': candle rejects the latter on a
+             DLL custom action (CNDL0038, it is for ExeCommand). Ignoring the
+             return is right anyway — ShellExecute comes back as soon as the app
+             is launched, and a failure to launch must not fail the install. -->
         <CustomAction Id='LaunchApplication'
             BinaryKey='WixCA'
             DllEntry='WixShellExec'
             Impersonate='yes'
-            Return='asyncNoWait'/>
+            Return='ignore'/>
 
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>

@@ -389,7 +389,10 @@ fn attach_parent_console() {
         // Only fill in handles the shell did NOT give us. `whisper-push --models
         // > out.txt` passes a real file handle for stdout; overwriting it with
         // CONOUT$ would send the output to the console and leave the file empty.
-        let missing = |which| GetStdHandle(which).is_none_or(|h| h.is_invalid() || h.0.is_null());
+        let missing = |which| match GetStdHandle(which) {
+            Ok(h) => h.is_invalid() || h.0.is_null(),
+            Err(_) => true,
+        };
         // Rust's stdio fetches the handle on every write, so replacing the
         // process's std handles is enough — no re-opening of `std::io::stdout`.
         let open = |name: &str| -> Option<HANDLE> {
