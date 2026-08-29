@@ -23,7 +23,8 @@
   Variables `cargo wix` supplies: CargoTargetBinDir, Version, Profile, …
 -->
 
-<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:util='http://schemas.microsoft.com/wix/UtilExtension'>
 
     <Product
         Id='*'
@@ -53,6 +54,35 @@
         <MajorUpgrade
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <!-- Whisper Push IS a running process whenever it is installed — a tray
+             daemon with no window to close. Windows Installer cannot replace a
+             binary that is executing, so without this an upgrade either asks for
+             a reboot or fails outright, and an uninstall leaves the .exe behind.
+             WM_CLOSE first (which our tray window ignores), then terminate: the
+             daemon holds no unsaved state, config is written as it changes. -->
+        <util:CloseApplication
+            Id='CloseWhisperPush'
+            Target='whisper-push.exe'
+            Description='Whisper Push is running and will be closed to continue.'
+            CloseMessage='yes'
+            TerminateProcess='1'
+            RebootPrompt='no'/>
+
+        <!-- Versions up to 1.2.7 installed per-MACHINE into Program Files. A
+             per-user package cannot remove one (that needs elevation), so MSI
+             would either fail with an opaque error or leave both installed —
+             with the old copy still first on PATH. Say what to do instead.
+             LaunchConditions runs before FindRelatedProducts, so this message is
+             the one the user sees. -->
+        <Property Id='OLDPERMACHINE'>
+            <DirectorySearch Id='OldInstallDir' Path='[ProgramFiles64Folder]whisper-push\bin' Depth='0'>
+                <FileSearch Id='OldInstallExe' Name='whisper-push.exe'/>
+            </DirectorySearch>
+        </Property>
+        <Condition Message='An older, machine-wide Whisper Push is installed. Uninstall it first (Settings &gt; Apps &gt; whisper-push), then run this installer again — this version installs for your account only and needs no administrator rights.'>
+            <![CDATA[Installed OR NOT OLDPERMACHINE]]>
+        </Condition>
 
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
         <Property Id='DiskPrompt' Value='Whisper Push Installation'/>
