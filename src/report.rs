@@ -148,21 +148,7 @@ pub fn open_report() {
     let system = system_info();
     let url = build_issue_url(&logs, &system);
 
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(&url).spawn();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", &url])
-            .spawn();
-    }
-
+    crate::util::open_external(&url);
     crate::notify::app("Opening bug report in browser...");
 }
 

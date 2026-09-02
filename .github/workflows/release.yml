@@ -3,8 +3,17 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # Allow dry-running the full pipeline from the Actions tab without tagging.
+  # Allow dry-running the pipeline from the Actions tab without tagging — the
+  # only way to build the installers, since CI never runs cargo-wix or cargo-deb.
+  # `only` keeps that cheap: testing a change to wix/main.wxs shouldn't also
+  # rebuild, sign and notarize the macOS DMG.
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Which platform to build (a tag push always builds all)'
+        type: choice
+        default: all
+        options: [all, macos, linux, windows]
 
 permissions:
   contents: write
@@ -19,6 +28,7 @@ env:
 jobs:
   # ─── macOS (Apple Silicon, Metal + all models) ─────
   macos:
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'macos'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +116,7 @@ jobs:
 
   # ─── Linux CPU — installer .deb + portable .tar.gz ─────────────────────────
   linux-cpu:
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'linux'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -135,6 +146,7 @@ jobs:
 
   # ─── Linux CUDA — installer .deb + portable .tar.gz ───────────────────────
   linux-cuda:
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'linux'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -167,6 +179,7 @@ jobs:
 
   # ─── Windows CPU — installer .msi + portable .zip ─────────────────────────
   windows-cpu:
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'windows'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -189,13 +202,17 @@ jobs:
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         # `-p whisper-push` is required: the repo is a Cargo workspace, so cargo
-        # wix errors "Workspace detected" without it. Keep continue-on-error so a
-        # future toolchain break omits the .msi (portable .zip still ships).
+        # wix errors "Workspace detected" without it.
+        #
+        # NOT continue-on-error, unlike the CUDA variant below: the MSI is now
+        # the supported way to install on Windows (shortcut, wizard, no UAC), so
+        # a release that silently shipped only the portable .zip would put every
+        # new user back in a terminal — the exact bug this installer fixed.
         shell: bash
-        continue-on-error: true
         run: |
           mkdir -p dist
           cargo wix -p whisper-push --no-build --nocapture --output dist/whisper-push-x64.msi
+          test -f dist/whisper-push-x64.msi
       - name: Package portable .zip
         shell: bash
         run: |
@@ -212,6 +229,7 @@ jobs:
 
   # ─── Windows CUDA — installer .msi + portable .zip ────────────────────────
   windows-cuda:
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'windows'
     # Pin to windows-2022: windows-latest now ships Visual Studio 18 (2026), whose
     # generator ("Visual Studio 18 2026") + MSVC 14.51 aren't supported by CUDA
     # 12.4's nvcc, so the whisper.cpp CUDA build can't configure. windows-2022 has
@@ -245,12 +263,16 @@ jobs:
           [ -f wix/main.wxs ] || cargo wix init -p whisper-push --force
       - name: Package .msi
         if: steps.build_cuda.outcome == 'success'
-        # See windows-cpu note: -p whisper-push (workspace) + continue-on-error.
+        # Tolerant on the BUILD above (CUDA toolchain churn is a real risk, and
+        # the packaging steps are skipped when it breaks) but NOT here: the wxs
+        # is shared with windows-cpu, so a failure means an authoring bug, and a
+        # tolerated one shipped a CUDA release with no installer at all while the
+        # step still reported success and the upload went ahead regardless.
         shell: bash
-        continue-on-error: true
         run: |
           mkdir -p dist
           cargo wix -p whisper-push --no-build --nocapture --output dist/whisper-push-x64-cuda.msi
+          test -f dist/whisper-push-x64-cuda.msi
       - name: Package portable .zip
         if: steps.build_cuda.outcome == 'success'
         shell: bash

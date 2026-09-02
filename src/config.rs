@@ -134,11 +134,92 @@ pub fn config_path() -> PathBuf {
     dir.join("config.toml")
 }
 
-/// Platform-specific data directory (models, logs).
+/// Platform-specific data directory (models, logs, license).
+///
+/// Windows is the odd one: `dirs::data_dir()` is **Roaming** AppData, which the
+/// OS synchronises at every logon on a domain/roaming profile — and this
+/// directory holds multi-gigabyte speech models. Microsoft's own guidance is
+/// that large, machine-local data belongs in `LocalAppData`, so that is where it
+/// goes; a Roaming directory left by an earlier version is moved across once
+/// (see `migrate_windows_data_dir`), which keeps the license activation and the
+/// downloaded models with it. Config stays in Roaming: settings SHOULD follow
+/// the user, and config.toml is a few hundred bytes.
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir()
+    #[cfg(target_os = "windows")]
+    {
+        windows_data_dir().clone()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("whisper-push")
+    }
+}
+
+/// Resolved once per process: the rename must not be attempted on every call,
+/// and the answer must not change mid-run.
+#[cfg(target_os = "windows")]
+static WINDOWS_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// What the migration did, if anything — logged by `app::run` once tracing is
+/// up, since the first `data_dir()` call happens while setting logging up.
+#[cfg(target_os = "windows")]
+static MIGRATION_NOTE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "windows")]
+fn windows_data_dir() -> &'static PathBuf {
+    WINDOWS_DATA_DIR.get_or_init(migrate_windows_data_dir)
+}
+
+/// Move `%APPDATA%\whisper-push` to `%LOCALAPPDATA%\whisper-push` once, and
+/// return the directory to use.
+///
+/// A failure here must never lose anyone's data or license: if the rename
+/// doesn't work (an older instance still running with the log file open, or the
+/// two folders on different volumes) we simply keep using Roaming and try again
+/// next launch.
+#[cfg(target_os = "windows")]
+fn migrate_windows_data_dir() -> PathBuf {
+    let local = dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("whisper-push")
+        .join("whisper-push");
+    let roaming = dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("whisper-push");
+
+    if local == roaming || local.exists() || !roaming.exists() {
+        return local;
+    }
+    match std::fs::rename(&roaming, &local) {
+        Ok(()) => {
+            let _ = MIGRATION_NOTE.set(format!(
+                "Moved app data out of the roaming profile: {} -> {}",
+                roaming.display(),
+                local.display()
+            ));
+            local
+        }
+        Err(e) => {
+            let _ = MIGRATION_NOTE.set(format!(
+                "Keeping app data in the roaming profile ({}): couldn't move it to {} ({e})",
+                roaming.display(),
+                local.display()
+            ));
+            roaming
+        }
+    }
+}
+
+/// One-line record of the Windows data-directory migration, for the log.
+pub fn data_dir_migration_note() -> Option<&'static str> {
+    #[cfg(target_os = "windows")]
+    {
+        // Make sure the decision has been taken before reporting on it.
+        let _ = data_dir();
+        return MIGRATION_NOTE.get().map(String::as_str);
+    }
+    #[cfg(not(target_os = "windows"))]
+    None
 }
 
 // ─── Model paths (single source of truth — was re-derived in ~8 places) ──────

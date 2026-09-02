@@ -68,11 +68,33 @@ curl -sSL https://raw.githubusercontent.com/Remenby31/whisper-push/main/scripts/
 
 Or grab a package from the **[latest release](https://github.com/Remenby31/whisper-push/releases/latest)**: `whisper-push_amd64.deb` (CPU) or `whisper-push-cuda_amd64.deb` (NVIDIA), or the portable `whisper-push-linux-x86_64*.tar.gz`.
 
+Whisper Push lives in your system tray. On **GNOME** that needs the AppIndicator
+extension (`gnome-shell-extension-appindicator` — Ubuntu ships it already); the
+`.deb` recommends it. The hotkey reads `/dev/input`, so the wizard offers to add
+you to the `input` group — log out and back in afterwards.
+
 ### Windows
 
 From the **[latest release](https://github.com/Remenby31/whisper-push/releases/latest)**: run `whisper-push-x64.msi` (CPU) or `whisper-push-x64-cuda.msi` (NVIDIA), or use the portable `whisper-push-windows-x64*.zip`.
 
-> On Linux and Windows, first-launch setup runs through notifications and the tray menu — the visual onboarding wizard is macOS-only.
+The installer needs no administrator rights, adds a Start Menu shortcut, and
+offers to launch the app when it finishes. Whisper Push then lives in the
+**notification area** (bottom-right of the taskbar) — on Windows 11 it pins
+itself out of the `^` overflow flyout automatically; on Windows 10, drag it out
+of the flyout once to keep it in view.
+
+> Not code-signed yet, so SmartScreen shows "Windows protected your PC" the
+> first time: click **More info → Run anyway**. A signing certificate is on the
+> roadmap, same as notarization on macOS.
+
+> Upgrading from **1.2.7 or earlier**? Those installed machine-wide into
+> `Program Files`. Uninstall that one first (Settings → Apps → whisper-push);
+> the installer will say so if you forget. Your models, dictionary and license
+> are kept — they live in your user profile, and move themselves out of the
+> roaming part of it on first run.
+
+> First launch opens the setup wizard on **every** platform — models,
+> permissions, hotkey, launch-at-login — then the app runs from the tray.
 
 ### Usage
 
@@ -83,7 +105,7 @@ From the **[latest release](https://github.com/Remenby31/whisper-push/releases/l
 | **Change hotkey** | Menu → **Hotkey** → pick a preset, or **Set Custom Hotkey…** then press any combo |
 | **Switch engine** | Menu → **Engine** → Parakeet / Voxtral / Whisper |
 | **Pick microphone / output** | Menu → **Input Device** / **Output Device** |
-| **Fix permissions** | Menu → **Permissions → ⚙ Run Guided Setup…** (opens the right Settings panes + auto-restarts) |
+| **Fix permissions** | Menu → **Permissions → ⚙ Run Guided Setup…** (opens the right Settings panes + auto-restarts). macOS asks for Microphone, Accessibility and Input Monitoring; Windows for the microphone; Linux for `input` group access. |
 | **Test** | Menu → "Test (record 3s + transcribe)" |
 | **Check setup** | `whisper-push --doctor` |
 | **Transcribe file** | `whisper-push --transcribe audio.mp3` |
@@ -99,7 +121,7 @@ Settings are in the menu bar. Config file location:
 ## Building from Source
 
 ```bash
-# Prerequisites: Rust 1.83+, cmake
+# Prerequisites: Rust 1.95+, cmake
 
 # macOS (all engines included by default)
 cargo build --release

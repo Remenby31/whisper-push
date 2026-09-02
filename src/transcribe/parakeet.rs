@@ -4,7 +4,7 @@
 #[cfg(feature = "parakeet")]
 mod inner {
     use crate::util::LockSafe;
-    use anyhow::{Context, Result};
+    use anyhow::Result;
     use parakeet_rs::{ParakeetTDT, Transcriber};
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -40,12 +40,10 @@ mod inner {
             .unwrap_or_else(|| "fp32".into());
         if !dir.join("vocab.txt").exists() || on_disk != variant {
             info!("Parakeet {variant}: downloading...");
-            download_model(&dir, want_int8)?;
-            // int8 graphs are self-contained — drop any leftover fp32 sidecar.
-            if want_int8 {
-                let _ = std::fs::remove_file(dir.join("encoder-model.onnx.data"));
-            }
-            let _ = std::fs::write(dir.join(".variant"), variant);
+            // ONE downloader for every model and every caller (wizard, tray,
+            // here); it also owns the variant swap (clearing the stale set) and
+            // writes the `.variant` marker. No progress sink on this lazy path.
+            crate::model_manager::download(model_name, &mut |_| {})?;
         }
 
         info!("Loading Parakeet TDT ({variant}) from {}...", dir.display());
@@ -154,66 +152,6 @@ mod inner {
             words.len()
         );
         Ok((text, words))
-    }
-
-    /// Download a Parakeet TDT v3 ONNX variant from HuggingFace into `dest`.
-    ///
-    /// int8 graphs are self-contained (no external `.data`); fp32 ships a tiny
-    /// graph + a large `encoder-model.onnx.data` sidecar. Either way we save
-    /// under the fixed filenames parakeet-rs expects (it doesn't look for the
-    /// ".int8.onnx" name); ONNX Runtime executes the quantised ops transparently.
-    fn download_model(dest: &PathBuf, int8: bool) -> Result<()> {
-        std::fs::create_dir_all(dest)?;
-
-        const REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
-
-        // (source file on HF, name we save it under)
-        let files: &[(&str, &str)] = if int8 {
-            &[
-                ("encoder-model.int8.onnx", "encoder-model.onnx"),
-                ("decoder_joint-model.int8.onnx", "decoder_joint-model.onnx"),
-                ("vocab.txt", "vocab.txt"),
-            ]
-        } else {
-            &[
-                ("encoder-model.onnx", "encoder-model.onnx"),
-                ("encoder-model.onnx.data", "encoder-model.onnx.data"),
-                ("decoder_joint-model.onnx", "decoder_joint-model.onnx"),
-                ("vocab.txt", "vocab.txt"),
-            ]
-        };
-        for (src_name, dst_name) in files {
-            info!("Downloading {src_name}...");
-            // Bound each blocking fetch (hf-hub has no request deadline) so a
-            // dead socket can't wedge the pipeline thread forever — see
-            // crate::util::run_with_timeout. The orphaned thread exits on its
-            // own; a partially-fetched file just isn't copied.
-            let src_owned = src_name.to_string();
-            let src = crate::util::run_with_timeout(
-                crate::transcribe::DOWNLOAD_TIMEOUT,
-                move || -> Result<PathBuf> {
-                    let api = hf_hub::api::sync::Api::new()?;
-                    api.model(REPO.to_string())
-                        .get(&src_owned)
-                        .with_context(|| format!("Failed to download {src_owned}"))
-                },
-            )
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Download of {src_name} timed out after {}s",
-                    crate::transcribe::DOWNLOAD_TIMEOUT.as_secs()
-                )
-            })??;
-            std::fs::copy(&src, dest.join(dst_name))
-                .with_context(|| format!("Failed to copy {src_name}"))?;
-        }
-
-        info!(
-            "Parakeet {} model downloaded to {}",
-            if int8 { "int8" } else { "fp32" },
-            dest.display()
-        );
-        Ok(())
     }
 }
 
