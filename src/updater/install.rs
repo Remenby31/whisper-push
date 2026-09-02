@@ -44,12 +44,7 @@ pub fn download_and_install(url: &str) -> Result<()> {
 /// Open a URL in the user's default browser (Linux/Windows manual-update path).
 #[cfg(not(target_os = "macos"))]
 fn open_url(url: &str) {
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    crate::util::open_external(url);
 }
 
 /// Download the ZIP to a temp directory.
@@ -61,16 +56,9 @@ fn download_zip(url: &str) -> Result<PathBuf> {
 
     let zip_path = tmp_dir.join("update.zip");
 
-    let response = ureq::get(url)
-        .config()
-        // Generous ceiling for a large asset, but bounded — a stalled download
-        // must eventually fail (and re-enable the menu) rather than hang forever.
-        .timeout_global(Some(std::time::Duration::from_secs(600)))
-        .build()
-        .header(
-            "User-Agent",
-            &format!("whisper-push/{}", env!("CARGO_PKG_VERSION")),
-        )
+    // Generous ceiling for a large asset, but bounded — a stalled download must
+    // eventually fail (and re-enable the menu) rather than hang forever.
+    let response = crate::net::get(url, std::time::Duration::from_secs(600))
         .call()
         .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
 

@@ -40,6 +40,45 @@ jobs:
         run: cargo check ${{ matrix.cargo_flags }}
       - name: Build
         run: cargo build ${{ matrix.cargo_flags }}
+      # Run the unit tests on EVERY platform, not just macOS: the hotkey key
+      # tables, the tray badge and the permission model are all `#[cfg]`-gated,
+      # so a macOS-only test run never compiles — let alone exercises — the
+      # Windows and Linux halves of them.
+      - name: Unit tests
+        run: cargo test --lib ${{ matrix.cargo_flags }}
+
+  # macOS runs the same unit tests with Metal enabled (the check matrix above
+  # builds macOS without an explicit feature flag).
+  # The MSI is authoring, not code: `cargo check` never looks at it, and the
+  # release workflow only builds it after a ~25 minute release compile — so an
+  # error in wix/main.wxs used to surface a day later, at tag time. candle and
+  # light run against a STUB binary here: the payload's contents don't matter to
+  # the authoring, and light's ICE validation (which is the real prize) doesn't
+  # care either. Two minutes, every push.
+  wix:
+    runs-on: windows-latest
+    name: Installer authoring (WiX)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install WiX Toolset 3.14
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip -OutFile wix314.zip
+          Expand-Archive -Path wix314.zip -DestinationPath wix314 -Force
+          "$PWD\wix314" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Compile and link the installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target\release, obj | Out-Null
+          Set-Content -Path target\release\whisper-push.exe -Value 'stub payload'
+          # Quote the -d switches: PowerShell splits `-dVersion=0.0.0` at the
+          # dots and candle then hunts for a file called '.0.0'.
+          candle.exe -arch x64 -ext WixUtilExtension `
+            "-dVersion=0.0.0" "-dCargoTargetBinDir=target\release" `
+            -out obj\main.wixobj wix\main.wxs
+          light.exe -ext WixUIExtension -ext WixUtilExtension `
+            -out obj\authoring-check.msi obj\main.wixobj
+          Write-Host "✓ MSI authoring compiles, links and passes ICE validation"
 
   test:
     runs-on: macos-14

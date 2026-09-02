@@ -43,10 +43,7 @@ fn suggest_canonical(term: &str, lang: &str) -> Option<String> {
         "https://{lang}.wikipedia.org/w/api.php?action=opensearch&limit=1&namespace=0&format=json&search={}",
         crate::util::percent_encode(term)
     );
-    let body = ureq::get(&url)
-        .config()
-        .timeout_global(Some(std::time::Duration::from_secs(3)))
-        .build()
+    let body = crate::net::get(&url, std::time::Duration::from_secs(3))
         .call()
         .ok()?
         .into_body()

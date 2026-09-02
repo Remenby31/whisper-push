@@ -44,6 +44,62 @@ impl<T> LockSafe<T> for Mutex<T> {
 /// code 0. This matters now that the LaunchAgent uses
 /// `KeepAlive{SuccessfulExit:false}`: an *abnormal* abort on a user-requested
 /// Quit would otherwise make launchd resurrect the app instead of staying down.
+/// A `Command` that never flashes a console window on Windows.
+///
+/// The daemon is a GUI-subsystem binary, so every console program it spawns
+/// (`nvidia-smi`, `vulkaninfo`, …) pops a black window on the user's screen for
+/// a fraction of a second. `CREATE_NO_WINDOW` suppresses it. No-op elsewhere.
+pub fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Command {
+    let cmd = std::process::Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = cmd;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        return cmd;
+    }
+    #[cfg(not(target_os = "windows"))]
+    cmd
+}
+
+/// Hand a file, folder or URL to the OS default handler — the one place that
+/// knows how, so the five copies of this (tray, wizard, report, updater,
+/// permissions) can't drift apart.
+///
+/// Windows uses `ShellExecuteW` rather than `cmd /C start`: the daemon is a
+/// GUI-subsystem binary, so spawning a console program flashes a black console
+/// window on screen every time the user opens a log or a checkout page.
+pub fn open_external<P: AsRef<std::ffi::OsStr>>(target: P) {
+    let target = target.as_ref();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg(target)
+        .spawn();
+
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{HSTRING, PCWSTR};
+        let file = HSTRING::from(target.to_string_lossy().as_ref());
+        let verb = HSTRING::from("open");
+        unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(file.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    }
+}
+
 pub fn exit_clean() -> ! {
     // SAFETY: `_exit` simply terminates the process; no Rust/C dtors or atexit
     // handlers run. We accept losing any buffered (non-blocking) log lines.

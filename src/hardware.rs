@@ -34,6 +34,79 @@ impl GpuInfo {
     }
 }
 
+/// Physical RAM, in bytes. 0 when the platform query fails — callers treat that
+/// as "unknown", never as "no memory".
+pub fn total_ram_bytes() -> u64 {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        #[cfg(target_os = "macos")]
+        {
+            let mut out: u64 = 0;
+            let mut len = std::mem::size_of::<u64>();
+            let ok = unsafe {
+                libc::sysctlbyname(
+                    c"hw.memsize".as_ptr(),
+                    (&raw mut out).cast(),
+                    &mut len,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            return if ok == 0 { out } else { 0 };
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // MemTotal is in kB.
+            return std::fs::read_to_string("/proc/meminfo")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("MemTotal:"))?
+                        .split_whitespace()
+                        .nth(1)?
+                        .parse::<u64>()
+                        .ok()
+                })
+                .map(|kb| kb * 1024)
+                .unwrap_or(0);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+        let mut st = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            if GlobalMemoryStatusEx(&mut st).is_ok() {
+                return st.ullTotalPhys;
+            }
+        }
+        0
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        0
+    }
+}
+
+/// Free space on the volume holding `path`, in bytes (0 when unknown).
+pub fn free_disk_bytes(path: &std::path::Path) -> u64 {
+    // The path may not exist yet on a first run — ask about the nearest
+    // ancestor that does, which is on the same volume.
+    let mut probe = path;
+    loop {
+        if probe.exists() {
+            return fs4::available_space(probe).unwrap_or(0);
+        }
+        match probe.parent() {
+            Some(p) => probe = p,
+            None => return 0,
+        }
+    }
+}
+
 /// Detect hardware and recommend the best engine.
 pub fn detect() -> HardwareInfo {
     let gpu = detect_gpu();
@@ -78,7 +151,9 @@ fn detect_gpu() -> GpuInfo {
     }
 
     // Check for NVIDIA
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
+    // `quiet_command`: on Windows the daemon is a GUI-subsystem binary, so
+    // spawning these console tools would flash a black window at every launch.
+    if let Ok(output) = crate::util::quiet_command("nvidia-smi")
         .arg("--query-gpu=name")
         .arg("--format=csv,noheader,nounits")
         .output()
@@ -92,7 +167,7 @@ fn detect_gpu() -> GpuInfo {
     }
 
     // Check for Vulkan (AMD/Intel)
-    if let Ok(output) = std::process::Command::new("vulkaninfo")
+    if let Ok(output) = crate::util::quiet_command("vulkaninfo")
         .arg("--summary")
         .output()
     {

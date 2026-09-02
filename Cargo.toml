@@ -2,6 +2,9 @@
 name = "whisper-push"
 version = "1.2.7"
 edition = "2024"
+# eframe 0.36 (the setup wizard) sets the floor; without this, a older
+# toolchain fails somewhere inside egui instead of saying what it needs.
+rust-version = "1.95"
 authors = ["Whisper Push contributors <hello@whisperpush.com>"]
 description = "Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is."
 license = "MIT"
@@ -69,6 +72,20 @@ dirs = "6"
 # Icons
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+# Cross-platform setup UI (onboarding wizard + license modal). Rendered with
+# egui/eframe so Windows and Linux get the *same* branded wizard macOS gets from
+# its SwiftUI helper — same screens, same palette, same flow. `glow` (OpenGL)
+# instead of the default wgpu backend: wgpu is already in the tree via burn at a
+# different version, and a second copy would double an already heavy build for a
+# 520x440 window. The wizard always runs in its OWN process (see src/setup), so
+# its winit event loop never fights the tray's.
+eframe = { version = "0.36", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+
 # Notifications
 notify-rust = "4"
 
@@ -93,8 +110,11 @@ crossbeam-channel = "0.5"
 # Single instance
 fs4 = "0.12"
 
-# HTTP client (sync, lightweight) — update checker, license API, enrichment
-ureq = "3"
+# HTTP client (sync, lightweight) — update checker, license API, model
+# downloads, enrichment. `platform-verifier`: verify TLS against the OS trust
+# store instead of ureq's bundled Mozilla roots, so a managed machine that
+# intercepts TLS (corporate proxy) can still reach anything at all. See src/net.rs.
+ureq = { version = "3", features = ["platform-verifier"] }
 
 # Error handling
 anyhow = "1"
@@ -173,7 +193,28 @@ windows = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
+    # Microphone consent (CapabilityAccessManager) + pinning the tray icon out
+    # of the Windows 11 overflow flyout (NotifyIconSettings\…\IsPromoted).
+    "Win32_System_Registry",
+    # Attaching to the parent console so CLI subcommands still print once the
+    # binary is a GUI-subsystem app (no console window on a shortcut launch).
+    "Win32_System_Console",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+    # Theme-aware tray glyph: SM_CXSMICON for the exact icon size.
+    "Win32_Graphics_Gdi",
+    # Installed RAM, for the model picker's "needs 16 GB+" warning.
+    "Win32_System_SystemInformation",
+    # AppUserModelID: toasts attributed to Whisper Push, not to PowerShell.
+    "Win32_UI_Shell",
 ] }
+
+# Embed the app icon + version info into whisper-push.exe, so Explorer, the
+# taskbar, Task Manager and alt-tab show the brand mark instead of the blank
+# default. Needs rc.exe (Windows SDK) or llvm-rc; build.rs treats a failure as a
+# warning so a machine without either still builds.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.12"
@@ -212,7 +253,17 @@ your words are typed wherever your cursor is. Three transcription engines
 (Whisper, Parakeet, Voxtral), every platform optimized, no cloud."""
 section = "sound"
 priority = "optional"
-depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0"
+# libayatana-appindicator3-1 is NOT optional: tray-icon links it, so without it
+# the binary fails to start at all (ld.so can't find libayatana-appindicator3.so.1)
+# — the app looked "installed but dead". libgl1 is for the setup wizard's OpenGL
+# window (src/setup); without it the wizard can't open and onboarding falls back
+# to the popup. ca-certificates because TLS is now verified against the system
+# trust store (src/net.rs), which on Linux means /etc/ssl/certs.
+depends = "libasound2, libgtk-3-0, libglib2.0-0, libxdo3, libxkbcommon0, libwayland-client0, libayatana-appindicator3-1, libgl1, ca-certificates"
+# GNOME shows no tray at all without the AppIndicator extension (Ubuntu ships it
+# preinstalled, vanilla GNOME does not). Recommended, not required: KDE, XFCE,
+# Cinnamon and the rest need nothing.
+recommends = "gnome-shell-extension-appindicator"
 assets = [
     ["target/release/whisper-push", "usr/bin/", "755"],
     ["packaging/linux/whisper-push.desktop", "usr/share/applications/", "644"],

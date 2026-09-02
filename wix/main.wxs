@@ -1,80 +1,53 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
-  Copyright (C) 2017 Christopher R. Field.
+  Whisper Push MSI, built by `cargo wix` (cargo-wix, Apache-2.0; this file
+  started as its generated template).
 
-  Licensed under the Apache License, Version 2.0 (the "License");
-  you may not use this file except in compliance with the License.
-  You may obtain a copy of the License at
+  What this installer must do, because the app has no window of its own:
 
-  http://www.apache.org/licenses/LICENSE-2.0
+    * Install WITHOUT a UAC prompt. `InstallScope='perUser'` into
+      %LOCALAPPDATA%\Programs — a consumer dictation app has no business
+      asking for administrator rights, and a per-user install is also what
+      lets the in-app updater replace files later.
+    * Leave a Start Menu shortcut. It is the only way to launch the app after
+      the first run, and it carries `System.AppUserModel.ID`, which is what
+      makes Windows attribute the app's toast notifications to Whisper Push
+      instead of to PowerShell.
+    * Offer "Launch Whisper Push" on the last page, ticked. The first launch
+      runs the setup wizard (models, permissions, hotkey); until it runs, the
+      user has installed something that appears to do nothing.
+    * NOT write the autostart registry value. `src/autostart.rs` owns that key
+      (the wizard's "Launch at login" toggle writes it); two owners means a
+      repair or reinstall silently re-enables something the user turned off.
 
-  Unless required by applicable law or agreed to in writing, software
-  distributed under the License is distributed on an "AS IS" BASIS,
-  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-  See the License for the specific language governing permissions and
-  limitations under the License.
+  Variables `cargo wix` supplies: CargoTargetBinDir, Version, Profile, …
 -->
 
-<!--
-  The "cargo wix" subcommand provides a variety of predefined variables available
-  for customization of this template. The values for each variable are set at
-  installer creation time. The following variables are available:
-
-  TargetTriple      = The rustc target triple name.
-  TargetEnv         = The rustc target environment. This is typically either
-                      "msvc" or "gnu" depending on the toolchain downloaded and
-                      installed.
-  TargetVendor      = The rustc target vendor. This is typically "pc", but Rust
-                      does support other vendors, like "uwp".
-  CargoTargetBinDir = The complete path to the directory containing the
-                      binaries (exes) to include. The default would be
-                      "target\release\". If an explicit rustc target triple is
-                      used, i.e. cross-compiling, then the default path would
-                      be "target\<CARGO_TARGET>\<CARGO_PROFILE>",
-                      where "<CARGO_TARGET>" is replaced with the "CargoTarget"
-                      variable value and "<CARGO_PROFILE>" is replaced with the
-                      value from the "CargoProfile" variable. This can also
-                      be overridden manually with the "target-bin-dir" flag.
-  CargoTargetDir    = The path to the directory for the build artifacts, i.e.
-                      "target".
-  CargoProfile      = The cargo profile used to build the binaries
-                      (usually "debug" or "release").
-  Version           = The version for the installer. The default is the
-                      "Major.Minor.Fix" semantic versioning number of the Rust
-                      package.
--->
-
-<!--
-  Please do not remove these pre-processor If-Else blocks. These are used with
-  the `cargo wix` subcommand to automatically determine the installation
-  destination for 32-bit versus 64-bit installers. Removal of these lines will
-  cause installation errors.
--->
-<?if $(sys.BUILDARCH) = x64 or $(sys.BUILDARCH) = arm64 ?>
-    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
-<?else ?>
-    <?define PlatformProgramFilesFolder = "ProgramFilesFolder" ?>
-<?endif ?>
-
-<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'
+     xmlns:util='http://schemas.microsoft.com/wix/UtilExtension'>
 
     <Product
         Id='*'
-        Name='whisper-push'
+        Name='Whisper Push'
         UpgradeCode='8B7E1C2D-3F4A-4B5C-9D6E-7F8A9B0C1D2E'
-        Manufacturer='Whisper Push contributors'
+        Manufacturer='Whisper Push'
         Language='1033'
         Codepage='1252'
         Version='$(var.Version)'>
 
+        <!-- InstallerVersion 500 = Windows Installer 5.0, required by the
+             MsiShortcutProperty table behind the shortcut's AppUserModel.ID.
+             InstallScope perUser = no UAC prompt, everything under HKCU and
+             %LOCALAPPDATA%; WiX derives ALLUSERS/MSIINSTALLPERUSER from it, so
+             declaring those by hand would collide. -->
         <Package Id='*'
             Keywords='Installer'
             Description='Push-to-talk voice dictation, 100% local. Hold a key, speak, release — your words are typed wherever your cursor is.'
-            Manufacturer='Whisper Push contributors'
-            InstallerVersion='450'
+            Manufacturer='Whisper Push'
+            InstallerVersion='500'
             Languages='1033'
             Compressed='yes'
-            InstallScope='perMachine'
+            InstallScope='perUser'
             SummaryCodepage='1252'
             />
 
@@ -82,51 +55,161 @@
             Schedule='afterInstallInitialize'
             DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
 
+        <!-- Whisper Push IS a running process whenever it is installed — a tray
+             daemon with no window to close. Windows Installer cannot replace a
+             binary that is executing, so without this an upgrade either asks for
+             a reboot or fails outright, and an uninstall leaves the .exe behind.
+             WM_CLOSE first (which our tray window ignores), then terminate: the
+             daemon holds no unsaved state, config is written as it changes. -->
+        <util:CloseApplication
+            Id='CloseWhisperPush'
+            Target='whisper-push.exe'
+            Description='Whisper Push is running and will be closed to continue.'
+            CloseMessage='yes'
+            TerminateProcess='1'
+            RebootPrompt='no'/>
+
+        <!-- Versions up to 1.2.7 installed per-MACHINE into Program Files. A
+             per-user package cannot remove one (that needs elevation), so MSI
+             would either fail with an opaque error or leave both installed —
+             with the old copy still first on PATH. Say what to do instead.
+             LaunchConditions runs before FindRelatedProducts, so this message is
+             the one the user sees. -->
+        <Property Id='OLDPERMACHINE'>
+            <DirectorySearch Id='OldInstallDir' Path='[ProgramFiles64Folder]whisper-push\bin' Depth='0'>
+                <FileSearch Id='OldInstallExe' Name='whisper-push.exe'/>
+            </DirectorySearch>
+        </Property>
+        <Condition Message='An older, machine-wide Whisper Push is installed. Uninstall it first (Settings &gt; Apps &gt; whisper-push), then run this installer again — this version installs for your account only and needs no administrator rights.'>
+            <![CDATA[Installed OR NOT OLDPERMACHINE]]>
+        </Condition>
+
         <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
-        <Property Id='DiskPrompt' Value='whisper-push Installation'/>
+        <Property Id='DiskPrompt' Value='Whisper Push Installation'/>
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
-            <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
-                <Directory Id='APPLICATIONFOLDER' Name='whisper-push'>
-                    <!--
-                      Disabling the license sidecar file in the installer is a two step process:
-
-                      1. Comment out or remove the `Component` tag along with its contents.
-                      2. Comment out or remove the `ComponentRef` tag with the "License" Id
-                         attribute value further down in this file.
-                    -->
-                    <Component Id='License' Guid='*'>
-                        <File Id='LicenseFile'
-                            DiskId='1'
-                            Source='LICENSE'
-                            KeyPath='yes'/>
-                    </Component>
-                    
-                    <Directory Id='Bin' Name='bin'>
-                        <Component Id='Path' Guid='9C8F2D3E-4A5B-4C6D-AE7F-8B9C0D1E2F30' KeyPath='yes'>
-                            <Environment
-                                Id='PATH'
-                                Name='PATH'
-                                Value='[Bin]'
-                                Permanent='no'
-                                Part='last'
-                                Action='set'
-                                System='yes'/>
-                        </Component>
-                        <Component Id='binary0' Guid='*'>
-                            <File
-                                Id='exe0'
-                                Name='whisper-push.exe'
-                                DiskId='1'
-                                Source='$(var.CargoTargetBinDir)\whisper-push.exe'
+            <!-- %LOCALAPPDATA%\Programs\Whisper Push -->
+            <Directory Id='LocalAppDataFolder'>
+                <Directory Id='ProgramsFolder' Name='Programs'>
+                    <!-- Every component here installs into the user profile, so
+                         each needs an HKCU value as its KeyPath rather than a
+                         file (ICE38): that is how Windows Installer tracks
+                         per-user state, and it is what makes two accounts on one
+                         machine independent. The RemoveFolder entries are ICE64:
+                         without them uninstall leaves the empty directory tree
+                         behind. (RemoveFolder only deletes an EMPTY directory,
+                         so listing the shared `Programs` parent is safe.) -->
+                    <Directory Id='APPLICATIONFOLDER' Name='Whisper Push'>
+                        <!-- Fixed GUIDs, not '*': a component that mixes a file
+                             with a registry KeyPath cannot have one generated
+                             (CNDL0230). Stable ids are the better practice for
+                             components that live across versions anyway. -->
+                        <Component Id='License' Guid='B3F2A61C-8D44-4F0E-9A73-15C0E2D7A901'>
+                            <File Id='LicenseFile' DiskId='1' Source='LICENSE'/>
+                            <RegistryValue Root='HKCU'
+                                Key='Software\Whisper Push'
+                                Name='License'
+                                Type='integer'
+                                Value='1'
                                 KeyPath='yes'/>
+                            <RemoveFolder Id='RemoveApplicationFolder'
+                                Directory='APPLICATIONFOLDER'
+                                On='uninstall'/>
+                            <RemoveFolder Id='RemoveProgramsFolder'
+                                Directory='ProgramsFolder'
+                                On='uninstall'/>
                         </Component>
-                        <!--
-                          The whisper-push-test E2E harness binary is intentionally
-                          NOT shipped: it's a macOS/metal-only test tool and isn't
-                          built on Windows, so including it breaks the MSI link.
-                        -->
+
+                        <Directory Id='Bin' Name='bin'>
+                            <!-- The user's PATH, not the machine's: a per-user
+                                 install can't write the system environment. -->
+                            <Component Id='Path' Guid='9C8F2D3E-4A5B-4C6D-AE7F-8B9C0D1E2F30'>
+                                <Environment
+                                    Id='PATH'
+                                    Name='PATH'
+                                    Value='[Bin]'
+                                    Permanent='no'
+                                    Part='last'
+                                    Action='set'
+                                    System='no'/>
+                                <RegistryValue Root='HKCU'
+                                    Key='Software\Whisper Push'
+                                    Name='PathEntry'
+                                    Type='integer'
+                                    Value='1'
+                                    KeyPath='yes'/>
+                            </Component>
+                            <Component Id='binary0' Guid='5C7E19A2-6B3D-4A88-B0F1-9E2D4C6A7B33'>
+                                <File
+                                    Id='exe0'
+                                    Name='whisper-push.exe'
+                                    DiskId='1'
+                                    Source='$(var.CargoTargetBinDir)\whisper-push.exe'/>
+                                <RegistryValue Root='HKCU'
+                                    Key='Software\Whisper Push'
+                                    Name='Installed'
+                                    Type='integer'
+                                    Value='1'
+                                    KeyPath='yes'/>
+                                <RemoveFolder Id='RemoveBinFolder'
+                                    Directory='Bin'
+                                    On='uninstall'/>
+                            </Component>
+                            <!--
+                              The whisper-push-test E2E harness binary is intentionally
+                              NOT shipped: it's a macOS/metal-only test tool and isn't
+                              built on Windows, so including it breaks the MSI link.
+                            -->
+                        </Directory>
                     </Directory>
+                </Directory>
+            </Directory>
+
+            <!-- Start Menu entry. Without it the app is unlaunchable after the
+                 first run unless the user types a command, which is exactly the
+                 experience this installer exists to remove. -->
+            <Directory Id='ProgramMenuFolder'>
+                <Directory Id='AppShortcutFolder' Name='Whisper Push'>
+                    <Component Id='StartMenuShortcut' Guid='4E1C9A77-6B2D-4E58-9F14-2A8B7C3D5E61'>
+                        <Shortcut Id='StartMenuApp'
+                            Name='Whisper Push'
+                            Description='Push-to-talk voice dictation, 100% local'
+                            Target='[#exe0]'
+                            WorkingDirectory='Bin'
+                            Icon='whisperpush.ico'>
+                            <!-- Ties toast notifications to our identity; the
+                                 daemon claims the same id at startup (see
+                                 src/tray/windows_shell.rs). -->
+                            <ShortcutProperty Key='System.AppUserModel.ID' Value='com.whisper-push.app'/>
+                        </Shortcut>
+                        <RemoveFolder Id='RemoveAppShortcutFolder' Directory='AppShortcutFolder' On='uninstall'/>
+                        <RegistryValue Root='HKCU'
+                            Key='Software\Whisper Push'
+                            Name='StartMenuShortcut'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes'/>
+
+                        <!-- Clean up what the APP wrote, on uninstall only. The
+                             installer must never create these: src/autostart.rs
+                             owns the Run value (the wizard's "Launch at login"
+                             toggle), and two owners means a repair silently
+                             re-enables what the user turned off. But leaving them
+                             behind means a startup entry pointing at a deleted
+                             binary, which Windows then reports as a broken
+                             startup item forever. -->
+                        <RemoveRegistryValue Root='HKCU'
+                            Key='Software\Microsoft\Windows\CurrentVersion\Run'
+                            Name='WhisperPush'/>
+                        <RemoveRegistryKey Root='HKCU'
+                            Key='Software\Classes\AppUserModelId\com.whisper-push.app'
+                            Action='removeOnUninstall'/>
+                        <!-- Windows Installer removes the values it created,
+                             but not the key they sat in. -->
+                        <RemoveRegistryKey Root='HKCU'
+                            Key='Software\Whisper Push'
+                            Action='removeOnUninstall'/>
+                    </Component>
                 </Directory>
             </Directory>
         </Directory>
@@ -134,24 +217,20 @@
         <Feature
             Id='Binaries'
             Title='Application'
-            Description='Installs all binaries and the license.'
+            Description='Installs Whisper Push and its Start Menu shortcut.'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
             Display='expand'
             Absent='disallow'>
-            <!--
-              Comment out or remove the following `ComponentRef` tag to remove
-              the license sidecar file from the installer.
-            -->
             <ComponentRef Id='License'/>
-
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='StartMenuShortcut'/>
 
             <Feature
                 Id='Environment'
                 Title='PATH Environment Variable'
-                Description='Add the install location of the [ProductName] executable to the PATH system environment variable. This allows the [ProductName] executable to be called from any location.'
+                Description='Add Whisper Push to your PATH so `whisper-push` works from any terminal.'
                 Level='1'
                 Absent='allow'>
                 <ComponentRef Id='Path'/>
@@ -160,65 +239,42 @@
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
 
-        
-        <!--
-          Uncomment the following `Icon` and `Property` tags to change the product icon.
-
-          The product icon is the graphic that appears in the Add/Remove
-          Programs control panel for the application.
-        -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
-        <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
-
+        <!-- The id must end in .ico: Windows Installer derives the icon's file name
+             from it, and a shortcut with an extension-less icon id fails validation. -->
+        <Icon Id='whisperpush.ico' SourceFile='wix\whisper-push.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='whisperpush.ico'/>
         <Property Id='ARPHELPLINK' Value='https://whisperpush.com'/>
-        
+
+        <!-- ── Launch on the last page ────────────────────────────────────────
+             The first launch is what runs the setup wizard, so the default is
+             ticked: a fresh install that leaves nothing running looks broken.
+             `WixShellExec` runs it as the *user*, not as the installer, which
+             matters for a per-user app (and for the tray icon to belong to the
+             right session). -->
+        <Property Id='WixShellExecTarget' Value='[#exe0]'/>
+        <!-- Return='ignore', not 'asyncNoWait': candle rejects the latter on a
+             DLL custom action (CNDL0038, it is for ExeCommand). Ignoring the
+             return is right anyway — ShellExecute comes back as soon as the app
+             is launched, and a failure to launch must not fail the install. -->
+        <CustomAction Id='LaunchApplication'
+            BinaryKey='WixCA'
+            DllEntry='WixShellExec'
+            Impersonate='yes'
+            Return='ignore'/>
+
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
-            
-            <!--
-              Enabling the EULA dialog in the installer is a three step process:
 
-                1. Comment out or remove the two `Publish` tags that follow the
-                   `WixVariable` tag.
-                2. Uncomment the `<WixVariable Id='WixUILicenseRtf' Value='Path\to\Eula.rft'>` tag further down
-                3. Replace the `Value` attribute of the `WixVariable` tag with
-                   the path to a RTF file that will be used as the EULA and
-                   displayed in the license agreement dialog.
-            -->
             <Publish Dialog='WelcomeDlg' Control='Next' Event='NewDialog' Value='CustomizeDlg' Order='99'>1</Publish>
             <Publish Dialog='CustomizeDlg' Control='Back' Event='NewDialog' Value='WelcomeDlg' Order='99'>1</Publish>
 
+            <Publish Dialog='ExitDialog'
+                Control='Finish'
+                Event='DoAction'
+                Value='LaunchApplication'>WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed</Publish>
         </UI>
-
-        
-        <!--
-          Enabling the EULA dialog in the installer requires uncommenting
-          the following `WixUILicenseRTF` tag and changing the `Value`
-          attribute.
-        -->
-        <!-- <WixVariable Id='WixUILicenseRtf' Value='Relative\Path\to\Eula.rtf'/> -->
-
-        
-        <!--
-          Uncomment the next `WixVariable` tag to customize the installer's
-          Graphical User Interface (GUI) and add a custom banner image across
-          the top of each screen. See the WiX Toolset documentation for details
-          about customization.
-
-          The banner BMP dimensions are 493 x 58 pixels.
-        -->
-        <!--<WixVariable Id='WixUIBannerBmp' Value='wix\Banner.bmp'/>-->
-
-        
-        <!--
-          Uncomment the next `WixVariable` tag to customize the installer's
-          Graphical User Interface (GUI) and add a custom image to the first
-          dialog, or screen. See the WiX Toolset documentation for details about
-          customization.
-
-          The dialog BMP dimensions are 493 x 312 pixels.
-        -->
-        <!--<WixVariable Id='WixUIDialogBmp' Value='wix\Dialog.bmp'/>-->
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT' Value='Launch Whisper Push'/>
+        <Property Id='WIXUI_EXITDIALOGOPTIONALCHECKBOX' Value='1'/>
 
     </Product>
 
