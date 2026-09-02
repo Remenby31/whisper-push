@@ -19,6 +19,7 @@ pub mod overlay;
 pub mod paste;
 pub mod permissions;
 pub mod report;
+pub mod screen_vocab;
 pub mod setup;
 pub mod state;
 pub mod templates;

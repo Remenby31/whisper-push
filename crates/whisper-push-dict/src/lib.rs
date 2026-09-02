@@ -15,6 +15,7 @@
 //! The crate is pure (no ASR/GPU deps) so its tests compile in ~1–2s.
 
 mod compiled;
+mod extract;
 mod finalize;
 mod learn;
 mod model;
@@ -22,6 +23,7 @@ mod normalize;
 mod phonetic;
 
 pub use compiled::{CommonWords, Compiled};
+pub use extract::extract_words;
 pub use finalize::{Applied, finalize, finalize_traced};
 pub use learn::{EditClass, EditKind, LastDictation, LearnReport, Pair, classify, learn};
 pub use model::{Dictionary, Entry, LoadError, Source};
@@ -388,12 +390,14 @@ fn rebuild_and_save(guard: &mut Shared) -> Result<(), String> {
     Ok(())
 }
 
-/// The conventional dictionary path next to a given config file.
-pub fn default_path_beside(config_file: &Path) -> PathBuf {
+/// A conventional sibling path next to a given config file — `dictionary.toml`
+/// itself, or another per-feature store (e.g. the screen-vocabulary log) that
+/// wants to live alongside it without merging into it.
+pub fn default_path_beside(config_file: &Path, filename: &str) -> PathBuf {
     config_file
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("dictionary.toml")
+        .join(filename)
 }
 
 #[cfg(test)]
