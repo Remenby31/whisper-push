@@ -170,10 +170,13 @@ struct MenuItems {
     sound_item: CheckMenuItem,
     #[allow(dead_code)]
     debug_item: CheckMenuItem,
+    #[allow(dead_code)]
+    screen_vocab_item: CheckMenuItem,
     quit_id: String,
     notif_id: String,
     sound_id: String,
     debug_id: String,
+    screen_vocab_id: String,
     uninstall_id: String,
     update_item: MenuItem,
     update_id: String,
@@ -419,6 +422,10 @@ impl App {
         let notifications_item = CheckMenuItem::new("Notifications", true, cfg.notifications, None);
         let sound_item = CheckMenuItem::new("Sound Feedback", true, cfg.sound_feedback, None);
         let debug_item = CheckMenuItem::new("Debug Logging", true, cfg.debug, None);
+        // Off by default (#19/#20): capture + OCR every screen on each dictation
+        // press, feeding a separate local vocabulary log — see src/screen_vocab.
+        let screen_vocab_item =
+            CheckMenuItem::new("Screen Vocabulary", true, cfg.screen_vocab_enabled, None);
         let update_item = MenuItem::new("Check for Updates\u{2026}", true, None);
         let report_item = MenuItem::new("Report a Problem\u{2026}", true, None);
         let uninstall_item = MenuItem::new("Uninstall...", true, None);
@@ -545,6 +552,7 @@ impl App {
         let _ = settings_submenu.append(&notifications_item);
         let _ = settings_submenu.append(&sound_item);
         let _ = settings_submenu.append(&debug_item);
+        let _ = settings_submenu.append(&screen_vocab_item);
         let _ = settings_submenu.append(&PredefinedMenuItem::separator());
         let _ = settings_submenu.append(&uninstall_item);
 
@@ -615,6 +623,7 @@ impl App {
             notif_id: notifications_item.id().0.clone(),
             sound_id: sound_item.id().0.clone(),
             debug_id: debug_item.id().0.clone(),
+            screen_vocab_id: screen_vocab_item.id().0.clone(),
             mic_perm_id: mic_perm_item.id().0.clone(),
             acc_perm_id: acc_perm_item.id().0.clone(),
             input_mon_perm_id: input_mon_perm_item.id().0.clone(),
@@ -651,6 +660,7 @@ impl App {
             notifications_item,
             sound_item,
             debug_item,
+            screen_vocab_item,
             hotkey_ids,
             hotkey_items,
             hotkey_submenu,
@@ -1104,6 +1114,20 @@ impl App {
                     let mut c = self.config.lock_safe();
                     c.debug = !c.debug;
                     let _ = c.save();
+                    return;
+                }
+                if id == &mi.screen_vocab_id {
+                    let mut c = self.config.lock_safe();
+                    c.screen_vocab_enabled = !c.screen_vocab_enabled;
+                    let on = c.screen_vocab_enabled;
+                    let _ = c.save();
+                    drop(c);
+                    crate::notify::app(if on {
+                        "Screen vocabulary capture ON \u{2014} every dictation now captures \
+                         and OCRs your screen(s) into a local log."
+                    } else {
+                        "Screen vocabulary capture OFF"
+                    });
                     return;
                 }
                 if id == &mi.dict_correct_last_id {
@@ -1687,6 +1711,87 @@ fn spawn_state_watchdog(tx: Sender<Event>) {
         .ok();
 }
 
+/// One dictation's screen-vocab (#19) capture, tracked as the receiving end of
+/// a one-shot channel rather than a `JoinHandle`: `finish_screen_vocab_capture`
+/// needs a *bounded* wait (`recv_timeout`), and `JoinHandle` has no such API —
+/// joining it can never be interrupted if `capture_and_log` hangs (a wedged
+/// `CGDisplayCreateImage`/Vision call on a sleeping or mid-disconnect display).
+/// A hang like that must not wedge this pipeline thread, the app's only
+/// dictation worker.
+type ScreenVocabGate = crate::screen_vocab::CaptureGate<Receiver<crate::screen_vocab::Outcome>>;
+
+/// Bound on how long `finish_screen_vocab_capture` waits for an in-flight
+/// capture. Generous relative to Vision OCR's typical sub-few-second run time
+/// on Apple Silicon (the common case finishes well before this, since capture
+/// started back at key-down and normal dictations run several seconds) — this
+/// is purely a safety valve against a stuck native call, not the expected path.
+const SCREEN_VOCAB_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Press-time half of #19: kick off `screen_vocab::capture_and_log` on a
+/// detached thread, concurrently with the recording that just started — but
+/// only if the toggle is on. Reads `Config::screen_vocab_enabled` fresh right
+/// here (not from an earlier snapshot taken before any hold-delay gate), so a
+/// toggle flipped in the instant before this runs is always honored.
+fn start_screen_vocab_capture(gate: &mut ScreenVocabGate, config: &Arc<Mutex<Config>>) {
+    let enabled = config.lock_safe().screen_vocab_enabled;
+    gate.start(enabled, || {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::screen_vocab::capture_and_log());
+        });
+        rx
+    });
+}
+
+/// Release-time half of #19: wait for any in-flight screen-vocab capture
+/// before transcription starts, bounded by `SCREEN_VOCAB_JOIN_TIMEOUT` so a
+/// stuck capture degrades to "this dictation's vocab log entry is late/lost"
+/// rather than "no dictation works until the app is restarted". No-op if the
+/// toggle was off (nothing pending). Logs the `Outcome` — including
+/// `WriteFailed`, which `screen_vocab` exists specifically to surface — since
+/// this daemon path is otherwise the only caller that never inspected it.
+fn finish_screen_vocab_capture(gate: &mut ScreenVocabGate) {
+    gate.finish(|rx| match rx.recv_timeout(SCREEN_VOCAB_JOIN_TIMEOUT) {
+        Ok(outcome) => log_screen_vocab_outcome(&outcome),
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+            warn!(
+                "screen_vocab: capture still running after {SCREEN_VOCAB_JOIN_TIMEOUT:?} — \
+                 starting transcription without waiting further (it keeps running in the \
+                 background and still appends its record when done)"
+            );
+        }
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+            warn!("screen_vocab: capture thread ended without a result (it likely panicked)");
+        }
+    });
+}
+
+fn log_screen_vocab_outcome(outcome: &crate::screen_vocab::Outcome) {
+    use crate::screen_vocab::Outcome;
+    match outcome {
+        Outcome::Logged {
+            path,
+            displays,
+            words,
+        } => {
+            debug!(
+                "screen_vocab: {displays} display(s), {words} word(s) appended to {}",
+                path.display()
+            );
+        }
+        Outcome::WriteFailed { path, error } => {
+            warn!(
+                "screen_vocab: failed to append to {}: {error}",
+                path.display()
+            );
+        }
+        // Not errors — just nothing to log (permission not granted, no
+        // displays, or not macOS). `capture_and_log`'s own tracing already
+        // covers these at their point of occurrence.
+        Outcome::PermissionDenied | Outcome::NoDisplays | Outcome::Unsupported => {}
+    }
+}
+
 /// Autonomous pipeline: listens for hotkey events, captures audio,
 /// transcribes, and pastes — all in background threads.
 /// Never touches the winit event loop or tray menu.
@@ -1703,6 +1808,11 @@ fn pipeline_loop(
     // recording commits (and on a mid-recording input swap), so a check that
     // arrives late — for a recording that already ended — is ignored as stale.
     let mut mic_check_gen: u64 = 0;
+    // Screen-vocabulary capture (#19), off unless `Config::screen_vocab_enabled`.
+    // See `screen_vocab::CaptureGate` for the on/off + wait-at-release logic,
+    // and `finish_screen_vocab_capture` for why this is a channel (bounded
+    // wait), not a plain `JoinHandle::join` (unbounded).
+    let mut screen_vocab_gate: ScreenVocabGate = crate::screen_vocab::CaptureGate::new();
 
     loop {
         // recv() is the one place the loop ends (channel closed at shutdown).
@@ -1724,6 +1834,7 @@ fn pipeline_loop(
                 &mut recording,
                 &mut capture,
                 &mut mic_check_gen,
+                &mut screen_vocab_gate,
             )
         }))
         .is_err()
@@ -1732,6 +1843,10 @@ fn pipeline_loop(
             // Reset to a known-good state so the next hotkey works again.
             recording = false;
             capture = None;
+            // Drop (not join) any pending capture: it keeps running detached
+            // and still appends its own record; we just stop tracking it so a
+            // future dictation is never blocked on stale work.
+            screen_vocab_gate = crate::screen_vocab::CaptureGate::new();
             let _ = ui_tx.send(Event::StateChanged(State::Idle));
         }
     }
@@ -1816,6 +1931,7 @@ fn handle_pipeline_event(
     recording: &mut bool,
     capture: &mut Option<crate::audio::capture::AudioCapture>,
     mic_check_gen: &mut u64,
+    screen_vocab_gate: &mut ScreenVocabGate,
 ) {
     match event {
         Event::HotkeyDown => {
@@ -1890,6 +2006,10 @@ fn handle_pipeline_event(
             // can't add latency between key-up and transcription (#7).
             let lang = language.clone();
             std::thread::spawn(move || crate::dictionary::update_session_context(&lang));
+            // Screen-vocabulary capture (#19): kick off concurrently with the
+            // recording that just started. No-op (never spawns a thread) unless
+            // the toggle is on.
+            start_screen_vocab_capture(screen_vocab_gate, config);
             info!("Recording…");
         }
 
@@ -1902,6 +2022,10 @@ fn handle_pipeline_event(
             }
             *recording = false;
             notify_ui(ui_tx, Event::StateChanged(State::Processing));
+            // Wait (bounded) for any still-in-flight screen-vocab capture (#19)
+            // before transcription starts — a no-op if the toggle was off or
+            // the pipeline already finished.
+            finish_screen_vocab_capture(screen_vocab_gate);
             stop_and_transcribe(config, capture, ui_tx);
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
@@ -1933,6 +2057,8 @@ fn handle_pipeline_event(
                         std::thread::spawn(move || {
                             crate::dictionary::update_session_context(&language)
                         });
+                        // Screen-vocabulary capture (#19), same as the hold path.
+                        start_screen_vocab_capture(screen_vocab_gate, config);
                         info!("Recording (toggle)...");
                     }
                     Err(e) => {
@@ -1946,6 +2072,9 @@ fn handle_pipeline_event(
             } else {
                 *recording = false;
                 notify_ui(ui_tx, Event::StateChanged(State::Processing));
+                // Wait (bounded) for any still-in-flight screen-vocab capture
+                // (#19), same as the hold path.
+                finish_screen_vocab_capture(screen_vocab_gate);
                 stop_and_transcribe(config, capture, ui_tx);
                 notify_ui(ui_tx, Event::StateChanged(State::Idle));
             }

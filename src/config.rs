@@ -46,6 +46,12 @@ pub struct Config {
     /// is loaded; system sleep pauses it. Default on; turn off to save battery at
     /// the cost of a slow first dictation after each idle gap.
     pub keep_model_resident: bool,
+    /// Opt-in, off by default (issue #19/#20): on push-to-talk press, run the
+    /// #18 screen-capture + Vision OCR + word-extraction pipeline concurrently
+    /// with audio recording, and wait for it to finish (if it hasn't already)
+    /// before transcription starts. Off ⇒ no screen capture or OCR ever runs —
+    /// today's dictation behaviour is unchanged. macOS-only; a no-op elsewhere.
+    pub screen_vocab_enabled: bool,
 }
 
 impl Default for Config {
@@ -67,6 +73,7 @@ impl Default for Config {
             online_enrichment: false,
             overlay_enabled: true,
             keep_model_resident: true,
+            screen_vocab_enabled: false,
         }
     }
 }
@@ -180,6 +187,7 @@ mod tests {
         assert!(!cfg.debug);
         assert!(!cfg.auto_start);
         assert!(cfg.keep_model_resident);
+        assert!(!cfg.screen_vocab_enabled);
     }
 
     #[test]

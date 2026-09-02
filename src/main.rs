@@ -924,8 +924,8 @@ mod cli_capture_selftest {
 }
 
 /// Manual/dev trigger for the screen-vocabulary capture pipeline (issue #18):
-/// runs it once and reports what happened, so the pipeline is verifiable on
-/// its own ahead of being wired into the dictation lifecycle (#19).
+/// runs it once and reports what happened, independently of the dictation
+/// lifecycle it's also wired into (behind a toggle, off by default — #19).
 mod cli_screen_vocab {
     use anyhow::{Result, bail};
 
