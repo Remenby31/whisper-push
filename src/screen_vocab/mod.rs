@@ -7,14 +7,20 @@
 //! disk: each captured image lives only long enough for OCR to run on it
 //! (see `macos::capture_and_ocr_all_displays`).
 //!
-//! Not wired into the dictation lifecycle yet (that's #19, blocked on this
-//! ticket) — [`capture_and_log`] is invoked on demand today, via the
-//! `whisper-push screen-vocab-capture` CLI command, so the pipeline is
-//! demoable and verifiable on its own.
+//! [`capture_and_log`] is also invokable on demand via the
+//! `whisper-push screen-vocab-capture` CLI command, independently of the
+//! dictation lifecycle, which is how #18 demoed and verified it on its own.
 //!
 //! Entirely best-effort end to end: a missing Screen Recording permission, no
 //! connected displays, or an OCR failure never panics and never surfaces a
 //! user-facing error — see [`Outcome`].
+//!
+//! Wired into the dictation lifecycle (#19) behind `Config::screen_vocab_enabled`
+//! (off by default): [`CaptureGate`] is the pure press/release seam that
+//! decides whether to kick off [`capture_and_log`] concurrently with audio
+//! recording, and whether release must wait for it — see the tray pipeline's
+//! `handle_pipeline_event` (`Event::HotkeyDown`/`HotkeyUp`/`HotkeyToggle`) for
+//! the actual wiring.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -131,6 +137,133 @@ fn append_record(path: &Path, record: &VocabRecord) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     f.write_all(line.as_bytes())
+}
+
+/// The pure press/release seam for wiring this pipeline into the dictation
+/// lifecycle (#19). Generic over the "in-flight capture" handle type `H` so
+/// the on/off gating and the "wait for the tail of an in-flight capture"
+/// logic are unit-testable without spawning a real OS thread or touching
+/// Vision/CoreGraphics — the tray pipeline instantiates it as
+/// `CaptureGate<Receiver<Outcome>>` (a one-shot channel, not a `JoinHandle`,
+/// because release must wait with a *bounded* timeout — see
+/// `finish_screen_vocab_capture` in `tray/mod.rs`), spawning
+/// [`capture_and_log`] on a detached thread that sends its `Outcome` back.
+pub struct CaptureGate<H> {
+    pending: Option<H>,
+}
+
+impl<H> Default for CaptureGate<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<H> CaptureGate<H> {
+    pub fn new() -> Self {
+        Self { pending: None }
+    }
+
+    /// Call when a dictation press is confirmed (hold committed past
+    /// `hold_delay`, or a toggle-press). No-ops — and, crucially, never calls
+    /// `spawn` — when `enabled` is false, which is what makes "toggle off ⇒
+    /// zero capture, ever" true regardless of anything else in this struct.
+    ///
+    /// If a capture is somehow still tracked here (shouldn't happen: `finish`
+    /// always drains `pending` before the next press can start a new
+    /// recording), it is replaced rather than joined — the old handle is
+    /// dropped, which detaches its thread rather than cancelling it, so that
+    /// capture still finishes and appends its record; this call just stops
+    /// tracking it so a new dictation is never blocked on stale work.
+    pub fn start(&mut self, enabled: bool, spawn: impl FnOnce() -> H) {
+        if !enabled {
+            return;
+        }
+        self.pending = Some(spawn());
+    }
+
+    /// Call at release, before transcription starts. Blocks on (joins) any
+    /// capture still in flight, then stops tracking it. No-ops if nothing was
+    /// started — the toggle was off, or `start` was never reached (e.g. a
+    /// quick tap discarded before the hold committed).
+    pub fn finish(&mut self, join: impl FnOnce(H)) {
+        if let Some(h) = self.pending.take() {
+            join(h);
+        }
+    }
+}
+
+#[cfg(test)]
+mod capture_gate_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn disabled_start_never_spawns() {
+        let mut gate: CaptureGate<u32> = CaptureGate::new();
+        let spawned = Cell::new(false);
+        gate.start(false, || {
+            spawned.set(true);
+            1
+        });
+        assert!(!spawned.get());
+        assert!(gate.pending.is_none());
+    }
+
+    #[test]
+    fn enabled_start_spawns_and_tracks() {
+        let mut gate: CaptureGate<u32> = CaptureGate::new();
+        let calls = Cell::new(0);
+        gate.start(true, || {
+            calls.set(calls.get() + 1);
+            42
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(gate.pending, Some(42));
+    }
+
+    #[test]
+    fn finish_joins_pending_and_clears() {
+        let mut gate = CaptureGate::new();
+        gate.start(true, || 7);
+        let joined = Cell::new(None);
+        gate.finish(|h| joined.set(Some(h)));
+        assert_eq!(joined.get(), Some(7));
+        assert!(gate.pending.is_none());
+    }
+
+    #[test]
+    fn finish_is_a_noop_when_nothing_is_pending() {
+        let mut gate: CaptureGate<u32> = CaptureGate::new();
+        let called = Cell::new(false);
+        gate.finish(|_| called.set(true));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn start_when_already_pending_replaces_without_joining() {
+        // Defensive path: should never happen in production (finish() always
+        // drains `pending` before a new press is possible), but must not
+        // block — the old handle is just dropped (detached), not joined.
+        let mut gate = CaptureGate::new();
+        gate.start(true, || 1);
+        let joined: RefCell<Vec<u32>> = RefCell::new(Vec::new());
+        gate.start(true, || {
+            // `spawn` for the second press must run even though a value is
+            // still pending — proving `start` doesn't block on the stale one.
+            joined.borrow_mut().push(1); // sentinel: reached without joining
+            2
+        });
+        assert_eq!(gate.pending, Some(2));
+        assert_eq!(*joined.borrow(), vec![1]);
+    }
+
+    #[test]
+    fn full_press_release_cycle_when_disabled_is_fully_inert() {
+        let mut gate: CaptureGate<u32> = CaptureGate::new();
+        gate.start(false, || panic!("must not spawn when disabled"));
+        gate.finish(|_| panic!("must not join when nothing was started"));
+        assert!(gate.pending.is_none());
+    }
 }
 
 #[cfg(test)]
