@@ -148,6 +148,16 @@ class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
                 (URL(string: "\(base)/vocab.txt")!, dir.appendingPathComponent("vocab.txt")),
             ]
 
+        case "parakeet-ultra-int8":
+            // Pinned commit — must match PARAKEET_ULTRA in src/model_manager.rs.
+            let dir = dataDir.appendingPathComponent("parakeet-ultra")
+            let base = "https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx/resolve/92a2b9f95309d922219be818cfb477dcc482a8d0"
+            return [
+                (URL(string: "\(base)/int8/encoder-model.int8.onnx")!, dir.appendingPathComponent("encoder-model.onnx")),
+                (URL(string: "\(base)/int8/decoder_joint-model.int8.onnx")!, dir.appendingPathComponent("decoder_joint-model.onnx")),
+                (URL(string: "\(base)/vocab.txt")!, dir.appendingPathComponent("vocab.txt")),
+            ]
+
         case "parakeet-tdt-0.6b-v3-int8":
             let dir = dataDir.appendingPathComponent("parakeet")
             let base = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main"

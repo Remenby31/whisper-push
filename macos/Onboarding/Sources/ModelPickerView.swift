@@ -18,6 +18,8 @@ struct ModelPickerView: View {
         switch modelFile {
         case "ggml-large-v3-turbo-q5_0.bin", "ggml-small-q5_1.bin":
             return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent(modelFile).path)
+        case "parakeet-ultra-int8":
+            return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("parakeet-ultra/vocab.txt").path)
         case "parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-int8":
             let parakeetDir = dataDir.appendingPathComponent("parakeet")
             guard FileManager.default.fileExists(atPath: parakeetDir.appendingPathComponent("vocab.txt").path) else {
@@ -37,6 +39,12 @@ struct ModelPickerView: View {
     var body: some View {
         let lowRAM = OnboardingState.totalRAMGB() <= 12
         let models = [
+            ModelInfo(id: "parakeet-ultra",
+                      name: "Parakeet Ultra (int8)",
+                      modelFile: "parakeet-ultra-int8",
+                      size: "670 MB",
+                      warning: nil,
+                      alreadyDownloaded: Self.isModelDownloaded("parakeet-ultra-int8")),
             ModelInfo(id: "parakeet-int8",
                       name: "Parakeet TDT v3 (int8)",
                       modelFile: "parakeet-tdt-0.6b-v3-int8",

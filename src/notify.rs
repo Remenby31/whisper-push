@@ -1,10 +1,30 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::warn;
 
 /// The notification title used throughout the app — single source of truth.
 pub const APP_NAME: &str = "Whisper Push";
 
-/// Send a notification titled with the app name (the common case).
+/// The Settings ▸ Notifications toggle, applied here — the one place every
+/// informational toast passes through — rather than at each call site.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Follow the user's Notifications toggle (startup + the tray handler).
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
+
+/// Send a notification titled with the app name (the common case). Silenced by
+/// the Notifications toggle; something the user must see goes through `alert`.
 pub fn app(body: &str) {
+    if ENABLED.load(Ordering::Relaxed) {
+        send(APP_NAME, body);
+    }
+}
+
+/// Like `app`, but shown even with notifications off: failures that leave
+/// dictation broken or a user action undone (no mic, model failed to load, a
+/// setting that didn't save) must not be swallowed by a preference.
+pub fn alert(body: &str) {
     send(APP_NAME, body);
 }
 

@@ -1,7 +1,28 @@
 //! Small cross-cutting helpers.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing_subscriber::{EnvFilter, Registry, reload};
+
+/// Handle on the daemon's log filter, installed by `init_logging`, so the
+/// Debug Logging toggle applies live like every other menu setting.
+pub static LOG_FILTER: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+
+/// The filter for the `debug` setting ("debug" or "info").
+pub fn log_filter(debug: bool) -> EnvFilter {
+    EnvFilter::new(if debug { "debug" } else { "info" })
+}
+
+/// Switch the running daemon between debug and info logging. An explicit
+/// `RUST_LOG` (which `init_logging` honours over the setting) is left alone.
+pub fn set_debug_logging(on: bool) {
+    if std::env::var_os(EnvFilter::DEFAULT_ENV).is_some() {
+        return;
+    }
+    if let Some(h) = LOG_FILTER.get() {
+        let _ = h.modify(|f| *f = log_filter(on));
+    }
+}
 
 /// Poison-tolerant `Mutex` locking.
 ///

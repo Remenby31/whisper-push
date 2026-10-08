@@ -246,6 +246,17 @@ pub fn transcribe_with_backend(audio: &[f32], language: &str, backend: &Backend)
 /// so `transcribe_with_backend` can wrap it in `catch_unwind` at the one place
 /// all backends pass through.
 fn transcribe_inner(audio: &[f32], language: &str, backend: &Backend) -> Result<String> {
+    // Long pauses carry no words but derail engines (Parakeet v3 drops what
+    // follows, Whisper hallucinates) and cost compute: shorten them once, here,
+    // so every backend and the acoustic layer see the same compacted audio.
+    // A clip the VAD hears no speech in never reaches an engine — that is what
+    // stops Whisper writing "Thank you." on silence. Empty = "no speech" to
+    // every caller. (Keep-warm calls the engines directly, never through here.)
+    let Some(audio) = crate::audio::silence::compact(audio) else {
+        info!("No speech heard by the VAD — engine skipped");
+        return Ok(String::new());
+    };
+    let audio = &*audio;
     // Diagnose cold starts: count the page faults the inference triggers. A cold
     // dictation (model evicted during idle) shows thousands of *major* faults
     // (disk page-in of the weights); a warm one shows ~0. This is what makes the

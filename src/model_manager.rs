@@ -20,6 +20,15 @@ pub struct ModelInfo {
 pub fn list_models() -> Vec<ModelInfo> {
     vec![
         ModelInfo {
+            name: "parakeet-ultra-int8",
+            label: "Parakeet Ultra (int8)",
+            size_mb: 670,
+            description: "Parakeet Ultra 0.6B int8 — most accurate, holds up through long pauses, 25 EU languages",
+            is_downloaded: parakeet_model_dir("parakeet-ultra-int8")
+                .join("vocab.txt")
+                .exists(),
+        },
+        ModelInfo {
             name: "parakeet-tdt-0.6b-v3-int8",
             label: "Parakeet TDT v3 (int8)",
             size_mb: 670,
@@ -61,7 +70,7 @@ pub fn list_models() -> Vec<ModelInfo> {
 /// share `models/parakeet/` (same filenames); a `.variant` marker file records
 /// which is present (absent ⇒ legacy fp32 install). Mirrors the Swift check.
 fn parakeet_variant_downloaded(want_int8: bool) -> bool {
-    let dir = parakeet_model_dir();
+    let dir = parakeet_model_dir("parakeet-tdt-0.6b-v3");
     if !dir.join("vocab.txt").exists() {
         return false;
     }
@@ -97,8 +106,8 @@ fn whisper_model_path(filename: &str) -> PathBuf {
     crate::config::whisper_model_path(filename)
 }
 
-fn parakeet_model_dir() -> PathBuf {
-    crate::config::parakeet_dir()
+fn parakeet_model_dir(model: &str) -> PathBuf {
+    crate::config::parakeet_dir(model)
 }
 
 fn voxtral_model_dir() -> PathBuf {
@@ -119,7 +128,7 @@ pub fn backend_for_model(model: &str) -> &'static str {
 /// Get the default model name for a backend (used by onboarding).
 pub fn model_for_backend(backend: &str) -> &'static str {
     match backend {
-        "parakeet" => "parakeet-tdt-0.6b-v3-int8",
+        "parakeet" => "parakeet-ultra-int8",
         "voxtral-local" => "voxtral-q4.gguf",
         _ => "ggml-large-v3-turbo-q5_0.bin",
     }
@@ -155,6 +164,13 @@ const HF: &str = "https://huggingface.co";
 /// `onnx-community/parakeet-ctc-0.6b-ONNX` is CTC English-only — never "restore"
 /// either one (see src/transcribe/parakeet.rs).
 const PARAKEET_REPO: &str = "istupakov/parakeet-tdt-0.6b-v3-onnx";
+/// Parakeet Ultra (moondream's post-trained v3, same architecture and
+/// tokenizer, CC-BY-4.0) as Olicorne's ONNX export, pinned to a commit so the
+/// bytes we tested are the bytes users get. On 40 French MLS clips it made 21 %
+/// fewer word errors than v3 int8, and kept every word across a 5–12 s pause
+/// where v3 lost most of the sentence.
+const PARAKEET_ULTRA: &str =
+    "Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx/resolve/92a2b9f95309d922219be818cfb477dcc482a8d0";
 
 /// Every file `model` needs, in fetch order. Empty for an unknown name.
 pub fn download_plan(model: &str) -> Vec<DownloadFile> {
@@ -169,9 +185,23 @@ pub fn download_plan(model: &str) -> Vec<DownloadFile> {
         // int8 graphs are self-contained; fp32 ships a large `.onnx.data`
         // sidecar. Either way they are saved under the fixed names parakeet-rs
         // expects — ONNX Runtime executes the quantised ops transparently.
+        "parakeet-ultra-int8" => {
+            let dir = crate::config::parakeet_dir(model);
+            [
+                ("int8/encoder-model.int8.onnx", "encoder-model.onnx"),
+                (
+                    "int8/decoder_joint-model.int8.onnx",
+                    "decoder_joint-model.onnx",
+                ),
+                ("vocab.txt", "vocab.txt"),
+            ]
+            .iter()
+            .map(|(src, dst)| file(format!("{HF}/{PARAKEET_ULTRA}/{src}"), dir.join(dst)))
+            .collect()
+        }
         "parakeet-tdt-0.6b-v3-int8" | "parakeet-tdt-0.6b-v3" => {
             let int8 = model.ends_with("-int8");
-            let dir = crate::config::parakeet_dir();
+            let dir = crate::config::parakeet_dir(model);
             let base = format!("{HF}/{PARAKEET_REPO}/resolve/main");
             let names: &[(&str, &str)] = if int8 {
                 &[
@@ -227,8 +257,13 @@ fn stale_parakeet_variant(model: &str) -> bool {
     let Some(suffix) = model.strip_prefix("parakeet-tdt-0.6b-v3") else {
         return false;
     };
+    // A user-supplied override directory is theirs: never declared stale, so
+    // `download` never `remove_dir_all`s it.
+    if crate::config::parakeet_dir_override().is_some() {
+        return false;
+    }
     let want = if suffix == "-int8" { "int8" } else { "fp32" };
-    let dir = crate::config::parakeet_dir();
+    let dir = crate::config::parakeet_dir(model);
     if !dir.join("vocab.txt").exists() {
         return false; // nothing there yet — a normal first download
     }
@@ -247,7 +282,7 @@ pub fn download(model: &str, on_progress: &mut dyn FnMut(Progress)) -> anyhow::R
     // set first so a failed pull can't leave a half-int8, half-fp32 directory
     // that loads and then produces garbage.
     if stale_parakeet_variant(model) {
-        let dir = crate::config::parakeet_dir();
+        let dir = crate::config::parakeet_dir(model);
         tracing::info!("Parakeet variant switch — clearing {}", dir.display());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -276,7 +311,7 @@ pub fn download(model: &str, on_progress: &mut dyn FnMut(Progress)) -> anyhow::R
     // with identical filenames, so only this marker tells them apart.
     if let Some(variant) = model.strip_prefix("parakeet-tdt-0.6b-v3") {
         let variant = if variant == "-int8" { "int8" } else { "fp32" };
-        let dir = crate::config::parakeet_dir();
+        let dir = crate::config::parakeet_dir(model);
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(dir.join(".variant"), variant);
     }
@@ -387,6 +422,26 @@ mod tests {
         assert!(!names.iter().any(|n| n.ends_with(".data")));
     }
 
+    /// Ultra lives in its own directory (so it never trips the v3 variant swap)
+    /// under the loader's plain names, from the pinned commit we tested.
+    #[test]
+    fn parakeet_ultra_has_its_own_dir_and_a_pinned_source() {
+        let plan = download_plan("parakeet-ultra-int8");
+        assert_eq!(plan.len(), 3);
+        for f in &plan {
+            assert!(
+                f.dest
+                    .starts_with(crate::config::parakeet_dir("parakeet-ultra-int8"))
+            );
+            assert!(f.url.contains(PARAKEET_ULTRA), "{}", f.url);
+        }
+        assert_ne!(
+            crate::config::parakeet_dir("parakeet-ultra-int8"),
+            crate::config::parakeet_dir("parakeet-tdt-0.6b-v3-int8")
+        );
+        assert!(!stale_parakeet_variant("parakeet-ultra-int8"));
+    }
+
     /// fp32 is the variant WITH the sidecar — the two plans must not be the same.
     #[test]
     fn parakeet_fp32_carries_its_sidecar() {
@@ -451,9 +506,10 @@ mod tests {
     #[test]
     fn test_list_models_mirrors_onboarding() {
         let models = list_models();
-        // The five models the onboarding picker offers (keep in sync).
-        assert_eq!(models.len(), 5);
+        // The six models the onboarding picker offers (keep in sync).
+        assert_eq!(models.len(), 6);
         let names: Vec<&str> = models.iter().map(|m| m.name).collect();
+        assert!(names.contains(&"parakeet-ultra-int8"));
         assert!(names.contains(&"parakeet-tdt-0.6b-v3-int8"));
         assert!(names.contains(&"parakeet-tdt-0.6b-v3"));
         assert!(names.contains(&"ggml-small-q5_1.bin"));

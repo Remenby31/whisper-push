@@ -684,10 +684,10 @@ fn open_paywall() {
 // ─── Display (tray + CLI) ───────────────────────────────────────────────────
 
 /// One-line status for the tray.
-pub fn status_text() -> String {
-    match status() {
+pub fn status_text(status: &LicenseStatus) -> String {
+    match status {
         LicenseStatus::Trial { days_left } => {
-            format!("Trial: {days_left} day{} left", plural(days_left))
+            format!("Trial: {days_left} day{} left", plural(*days_left))
         }
         LicenseStatus::Licensed(LicensedKind::Lifetime) => "Licensed: Lifetime".into(),
         LicenseStatus::Licensed(LicensedKind::Subscription { .. }) => {
@@ -697,7 +697,10 @@ pub fn status_text() -> String {
             }
         }
         LicenseStatus::GraceOffline { days_left } => {
-            format!("Offline: {days_left} day{} to reconnect", plural(days_left))
+            format!(
+                "Offline: {days_left} day{} to reconnect",
+                plural(*days_left)
+            )
         }
         LicenseStatus::Expired => "Subscription expired: renew".into(),
         LicenseStatus::Disabled => "License inactive".into(),
@@ -729,8 +732,8 @@ pub fn cta_text(status: &LicenseStatus) -> String {
 }
 
 /// Submenu title with a state glyph.
-pub fn submenu_title() -> String {
-    match status() {
+pub fn submenu_title(status: &LicenseStatus) -> String {
+    match status {
         LicenseStatus::Licensed(_) => "License \u{2713}".into(),
         LicenseStatus::Trial { .. } | LicenseStatus::GraceOffline { .. } => "License: Trial".into(),
         _ => "\u{26a0} License".into(),

@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod decode;
 pub mod playback;
+pub mod silence;
 pub mod stream;
 
 use crate::util::run_with_timeout;
@@ -30,11 +31,12 @@ pub const LOW_SIGNAL_RMS: f32 = 0.003;
 /// Upper bound on a CoreAudio device enumeration. `cpal`'s `input_devices()` /
 /// `output_devices()` call into CoreAudio with no deadline of their own, and a
 /// registered-but-absent Continuity (iPhone) microphone can make that block
-/// effectively forever. `list_devices()` runs on the tray's MAIN thread while
-/// building the menu at startup (`create_tray`), so an unbounded stall there
-/// wedges the entire daemon — the model never loads, the hotkey never arms. Bound
-/// it; on timeout we return an empty list (the "Auto" entry still works) instead
-/// of hanging. A healthy enumeration is sub-100 ms, so this never bites normally.
+/// effectively forever. The tray enumerates on a worker
+/// (`tray::spawn_device_scan`), but an unbounded stall still strands that
+/// thread and leaves the pickers unfilled, and other callers (fallback-mic
+/// ranking, the CLI) wait on it inline. Bound it; on timeout we return an
+/// empty list (the "Auto" entry still works) instead of hanging. A healthy
+/// enumeration is sub-100 ms, so this never bites normally.
 const DEVICE_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Every audio device's name, unclassified. `devices()` reads the device list
@@ -44,8 +46,9 @@ const DEVICE_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// when the Microphone permission is missing, on a device that vanished
 /// mid-session (a display unplugged) and on some virtual drivers. Measured on a
 /// real Mac: `devices()` named all five devices in microseconds while
-/// `input_devices()` never returned.
-fn all_device_names() -> Vec<String> {
+/// `input_devices()` never returned. Hence also the tray's cheap "did the
+/// devices change?" check (`tray::spawn_device_scan`).
+pub fn all_device_names() -> Vec<String> {
     run_with_timeout(DEVICE_ENUM_TIMEOUT, || {
         cpal::default_host()
             .devices()

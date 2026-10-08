@@ -261,7 +261,14 @@ install: sign
 	@mkdir -p "$(HOME)/Library/Application Support/whisper-push/logs"
 	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0">\n<dict>\n\t<key>Label</key>\n\t<string>$(BUNDLE_ID)</string>\n\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>$(INSTALLED_APP)/Contents/MacOS/whisper-push</string>\n\t</array>\n\t<key>RunAtLoad</key>\n\t<true/>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n\t<key>ThrottleInterval</key>\n\t<integer>10</integer>\n\t<key>StandardOutPath</key>\n\t<string>$(HOME)/Library/Application Support/whisper-push/logs/launchd-stdout.log</string>\n\t<key>StandardErrorPath</key>\n\t<string>$(HOME)/Library/Application Support/whisper-push/logs/launchd-stderr.log</string>\n</dict>\n</plist>\n' > "$(LAUNCH_AGENT)"
 	@launchctl bootout gui/$$(id -u)/$(BUNDLE_ID) 2>/dev/null || true
-	@launchctl bootstrap gui/$$(id -u) "$(LAUNCH_AGENT)" 2>/dev/null || true
+	@# bootout returns before launchd has torn the job down, and a bootstrap that
+	@# lands too early fails ("service already loaded" / I/O error) — retry, and
+	@# say so if it never took instead of leaving the app quietly not running.
+	@for i in 1 2 3 4 5; do \
+		launchctl bootstrap gui/$$(id -u) "$(LAUNCH_AGENT)" 2>/dev/null && break; \
+		sleep 1; \
+		[ $$i = 5 ] && { echo "✗ launchctl bootstrap failed — run: launchctl bootstrap gui/$$(id -u) \"$(LAUNCH_AGENT)\""; exit 1; }; \
+	done
 	@echo "✓ Installed to /Applications + registered login autostart"
 	@echo "  (ad-hoc signed: you may need to re-grant Accessibility/Mic on first launch)"
 

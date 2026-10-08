@@ -50,29 +50,47 @@ fn ensure_loaded() {
     if LOADED.swap(true, Ordering::Relaxed) {
         return;
     }
-    load_from_disk();
+    if let Err(e) = load_from_disk() {
+        tracing::warn!("templates.toml: {e}");
+    }
 }
 
-fn load_from_disk() {
-    let parsed: Vec<(String, String)> = std::fs::read_to_string(file_path())
-        .ok()
-        .and_then(|s| toml::from_str::<File>(&s).ok())
-        .map(|f| {
-            f.template
-                .into_iter()
-                .filter(|e| !e.trigger.trim().is_empty())
-                .map(|e| (e.trigger, e.content))
-                .collect()
-        })
-        .unwrap_or_default();
+/// Read `templates.toml` into memory; returns the template count. A missing
+/// file is an empty list. One that can't be used — unreadable (not UTF-8) or
+/// failing to parse (a hand edit with a typo) — is moved aside to
+/// `templates.toml.bad`, like config.toml, and the list in memory is kept:
+/// leaving it in place instead let the next Add Template overwrite every
+/// template the user had.
+fn load_from_disk() -> anyhow::Result<usize> {
+    let path = file_path();
+    let move_aside = |why: String| {
+        let bad = path.with_extension("toml.bad");
+        let _ = std::fs::rename(&path, &bad);
+        anyhow::anyhow!("{why} (moved aside to {})", bad.display())
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(move_aside(e.to_string())),
+    };
+    let file = toml::from_str::<File>(&text).map_err(|e| move_aside(e.message().to_string()))?;
+    let parsed: Vec<(String, String)> = file
+        .template
+        .into_iter()
+        .filter(|e| !e.trigger.trim().is_empty())
+        .map(|e| (e.trigger, e.content))
+        .collect();
+    let n = parsed.len();
     *TEMPLATES.lock_safe() = parsed;
-    LOADED.store(true, Ordering::Relaxed);
     DIRTY.store(true, Ordering::Relaxed);
+    Ok(n)
 }
 
-/// Re-read `templates.toml` from disk (after the user edits it).
-pub fn reload() {
-    load_from_disk();
+/// Re-read `templates.toml` from disk (after the user edits it); returns the
+/// template count, or why the file couldn't be used.
+pub fn reload() -> anyhow::Result<usize> {
+    LOADED.store(true, Ordering::Relaxed);
+    load_from_disk()
 }
 
 /// If `dictation` matches a trigger, the expansion to paste instead.
@@ -108,8 +126,9 @@ pub fn add(trigger: &str, content: &str) -> anyhow::Result<()> {
     save()
 }
 
-/// Remove a template by (normalised) trigger. Returns true if one was removed.
-pub fn remove(trigger: &str) -> bool {
+/// Remove a template by (normalised) trigger, then persist. Returns true if one
+/// was removed.
+pub fn remove(trigger: &str) -> anyhow::Result<bool> {
     ensure_loaded();
     let key = norm(trigger);
     let removed = {
@@ -119,9 +138,9 @@ pub fn remove(trigger: &str) -> bool {
         g.len() != before
     };
     if removed {
-        let _ = save();
+        save()?;
     }
-    removed
+    Ok(removed)
 }
 
 fn save() -> anyhow::Result<()> {
@@ -170,12 +189,6 @@ pub fn triggers() -> Vec<String> {
         .iter()
         .map(|(t, _)| t.clone())
         .collect()
-}
-
-/// Number of templates.
-pub fn count() -> usize {
-    ensure_loaded();
-    TEMPLATES.lock_safe().len()
 }
 
 /// True at most once per change — the tray polls this to refresh its submenu.

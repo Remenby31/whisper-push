@@ -151,9 +151,14 @@ fn test_whisper_load_unload_reload() {
 }
 
 fn test_whisper_not_loaded_error() {
+    // Real speech: a clip the VAD hears no speech in returns "" before any
+    // engine is asked, so silence would never reach the "not loaded" error.
+    let Some(audio) = generate_audio("Testing the unloaded model") else {
+        println!("'say' not available, skipping");
+        return;
+    };
     transcribe::unload_model();
 
-    let audio = vec![0.1f32; 16_000];
     let backend = transcribe::Backend::WhisperLocal("ggml-large-v3-turbo-q5_0.bin".into());
     let result = transcribe::transcribe_with_backend(&audio, "auto", &backend);
 
@@ -229,10 +234,8 @@ fn test_whisper_silence_no_hallucination() {
     let text = transcribe::transcribe_with_backend(&silence, "auto", &backend).unwrap();
 
     println!("Whisper silence: '{text}'");
-    assert!(
-        text.is_empty() || text.len() < 20,
-        "Hallucinated on silence: '{text}'"
-    );
+    // The VAD hears no speech, so the engine is never asked to invent any.
+    assert!(text.is_empty(), "Hallucinated on silence: '{text}'");
 }
 
 fn test_whisper_short_audio_graceful() {
@@ -451,7 +454,7 @@ fn test_parakeet_performance() {
 }
 
 fn test_parakeet_model_dir() {
-    let dir = transcribe::parakeet::model_dir();
+    let dir = transcribe::parakeet::model_dir("parakeet-ultra-int8");
     assert!(dir.to_str().unwrap().contains("parakeet"));
 }
 

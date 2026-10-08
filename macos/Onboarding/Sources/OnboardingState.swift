@@ -85,14 +85,14 @@ class OnboardingState: ObservableObject {
         let canRunVoxtral = ramGB > 12
 
         if freeDiskGB > 10 {
-            selected.insert("parakeet-tdt-0.6b-v3-int8")
+            selected.insert("parakeet-ultra-int8")
             selected.insert("ggml-large-v3-turbo-q5_0.bin")
             if canRunVoxtral {
                 selected.insert("voxtral-q4.gguf")
             }
         } else if freeDiskGB > 5 {
             selected.insert("ggml-large-v3-turbo-q5_0.bin")
-            selected.insert("parakeet-tdt-0.6b-v3-int8")
+            selected.insert("parakeet-ultra-int8")
         }
 
         self.selectedModels = selected
@@ -194,6 +194,8 @@ class OnboardingState: ObservableObject {
             switch model {
             case "ggml-large-v3-turbo-q5_0.bin", "ggml-small-q5_1.bin":
                 return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent(model).path)
+            case "parakeet-ultra-int8":
+                return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("parakeet-ultra/vocab.txt").path)
             case "parakeet-tdt-0.6b-v3", "parakeet-tdt-0.6b-v3-int8":
                 return FileManager.default.fileExists(atPath: dataDir.appendingPathComponent("parakeet/vocab.txt").path)
             case "voxtral-q4.gguf":
@@ -207,13 +209,14 @@ class OnboardingState: ObservableObject {
 
 func modelNameForBackend(_ backend: String) -> String {
     switch backend {
-    case "parakeet": return "parakeet-tdt-0.6b-v3-int8"
+    case "parakeet": return "parakeet-ultra-int8"
     case "voxtral-local": return "voxtral-q4.gguf"
     default: return "ggml-large-v3-turbo-q5_0.bin"
     }
 }
 
 func backendDisplayName(_ model: String) -> String {
+    if model == "parakeet-ultra-int8" { return "Parakeet Ultra" }
     if model == "parakeet-tdt-0.6b-v3-int8" { return "Parakeet TDT (int8)" }
     if model.contains("parakeet") { return "Parakeet TDT (fp32)" }
     if model.contains("voxtral") { return "Voxtral Realtime" }

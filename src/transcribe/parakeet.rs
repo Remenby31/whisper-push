@@ -12,41 +12,28 @@ mod inner {
 
     static PARAKEET: Mutex<Option<ParakeetTDT>> = Mutex::new(None);
 
-    pub fn model_dir() -> PathBuf {
-        // Override (testing / advanced users) — point at an alternate model dir.
-        if let Ok(p) = std::env::var("WHISPER_PUSH_PARAKEET_DIR") {
-            return PathBuf::from(p);
-        }
-        crate::config::parakeet_dir()
+    pub fn model_dir(model_name: &str) -> PathBuf {
+        crate::config::parakeet_dir(model_name)
     }
 
-    /// Load a Parakeet TDT variant. `model_name` selects the weights:
-    /// `…-int8` → the int8 graphs (~670 MB, self-contained); anything else →
-    /// fp32 (a 42 MB graph + a 2.3 GB `encoder-model.onnx.data` sidecar). int8
-    /// is ~3.8x smaller — far less for the OS to compress/decompress under memory
-    /// pressure (the cause of the slow first-dictation-after-idle) and faster on
-    /// CPU; fp32 is the max-accuracy option.
+    /// Load a Parakeet TDT model: `parakeet-ultra-int8` (default), or v3 as
+    /// `…-int8` (~670 MB, self-contained graphs) / fp32 (a 42 MB graph + a
+    /// 2.3 GB `.onnx.data` sidecar). int8 is ~3.8x smaller — far less for the OS
+    /// to compress/decompress under memory pressure — and faster on CPU.
     ///
-    /// Both variants share `models/parakeet/` (parakeet-rs wants fixed
-    /// filenames), so only one is present at a time; a `.variant` marker records
-    /// which (absent ⇒ legacy fp32 install). Switching variants re-downloads.
+    /// The v3 variants share `models/parakeet/` under the same filenames
+    /// (parakeet-rs wants fixed names); `model_manager` owns that swap and its
+    /// `.variant` marker, so "what is missing" is asked there, once.
     pub fn load_model(model_name: &str) -> Result<()> {
-        let dir = model_dir();
-        let want_int8 = model_name.ends_with("-int8");
-        let variant = if want_int8 { "int8" } else { "fp32" };
-        let on_disk = std::fs::read_to_string(dir.join(".variant"))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "fp32".into());
-        if !dir.join("vocab.txt").exists() || on_disk != variant {
-            info!("Parakeet {variant}: downloading...");
+        let dir = model_dir(model_name);
+        if !crate::model_manager::missing_files(model_name).is_empty() {
+            info!("{model_name}: downloading...");
             // ONE downloader for every model and every caller (wizard, tray,
-            // here); it also owns the variant swap (clearing the stale set) and
-            // writes the `.variant` marker. No progress sink on this lazy path.
+            // here). No progress sink on this lazy path.
             crate::model_manager::download(model_name, &mut |_| {})?;
         }
 
-        info!("Loading Parakeet TDT ({variant}) from {}...", dir.display());
+        info!("Loading {model_name} from {}...", dir.display());
         let parakeet = ParakeetTDT::from_pretrained(&dir, None)
             .map_err(|e| anyhow::anyhow!("Failed to load Parakeet: {e}"))?;
 
@@ -185,6 +172,6 @@ pub fn transcribe(_audio: &[f32]) -> anyhow::Result<String> {
     anyhow::bail!("Parakeet not compiled. Build with --features parakeet")
 }
 #[cfg(not(feature = "parakeet"))]
-pub fn model_dir() -> std::path::PathBuf {
-    crate::config::parakeet_dir()
+pub fn model_dir(model_name: &str) -> std::path::PathBuf {
+    crate::config::parakeet_dir(model_name)
 }
