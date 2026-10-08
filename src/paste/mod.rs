@@ -72,6 +72,12 @@ pub fn paste_text(text: &str) -> Result<()> {
 const CLIPBOARD_TRIES: u32 = 6;
 const CLIPBOARD_RETRY: Duration = Duration::from_millis(40);
 
+/// Put `text` on the clipboard (no paste), retrying while another process holds
+/// it. May sleep briefly — call it off the UI thread.
+pub fn copy_text(text: &str) -> Result<()> {
+    set_text_retrying(&mut arboard::Clipboard::new()?, text)
+}
+
 /// Write the clipboard, retrying while another process holds it.
 fn set_text_retrying(clipboard: &mut arboard::Clipboard, text: &str) -> Result<()> {
     let mut last = None;

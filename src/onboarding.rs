@@ -438,7 +438,7 @@ fn popup(level: rfd::MessageLevel, title: &str, body: String) {
     // us from. With no display, skip the dialog and fall back to a notification.
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        crate::notify::app(&body);
+        crate::notify::alert(&body);
         return;
     }
     let title = title.to_string();

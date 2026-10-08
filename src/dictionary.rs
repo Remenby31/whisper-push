@@ -24,6 +24,8 @@ pub fn dictionary_path() -> PathBuf {
 /// simply leaves the engine inert — `finalize_and_record` then returns the raw
 /// text unchanged, so transcription never depends on this succeeding.
 pub fn init(enabled: bool) {
+    // Turning correction on loads the entries; the menu must show them.
+    mark_menu_dirty();
     whisper_push_dict::set_enabled(enabled);
     if !enabled {
         tracing::info!("dictionary: correction disabled");
@@ -68,8 +70,9 @@ pub fn ensure_file() -> PathBuf {
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Set when the dictionary changed off the UI thread (auto-capture), so the
-/// tray can refresh its word list on its next tick.
+/// Set whenever the dictionary changed (auto-capture, a dialog, a reload), so
+/// the tray refreshes its word list on its next tick — the same path History
+/// and Templates use.
 static MENU_DIRTY: AtomicBool = AtomicBool::new(false);
 
 /// Baseline of the focused field right after the last paste, plus the dictation
@@ -110,6 +113,11 @@ const POLL_TICKS: u32 = 20;
 /// erase-then-retype is grabbed mid-way (word deleted) and the real fix is lost.
 /// Reset on each arm.
 static LAST_POLLED: Mutex<Option<String>> = Mutex::new(None);
+
+/// Flag the tray's Dictionary submenu for a refresh (any thread).
+pub fn mark_menu_dirty() {
+    MENU_DIRTY.store(true, Ordering::Relaxed);
+}
 
 /// Take-and-clear the "menu needs refreshing" flag (polled by the tray).
 pub fn take_menu_dirty() -> bool {
@@ -335,7 +343,7 @@ pub fn capture_with_current(current: &str) {
                 // Learn the sound too, from the recent dictation history.
                 crate::acoustic::learn_word(heard, term);
             }
-            MENU_DIRTY.store(true, Ordering::Relaxed);
+            mark_menu_dirty();
             let n = report.learned.len();
             crate::notify::app(&format!(
                 "Learned {n} word{} from your correction",

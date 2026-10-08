@@ -9,6 +9,7 @@ mod inner {
     use burn::tensor::Tensor;
     use std::path::PathBuf;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tracing::info;
 
     use voxtral_mini_realtime::audio::{
@@ -31,6 +32,10 @@ mod inner {
     }
 
     static VOXTRAL: Mutex<Option<VoxtralState>> = Mutex::new(None);
+    /// A transcription has run since the last load, i.e. the GPU shaders are
+    /// compiled. Until then the next dictation pays the load and/or the lazy
+    /// shader compile (~15 s+) — what `is_cold` reports to the UI.
+    static WARM: AtomicBool = AtomicBool::new(false);
 
     pub fn load_model(model_dir: &str) -> Result<()> {
         // cubecl (burn's GPU layer) stores autotune cache in CWD/target/.
@@ -64,6 +69,7 @@ mod inner {
         let time_embed = TimeEmbedding::new(3072);
         let t_embed = time_embed.embed::<Backend>(6.0, &device);
 
+        WARM.store(false, Ordering::Relaxed);
         *VOXTRAL.lock_safe() = Some(VoxtralState {
             model,
             tokenizer,
@@ -84,9 +90,16 @@ mod inner {
         VOXTRAL.lock_safe().is_some()
     }
 
+    /// The next transcription will be slow for a reason other than the audio:
+    /// the model isn't loaded, or its shaders haven't compiled yet.
+    pub fn is_cold() -> bool {
+        !WARM.load(Ordering::Relaxed)
+    }
+
     #[allow(dead_code)]
     pub fn unload_model() {
         *VOXTRAL.lock_safe() = None;
+        WARM.store(false, Ordering::Relaxed);
     }
 
     pub fn transcribe(audio: &[f32]) -> Result<String> {
@@ -104,6 +117,7 @@ mod inner {
             .model
             .transcribe_streaming(mel_tensor, state.t_embed.clone());
         let text = decode_tokens(&generated, &state.tokenizer)?;
+        WARM.store(true, Ordering::Relaxed);
         info!("Voxtral: '{}'", text.trim());
         Ok(text.trim().to_string())
     }
@@ -268,7 +282,7 @@ mod inner {
 #[allow(unused_imports)]
 pub use inner::streaming;
 #[cfg(feature = "voxtral")]
-pub use inner::{is_loaded, load_model, transcribe, unload_model};
+pub use inner::{is_cold, is_loaded, load_model, transcribe, unload_model};
 
 #[cfg(not(feature = "voxtral"))]
 #[allow(dead_code)] // reserved: streaming disabled (see above)
@@ -291,6 +305,10 @@ pub fn load_model(_: &str) -> anyhow::Result<()> {
 }
 #[cfg(not(feature = "voxtral"))]
 pub fn is_loaded() -> bool {
+    false
+}
+#[cfg(not(feature = "voxtral"))]
+pub fn is_cold() -> bool {
     false
 }
 #[cfg(not(feature = "voxtral"))]

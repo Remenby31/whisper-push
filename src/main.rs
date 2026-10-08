@@ -453,9 +453,10 @@ fn perm_state_str(s: permissions::PermState) -> &'static str {
 fn init_logging(debug: bool) {
     use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-    let default_level = if debug { "debug" } else { "info" };
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| crate::util::log_filter(debug));
+    let (filter, handle) = tracing_subscriber::reload::Layer::new(filter);
+    let _ = crate::util::LOG_FILTER.set(handle);
 
     let log_dir = config::log_dir();
     let _ = std::fs::create_dir_all(&log_dir);

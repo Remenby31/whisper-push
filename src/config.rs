@@ -25,8 +25,6 @@ pub struct Config {
     pub output_device: String,
     /// Verbose logging
     pub debug: bool,
-    /// Auto-start on login
-    pub auto_start: bool,
     /// Check for updates on startup
     pub check_updates: bool,
     /// Adaptive dictation: post-correct transcriptions from the learned
@@ -67,7 +65,6 @@ impl Default for Config {
             input_device: "auto".into(),
             output_device: "auto".into(),
             debug: false,
-            auto_start: false,
             check_updates: true,
             dictionary_enabled: true,
             online_enrichment: false,
@@ -234,9 +231,23 @@ pub fn whisper_model_path(filename: &str) -> PathBuf {
     models_dir().join(filename)
 }
 
-/// Parakeet ONNX model directory.
-pub fn parakeet_dir() -> PathBuf {
-    models_dir().join("parakeet")
+/// Parakeet ONNX model directory for `model`. Ultra has its own, so it sits
+/// beside a v3 install; the v3 int8/fp32 pair share one (see model_manager).
+pub fn parakeet_dir(model: &str) -> PathBuf {
+    // Override (testing / advanced users) — resolved HERE so the downloader,
+    // the "is it installed" checks and the loader all agree on one directory.
+    if let Some(p) = parakeet_dir_override() {
+        return p;
+    }
+    let ultra = model.starts_with("parakeet-ultra");
+    models_dir().join(if ultra { "parakeet-ultra" } else { "parakeet" })
+}
+
+/// `WHISPER_PUSH_PARAKEET_DIR`, when set: a directory the USER manages, so the
+/// downloader may fill in missing files there but must never wipe it for a
+/// variant swap (it has no `.variant` marker of ours to go by).
+pub fn parakeet_dir_override() -> Option<PathBuf> {
+    std::env::var_os("WHISPER_PUSH_PARAKEET_DIR").map(PathBuf::from)
 }
 
 /// Voxtral model directory.
@@ -266,7 +277,6 @@ mod tests {
         assert_eq!(cfg.input_device, "auto");
         assert_eq!(cfg.output_device, "auto");
         assert!(!cfg.debug);
-        assert!(!cfg.auto_start);
         assert!(cfg.keep_model_resident);
         assert!(!cfg.screen_vocab_enabled);
     }

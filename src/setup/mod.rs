@@ -1480,14 +1480,14 @@ fn default_selection(models: &[ModelInfo], recommended: &str) -> Vec<String> {
         }
     };
     if free_gb > 10.0 {
-        add("parakeet-tdt-0.6b-v3-int8", &mut out);
+        add("parakeet-ultra-int8", &mut out);
         add("ggml-large-v3-turbo-q5_0.bin", &mut out);
         if ram_gb > 12.0 {
             add("voxtral-q4.gguf", &mut out);
         }
     } else if free_gb > 5.0 {
         add("ggml-large-v3-turbo-q5_0.bin", &mut out);
-        add("parakeet-tdt-0.6b-v3-int8", &mut out);
+        add("parakeet-ultra-int8", &mut out);
     }
     out
 }

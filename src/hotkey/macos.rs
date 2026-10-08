@@ -380,7 +380,8 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                     if CAPTURING.load(Ordering::SeqCst) {
                         if let Some((hk, m)) = try_capture(raw_type, kc, flags) {
                             CAPTURING.store(false, Ordering::SeqCst);
-                            rebind(&hk, &m);
+                            // The tray's HotkeyCaptured handler rebinds — the
+                            // one place for every platform.
                             hold_active.store(false, std::sync::atomic::Ordering::Relaxed);
                             if let Some(tx) = CAPTURE_TX.lock_safe().as_ref() {
                                 let _ = tx.send(Event::HotkeyCaptured(hk, m));
@@ -449,7 +450,7 @@ pub fn start(hotkey: &str, mode: &str, tx: Sender<Event>) -> anyhow::Result<()> 
                 tracing::error!(
                     "Failed to create CGEventTap — check Accessibility/Input Monitoring"
                 );
-                crate::notify::app(
+                crate::notify::alert(
                     "Hotkey unavailable — grant Accessibility + Input Monitoring, then restart.",
                 );
                 return;

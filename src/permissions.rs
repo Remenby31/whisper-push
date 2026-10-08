@@ -294,7 +294,7 @@ pub fn guided_setup() {
                 || check(kind) == PermState::Granted,
                 if quick { 10 } else { 20 },
             ) {
-                crate::notify::app(&format!(
+                crate::notify::alert(&format!(
                     "{} not granted. Open menu \u{2192} Permissions to retry.",
                     kind.title()
                 ));
@@ -322,7 +322,7 @@ fn grant_instruction(kind: PermKind) -> &'static str {
 fn finish_guided_setup() {
     #[cfg(target_os = "macos")]
     {
-        crate::notify::app("\u{2713} All set! Restarting to enable the hotkey\u{2026}");
+        crate::notify::alert("\u{2713} All set! Restarting to enable the hotkey\u{2026}");
         std::thread::sleep(Duration::from_millis(1500));
         // Detached so it survives this process being killed by `-k`.
         let _ = std::process::Command::new("sh")
@@ -331,7 +331,7 @@ fn finish_guided_setup() {
             .spawn();
     }
     #[cfg(target_os = "linux")]
-    crate::notify::app(
+    crate::notify::alert(
         "\u{2713} All set \u{2014} log out and back in for the group change to take effect.",
     );
     #[cfg(target_os = "windows")]
@@ -590,11 +590,11 @@ fn request_input_group() {
             std::thread::spawn(move || {
                 let ok = child.wait().map(|s| s.success()).unwrap_or(false);
                 if ok {
-                    crate::notify::app(
+                    crate::notify::alert(
                         "Added to the 'input' group \u{2014} log out and back in to finish.",
                     );
                 } else {
-                    crate::notify::app(&format!(
+                    crate::notify::alert(&format!(
                         "Couldn't add you to the 'input' group. Run: sudo usermod -aG input {user}"
                     ));
                 }
@@ -602,7 +602,7 @@ fn request_input_group() {
         }
         Err(e) => {
             tracing::warn!("pkexec unavailable ({e})");
-            crate::notify::app(&format!(
+            crate::notify::alert(&format!(
                 "Run this once, then log out and back in: sudo usermod -aG input {user}"
             ));
         }

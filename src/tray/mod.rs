@@ -192,10 +192,163 @@ fn platform_icon_size() -> u32 {
 
 /// Submenu title showing the current device selection, e.g. "Input: Auto".
 fn device_title(label: &str, value: &str) -> String {
-    if value == "auto" {
-        format!("{label}: Auto")
-    } else {
-        format!("{label}: {value}")
+    format!("{label}: {}", if value == "auto" { "Auto" } else { value })
+}
+
+/// (Re)fill a device picker: "Auto" then every device, ticked and titled from
+/// `current`. Rows go in at the top, replacing `items`, so a trailing hint (the
+/// "Microphone denied" line) stays last.
+fn fill_device_picker(
+    submenu: &Submenu,
+    items: &mut Vec<(CheckMenuItem, String)>,
+    label: &str,
+    current: &str,
+    names: &[String],
+) {
+    for (it, _) in items.drain(..) {
+        let _ = submenu.remove(&it);
+    }
+    let rows = std::iter::once("auto").chain(names.iter().map(String::as_str));
+    for (i, name) in rows.enumerate() {
+        let text = if name == "auto" { "Auto" } else { name };
+        let item = CheckMenuItem::new(text, true, name == current, None);
+        let _ = submenu.insert(&item, i);
+        items.push((item, name.to_string()));
+    }
+    submenu.set_text(device_title(label, current));
+}
+
+/// The one way the device pickers get filled: enumerate the audio devices off
+/// the main thread and report them (`Event::DevicesChanged`). Called once at
+/// startup (`create_tray`, whose pickers hold only "Auto" + the pin until this
+/// lands) and on every return to Idle, so a headset plugged in mid-session can
+/// be picked without a restart.
+///
+/// The classified enumeration is the slow, hang-prone one (it queries every
+/// device's stream formats), so after the first scan it only runs when the
+/// fast, unclassified name list (`audio::all_device_names`) differs from the
+/// one seen last time — a dictation with no device change costs one
+/// microsecond-scale `devices()` call. Single-flight, and it gives up for the
+/// session after a stalled enumeration: each stall strands a thread inside
+/// CoreAudio (`audio::DEVICE_ENUM_TIMEOUT`), and one is enough.
+fn spawn_device_scan(tx: Sender<Event>) {
+    static BUSY: AtomicBool = AtomicBool::new(false);
+    // The unclassified names as of the last scan; `None` until the first one.
+    static SEEN: Mutex<Option<Vec<String>>> = Mutex::new(None);
+    if BUSY.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let names = crate::audio::all_device_names();
+        let first = {
+            let mut seen = SEEN.lock_safe();
+            // Empty = `devices()` itself failed: no evidence of a change.
+            if seen.is_some() && (names.is_empty() || seen.as_ref() == Some(&names)) {
+                BUSY.store(false, Ordering::Release);
+                return;
+            }
+            seen.replace(names).is_none()
+        };
+        let t0 = Instant::now();
+        let inputs = crate::audio::list_devices().unwrap_or_default();
+        let outputs = crate::audio::list_output_devices().unwrap_or_default();
+        let stalled = t0.elapsed() >= Duration::from_secs(2);
+        if stalled {
+            warn!("Device enumeration stalled \u{2014} not rescanning this session");
+        } else {
+            BUSY.store(false, Ordering::Release);
+        }
+        // A stalled scan comes back with the unclassified fallback list
+        // (outputs listed as inputs). A rescan keeps the pickers as they are
+        // rather than freeze that list in; the first scan sends it anyway — the
+        // pickers have nothing better, and a user whose mic vanished (exactly
+        // when classification stalls) must still be able to pick another.
+        if !stalled || first {
+            let _ = tx.send(Event::DevicesChanged {
+                inputs,
+                outputs,
+                first,
+            });
+        }
+    });
+}
+
+/// Tick `name` in a device picker and retitle the submenu after it.
+fn pick_device(items: &[(CheckMenuItem, String)], submenu: &Submenu, label: &str, name: &str) {
+    for (item, n) in items {
+        item.set_checked(n == name);
+    }
+    submenu.set_text(device_title(label, name));
+}
+
+/// The value behind the list row `id` names (a word, a trigger, a dictation);
+/// `None` for any other id and for placeholder / "+N more" rows.
+fn hit<'a>(rows: &'a [(MenuItem, String)], id: &str) -> Option<&'a str> {
+    rows.iter()
+        .find(|(it, v)| !v.is_empty() && it.id().0 == id)
+        .map(|(_, v)| v.as_str())
+}
+
+/// Replace a list section of a submenu (dictionary words, template triggers,
+/// recent dictations): drop the `old` rows, then add one clickable row per
+/// (label, value) — inserted from index `at`, or appended when `None` — capped
+/// at `max` with a "+N more" line, or a disabled `empty` placeholder. Rows
+/// that aren't entries carry an empty value, which `hit` ignores.
+fn rebuild_list(
+    submenu: &Submenu,
+    old: &mut Vec<(MenuItem, String)>,
+    mut at: Option<usize>,
+    total: usize,
+    rows: impl Iterator<Item = (String, String)>,
+    max: usize,
+    empty: &str,
+) {
+    for (it, _) in old.drain(..) {
+        let _ = submenu.remove(&it);
+    }
+    let mut add = |it: MenuItem, value: String| {
+        let _ = match at.as_mut() {
+            Some(i) => {
+                *i += 1;
+                submenu.insert(&it, *i - 1)
+            }
+            None => submenu.append(&it),
+        };
+        old.push((it, value));
+    };
+    if total == 0 {
+        add(MenuItem::new(empty, false, None), String::new());
+        return;
+    }
+    for (label, value) in rows.take(max) {
+        add(MenuItem::new(label, true, None), value);
+    }
+    if total > max {
+        let more = format!("  \u{2026} +{} more (use Open file)", total - max);
+        add(MenuItem::new(more, false, None), String::new());
+    }
+}
+
+/// Label of the "forget voiceprints" item, e.g. "Forget 3 voiceprints".
+fn voiceprint_label(n: usize) -> String {
+    format!("Forget {n} voiceprint{}", if n == 1 { "" } else { "s" })
+}
+
+/// Tick the active model, mark any not yet downloaded with ⤓ and title the
+/// submenu after the active one ("Engine: Parakeet v3"). Re-read from disk
+/// every time, so a finished download drops its ⤓.
+fn render_model_rows(mi: &MenuItems, active: &str) {
+    let models = crate::model_manager::list_models();
+    for (item, name) in &mi.model_items {
+        let Some(m) = models.iter().find(|m| m.name == name.as_str()) else {
+            continue;
+        };
+        let dl = if m.is_downloaded { "" } else { " \u{2913}" };
+        item.set_text(format!("{}{dl}", m.label));
+        item.set_checked(m.name == active);
+        if m.name == active {
+            mi.engine_submenu.set_text(format!("Engine: {}", m.label));
+        }
     }
 }
 
@@ -226,6 +379,13 @@ const HOTKEY_PRESETS: &[(&str, &str, &str)] = &[
     ("Toggle: Ctrl+Shift+Space", "ctrl+shift+space", "toggle"),
     ("Toggle: Alt+Space", "alt+space", "toggle"),
 ];
+
+/// Whether a binding is one of the presets (anything else is a custom one).
+fn is_preset(hotkey: &str, mode: &str) -> bool {
+    HOTKEY_PRESETS
+        .iter()
+        .any(|(_, hk, m)| *hk == hotkey && *m == mode)
+}
 
 /// User events forwarded into winit's event loop.
 #[derive(Debug)]
@@ -305,6 +465,15 @@ struct App {
     // counter lets a timeout tell its own capture from a later one.
     capturing: bool,
     capture_gen: u64,
+    // The model the pipeline last loaded successfully (`ModelLoaded`), so
+    // clicking the engine already running doesn't unload and reload it.
+    loaded_model: Option<String>,
+    // The engine the user picked last (the newest `LoadModel` from the menu):
+    // only ITS failure falls back to the saved model.
+    requested_model: Option<String>,
+    // License state as of the last `refresh_license_submenu`, read by the
+    // menu head on every state change instead of re-reading license.json.
+    licensed: bool,
 }
 
 struct MenuItems {
@@ -317,37 +486,27 @@ struct MenuItems {
     status_item: MenuItem,
     /// Separator under the head; in the menu only when the head has content.
     head_separator: PredefinedMenuItem,
-    #[allow(dead_code)]
+    // Settings checkboxes: clicks are matched on the item's own id, and its
+    // checked state is the value saved (see `App::toggle`).
     notifications_item: CheckMenuItem,
-    #[allow(dead_code)]
     sound_item: CheckMenuItem,
-    #[allow(dead_code)]
     debug_item: CheckMenuItem,
-    #[allow(dead_code)]
     screen_vocab_item: CheckMenuItem,
     quit_id: String,
-    notif_id: String,
-    sound_id: String,
-    debug_id: String,
-    screen_vocab_id: String,
     uninstall_id: String,
     update_item: MenuItem,
     update_id: String,
     #[allow(dead_code)]
     report_item: MenuItem,
     report_id: String,
-    hotkey_ids: Vec<(String, String, String)>,
-    hotkey_items: Vec<(CheckMenuItem, String, String)>,
+    hotkey_items: Vec<(CheckMenuItem, &'static str, &'static str)>,
     hotkey_submenu: Submenu,
     /// One item doing three jobs, so a custom binding is visible in the same
     /// list as the presets: "Set Custom Hotkey…" when idle, "Press your shortcut
     /// now…" while armed, and a *checked* "Custom: ⌘⇧D" once one is bound.
-    custom_hotkey_item: Option<CheckMenuItem>,
-    custom_hotkey_id: String,
-    input_ids: Vec<(String, String)>,
+    custom_hotkey_item: CheckMenuItem,
     input_device_items: Vec<(CheckMenuItem, String)>,
     input_submenu: Submenu,
-    output_ids: Vec<(String, String)>,
     output_device_items: Vec<(CheckMenuItem, String)>,
     output_submenu: Submenu,
     /// One row per permission THIS platform gates (see `permissions::tracked`),
@@ -357,17 +516,18 @@ struct MenuItems {
     perms_submenu: Submenu,
 
     setup_id: String,
-    model_items: Vec<(MenuItem, String)>, // (item, model name = config.model value)
+    engine_submenu: Submenu,
+    model_items: Vec<(CheckMenuItem, String)>, // (item, model name = config.model value)
     // Dictionary (adaptive correction)
     dict_submenu: Submenu,
-    #[allow(dead_code)]
     dict_enabled_item: CheckMenuItem,
     dict_correct_last_id: String,
     dict_add_id: String,
     dict_open_id: String,
     dict_reload_id: String,
-    dict_enabled_id: String,
-    dict_forget_voice_id: String,
+    /// "Forget N voiceprints" — retitled (and enabled only when N > 0) on every
+    /// dictionary refresh.
+    dict_forget_voice_item: MenuItem,
     /// One (item, term) per listed word; rebuilt on every dictionary change.
     /// A placeholder/"more" line has an empty term.
     dict_entry_items: Vec<(MenuItem, String)>,
@@ -376,7 +536,7 @@ struct MenuItems {
     template_add_id: String,
     template_open_id: String,
     template_reload_id: String,
-    /// One disabled label per template trigger; rebuilt on change.
+    /// One row per template trigger (click → Edit/Delete); rebuilt on change.
     template_items: Vec<(MenuItem, String)>,
     // History (recent dictations — click an entry to copy it)
     history_submenu: Submenu,
@@ -419,83 +579,109 @@ impl App {
             pending_release_page: None,
             capturing: false,
             capture_gen: 0,
+            loaded_model: None,
+            requested_model: None,
+            licensed: false,
         }
     }
 
-    /// Disarm capture and put the menu item back to its resting label (the
-    /// current custom binding, if any). The one exit from capture mode.
+    /// Apply a change to the config and save it — every menu setting goes
+    /// through here. A failed save is logged and surfaced: the menu already
+    /// shows the new value, which would otherwise silently revert at the next
+    /// launch.
+    fn update_config(&self, f: impl FnOnce(&mut Config)) {
+        let mut c = self.config.lock_safe();
+        f(&mut c);
+        if let Err(e) = c.save() {
+            warn!("config save failed: {e}");
+            crate::notify::alert(&format!(
+                "Couldn't save your settings ({e}) \u{2014} the change lasts until you quit."
+            ));
+        }
+    }
+
+    /// A Settings checkbox click: the item's own check (muda flips it on click)
+    /// becomes the saved value, so the two can't drift. Returns the new value.
+    fn toggle(&self, item: &CheckMenuItem, field: fn(&mut Config) -> &mut bool) -> bool {
+        let on = item.is_checked();
+        self.update_config(|c| *field(c) = on);
+        on
+    }
+
+    /// Bind a hotkey — a preset pick or a captured custom one: save it, rebind
+    /// the live listener (the one place that does, on every platform), leave
+    /// capture mode and sync the menu.
+    fn apply_hotkey(&mut self, hotkey: &str, mode: &str) {
+        self.update_config(|c| {
+            c.hotkey = hotkey.to_string();
+            c.hotkey_mode = mode.to_string();
+        });
+        crate::hotkey::rebind(hotkey, mode);
+        self.end_hotkey_capture();
+    }
+
+    /// Make the Hotkey submenu say what is bound: the preset ticks, the custom
+    /// row (label + tick) and the title. The one place that writes them.
+    fn sync_hotkey_menu(&self) {
+        let Some(mi) = &self.menu_items else {
+            return;
+        };
+        let (hotkey, mode) = {
+            let c = self.config.lock_safe();
+            (c.hotkey.clone(), c.hotkey_mode.clone())
+        };
+        let disp = format_hotkey_display(&hotkey, &mode);
+        for (item, hk, m) in &mi.hotkey_items {
+            item.set_checked(*hk == hotkey && *m == mode);
+        }
+        // A binding that matches no preset is a custom one: show it here,
+        // checked, so the menu always says what is actually bound.
+        let custom = !is_preset(&hotkey, &mode);
+        mi.custom_hotkey_item
+            .set_text(custom_hotkey_label(custom.then(|| disp.clone())));
+        mi.custom_hotkey_item.set_checked(custom);
+        mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
+    }
+
+    /// Disarm capture (safe when not armed; any pending timeout goes stale)
+    /// and put the menu back to its resting state. The one exit from capture
+    /// mode.
     fn end_hotkey_capture(&mut self) {
         crate::hotkey::cancel_capture();
         self.capturing = false;
         self.capture_gen += 1;
-        let cfg = self.config.lock_safe().clone();
-        let is_custom = !HOTKEY_PRESETS
-            .iter()
-            .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
-        if let Some(it) = self
-            .menu_items
-            .as_ref()
-            .and_then(|mi| mi.custom_hotkey_item.as_ref())
-        {
-            it.set_text(custom_hotkey_label(
-                is_custom.then(|| format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
-            ));
-            it.set_checked(is_custom);
-        }
+        self.sync_hotkey_menu();
     }
 
     fn create_tray(&mut self) {
-        // Before anything is drawn: a device pinned in the config that no longer
-        // exists must not stay pinned (see `reconcile_device_pins`).
-        self.reconcile_device_pins();
+        // No device enumeration here: it can stall for seconds (see
+        // `audio::DEVICE_ENUM_TIMEOUT`) and this is the main thread. The scan
+        // runs on a worker and fills the pickers when it lands; that first
+        // result is also where stale pins get reconciled (`DevicesChanged`).
+        // Its event can't be handled before this function returns.
+        spawn_device_scan(self.state.tx.clone());
         let cfg = self.config.lock_safe().clone();
+        // Until then a picker holds "Auto" + the pinned device, if any, so it
+        // already shows what is chosen.
+        let pinned = |d: &String| Vec::from_iter((d != "auto").then(|| d.clone()));
 
-        // Build menu
-        let is_ready = self.state.current() == State::Idle;
-        let disp = format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode);
-        let status_text = if is_ready {
-            format!("Whisper Push ({disp})")
-        } else {
-            "Whisper Push: \u{231b} Loading model\u{2026}".into()
-        };
-        let status_item = MenuItem::new(&status_text, false, None);
+        // Build menu. The state line's text is set by `sync_menu_head`.
+        let status_item = MenuItem::new("Whisper Push", false, None);
 
-        // Hotkey submenu (titled with the current binding)
-        let hotkey_submenu = Submenu::new(
-            &format!(
-                "Hotkey: {}",
-                format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)
-            ),
-            true,
-        );
+        // Hotkey submenu. Ticks, the custom row and the title are all written
+        // by `sync_hotkey_menu` once the menu exists.
+        let hotkey_submenu = Submenu::new("Hotkey", true);
         let mut hotkey_items = Vec::new();
         for (label, hotkey, mode) in HOTKEY_PRESETS {
-            let checked = *hotkey == cfg.hotkey && *mode == cfg.hotkey_mode;
-            let item = CheckMenuItem::new(*label, true, checked, None);
+            let item = CheckMenuItem::new(*label, true, false, None);
             let _ = hotkey_submenu.append(&item);
-            hotkey_items.push((item, hotkey.to_string(), mode.to_string()));
+            hotkey_items.push((item, *hotkey, *mode));
         }
         // "Set Custom Hotkey…" — live key-combo capture, on every platform
         // (`hotkey::combo::Capture`, wired into all three listeners).
-        let (custom_hotkey_item, custom_hotkey_id) = {
-            let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
-            // A binding that matches no preset is a custom one: show it here,
-            // checked, so the menu always says what is actually bound.
-            let is_custom = !HOTKEY_PRESETS
-                .iter()
-                .any(|(_, hk, m)| *hk == cfg.hotkey && *m == cfg.hotkey_mode);
-            let item = CheckMenuItem::new(
-                custom_hotkey_label(
-                    is_custom.then(|| format_hotkey_display(&cfg.hotkey, &cfg.hotkey_mode)),
-                ),
-                true,
-                is_custom,
-                None,
-            );
-            let _ = hotkey_submenu.append(&item);
-            let id = item.id().0.clone();
-            (Some(item), id)
-        };
+        let _ = hotkey_submenu.append(&PredefinedMenuItem::separator());
+        let custom_hotkey_item = CheckMenuItem::new(custom_hotkey_label(None), true, false, None);
+        let _ = hotkey_submenu.append(&custom_hotkey_item);
 
         // Permissions (computed once here; reused for the Permissions section).
         let perms = crate::permissions::check_all();
@@ -507,19 +693,15 @@ impl App {
         // muda 0.16 issue, fixed by the 0.19 upgrade). Device *enumeration* needs
         // no microphone permission on macOS — TCC only gates capture — so both
         // pickers are always populated; mic usability is shown in Permissions.
-        let input_submenu = Submenu::new(&device_title("Input", &cfg.input_device), true);
-        let mut input_device_items: Vec<(CheckMenuItem, String)> = Vec::new();
-        let input_auto = CheckMenuItem::new("Auto", true, cfg.input_device == "auto", None);
-        let _ = input_submenu.append(&input_auto);
-        input_device_items.push((input_auto, "auto".to_string()));
-        if let Ok(devices) = crate::audio::list_devices() {
-            for name in devices {
-                let checked = cfg.input_device == name;
-                let item = CheckMenuItem::new(&name, true, checked, None);
-                let _ = input_submenu.append(&item);
-                input_device_items.push((item, name));
-            }
-        }
+        let input_submenu = Submenu::new("Input", true);
+        let mut input_device_items = Vec::new();
+        fill_device_picker(
+            &input_submenu,
+            &mut input_device_items,
+            "Input",
+            &cfg.input_device,
+            &pinned(&cfg.input_device),
+        );
         // If the mic is explicitly denied, recording won't work — hint the user.
         if perms.microphone() == crate::permissions::PermState::Denied {
             let _ = input_submenu.append(&PredefinedMenuItem::separator());
@@ -531,37 +713,26 @@ impl App {
         }
 
         // Output device picker (no permission needed).
-        let output_submenu = Submenu::new(&device_title("Output", &cfg.output_device), true);
-        let mut output_device_items: Vec<(CheckMenuItem, String)> = Vec::new();
-        let output_auto = CheckMenuItem::new("Auto", true, cfg.output_device == "auto", None);
-        let _ = output_submenu.append(&output_auto);
-        output_device_items.push((output_auto, "auto".to_string()));
-        if let Ok(devices) = crate::audio::list_output_devices() {
-            for name in devices {
-                let checked = cfg.output_device == name;
-                let item = CheckMenuItem::new(&name, true, checked, None);
-                let _ = output_submenu.append(&item);
-                output_device_items.push((item, name));
-            }
-        }
+        let output_submenu = Submenu::new("Output", true);
+        let mut output_device_items = Vec::new();
+        fill_device_picker(
+            &output_submenu,
+            &mut output_device_items,
+            "Output",
+            &cfg.output_device,
+            &pinned(&cfg.output_device),
+        );
 
-        // Model selector
-        let models = crate::model_manager::list_models();
         // Engine submenu — one entry per model, mirroring the onboarding picker
-        // (model_manager::list_models is the shared source of truth). ● marks the
-        // active model; ⤓ marks one not yet downloaded — clicking it downloads it
-        // on the pipeline thread (LoadModel), then loads it.
-        let backend_submenu = Submenu::new("Engine", true);
-        let mut model_items: Vec<(MenuItem, String)> = Vec::new();
-        for m in &models {
-            let active = if m.name == cfg.model {
-                "\u{25CF} "
-            } else {
-                "    "
-            };
-            let dl = if m.is_downloaded { "" } else { " \u{2913}" };
-            let item = MenuItem::new(format!("{active}{}{dl}", m.label), true, None);
-            let _ = backend_submenu.append(&item);
+        // (model_manager::list_models is the shared source of truth). The active
+        // model is ticked; ⤓ marks one not yet downloaded — clicking it downloads
+        // it on the pipeline thread (LoadModel), then loads it. Text, ticks and
+        // title come from `render_model_rows`.
+        let engine_submenu = Submenu::new("Engine", true);
+        let mut model_items: Vec<(CheckMenuItem, String)> = Vec::new();
+        for m in crate::model_manager::list_models() {
+            let item = CheckMenuItem::new(m.label, true, false, None);
+            let _ = engine_submenu.append(&item);
             model_items.push((item, m.name.to_string()));
         }
 
@@ -575,7 +746,7 @@ impl App {
             CheckMenuItem::new("Screen Vocabulary", true, cfg.screen_vocab_enabled, None);
         let update_item = MenuItem::new("Check for Updates\u{2026}", true, None);
         let report_item = MenuItem::new("Report a Problem\u{2026}", true, None);
-        let uninstall_item = MenuItem::new("Uninstall...", true, None);
+        let uninstall_item = MenuItem::new("Uninstall\u{2026}", true, None);
         let quit_item = MenuItem::new("Quit Whisper Push", true, None);
 
         // Permissions (perms already computed above for the input picker gate)
@@ -597,24 +768,16 @@ impl App {
         let setup_item = MenuItem::new("\u{2699} Run Guided Setup\u{2026}", true, None);
         let _ = perms_submenu.append(&setup_item);
 
-        // Dictionary submenu — see & edit your words live (hot-reloaded).
-        let dict_count = crate::dictionary::entry_count();
-        let dict_submenu = Submenu::new(&format!("Dictionary ({dict_count})"), true);
+        // Dictionary submenu — see & edit your words live (hot-reloaded). Its
+        // title, word list and voiceprint count come from `refresh_dict_submenu`.
+        let dict_submenu = Submenu::new("Dictionary", true);
         let dict_correct_last_item = MenuItem::new("Correct Last Dictation\u{2026}", true, None);
         let dict_add_item = MenuItem::new("Add Word\u{2026}", true, None);
         let dict_open_item = MenuItem::new("Open dictionary.toml\u{2026}", true, None);
         let dict_reload_item = MenuItem::new("Reload from Disk", true, None);
         let dict_enabled_item =
             CheckMenuItem::new("Adaptive Correction", true, cfg.dictionary_enabled, None);
-        let voiceprints = crate::acoustic::len();
-        let dict_forget_voice_item = MenuItem::new(
-            &format!(
-                "Forget {voiceprints} voiceprint{}",
-                if voiceprints == 1 { "" } else { "s" }
-            ),
-            voiceprints > 0,
-            None,
-        );
+        let dict_forget_voice_item = MenuItem::new(voiceprint_label(0), false, None);
         let _ = dict_submenu.append(&dict_correct_last_item);
         let _ = dict_submenu.append(&dict_add_item);
         let _ = dict_submenu.append(&dict_open_item);
@@ -622,16 +785,17 @@ impl App {
         let _ = dict_submenu.append(&dict_enabled_item);
         let _ = dict_submenu.append(&dict_forget_voice_item);
         let _ = dict_submenu.append(&PredefinedMenuItem::separator());
-        let _ = dict_submenu.append(&MenuItem::new("Your words (click to remove):", false, None));
-        // One removable item per word — kept at the end so we can refresh just
-        // these without disturbing the stable action items above.
-        let dict_entry_items = populate_dict_entries(&dict_submenu);
+        let _ = dict_submenu.append(&MenuItem::new(
+            "Your words (click to edit/delete):",
+            false,
+            None,
+        ));
+        // One item per word, kept at the end so a refresh replaces just these
+        // without disturbing the stable action items above.
         let dict_correct_last_id = dict_correct_last_item.id().0.clone();
         let dict_add_id = dict_add_item.id().0.clone();
         let dict_open_id = dict_open_item.id().0.clone();
         let dict_reload_id = dict_reload_item.id().0.clone();
-        let dict_enabled_id = dict_enabled_item.id().0.clone();
-        let dict_forget_voice_id = dict_forget_voice_item.id().0.clone();
 
         // License submenu (Lemon Squeezy). All state/text comes from license.rs.
         // Items are created once; `refresh_license_submenu` retitles/enables
@@ -639,8 +803,8 @@ impl App {
         // Only the actions that apply are in this submenu at any time — an item
         // greyed out because it can't apply is noise (you can't "enter a key"
         // when you already have one). `sync_license_submenu` swaps them.
-        let license_submenu = Submenu::new(&crate::license::submenu_title(), true);
-        let license_status_item = MenuItem::new(&crate::license::status_text(), false, None);
+        let license_submenu = Submenu::new("License", true);
+        let license_status_item = MenuItem::new("", false, None);
         let license_subscription_item = MenuItem::new("Subscribe\u{2026}", true, None);
         let license_activate_item = MenuItem::new("Enter License Key\u{2026}", true, None);
         let license_deactivate_item = MenuItem::new("Deactivate this device\u{2026}", true, None);
@@ -650,10 +814,9 @@ impl App {
         let license_activate_id = license_activate_item.id().0.clone();
         let license_deactivate_id = license_deactivate_item.id().0.clone();
 
-        // Templates submenu (voice snippets). Triggers are disabled labels; the
-        // live actions are Add / Open. The trigger list refreshes on change.
-        let templates_submenu =
-            Submenu::new(&format!("Templates ({})", crate::templates::count()), true);
+        // Templates submenu (voice snippets). Clicking a trigger opens Edit /
+        // Delete; the list and the count refresh on change.
+        let templates_submenu = Submenu::new("Templates", true);
         let template_add_item = MenuItem::new("Add Template\u{2026}", true, None);
         let template_open_item = MenuItem::new("Open templates.toml\u{2026}", true, None);
         let template_reload_item = MenuItem::new("Reload from Disk", true, None);
@@ -666,7 +829,6 @@ impl App {
             false,
             None,
         ));
-        let template_items = populate_template_items(&templates_submenu);
         let template_add_id = template_add_item.id().0.clone();
         let template_open_id = template_open_item.id().0.clone();
         let template_reload_id = template_reload_item.id().0.clone();
@@ -676,7 +838,6 @@ impl App {
         // the file/clear actions sit at the bottom.
         let history_submenu = Submenu::new("History", true);
         let _ = history_submenu.append(&MenuItem::new("Recent (click to copy):", false, None));
-        let history_entry_items = populate_history_entries(&history_submenu);
         let history_open_item = MenuItem::new("Open history.txt\u{2026}", true, None);
         let history_clear_item = MenuItem::new("Clear History", true, None);
         let _ = history_submenu.append(&PredefinedMenuItem::separator());
@@ -705,20 +866,14 @@ impl App {
         // available inside that modal and in the License submenu. It is inserted
         // by `sync_menu_head`, not appended here, so it can come and go: once
         // licensed there is nothing at the top at all.
-        let unlock_item = MenuItem::new(
-            crate::license::cta_text(&crate::license::status()),
-            true,
-            None,
-        );
+        let unlock_item = MenuItem::new("", true, None);
         let unlock_id = unlock_item.id().0.clone();
         let head_separator = PredefinedMenuItem::separator();
 
-        // Permissions submenu — only shown when something is actually missing
-        // (when everything's granted it's just noise). Its title carries the
-        // count, so no separate warning line is needed.
-        if !perms.all_granted() {
-            let _ = menu.append(&perms_submenu);
-        }
+        // Permissions submenu — always there, so a permission revoked later
+        // has somewhere to show up. Its title carries the state ("Permissions ✓"
+        // or the count to grant), so no separate warning line is needed.
+        let _ = menu.append(&perms_submenu);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
@@ -728,7 +883,7 @@ impl App {
         let _ = menu.append(&templates_submenu);
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&hotkey_submenu);
-        let _ = menu.append(&backend_submenu);
+        let _ = menu.append(&engine_submenu);
         let _ = menu.append(&input_submenu);
         let _ = menu.append(&output_submenu);
         let _ = menu.append(&license_submenu);
@@ -740,32 +895,15 @@ impl App {
         let _ = menu.append(&PredefinedMenuItem::separator());
         let _ = menu.append(&quit_item);
 
-        // Collect IDs
-        let hotkey_ids: Vec<_> = hotkey_items
-            .iter()
-            .map(|(i, h, m)| (i.id().0.clone(), h.clone(), m.clone()))
-            .collect();
-        let input_ids: Vec<_> = input_device_items
-            .iter()
-            .map(|(i, n)| (i.id().0.clone(), n.clone()))
-            .collect();
-        let output_ids: Vec<_> = output_device_items
-            .iter()
-            .map(|(i, n)| (i.id().0.clone(), n.clone()))
-            .collect();
-
         self.menu_items = Some(MenuItems {
             update_id: update_item.id().0.clone(),
             report_id: report_item.id().0.clone(),
             uninstall_id: uninstall_item.id().0.clone(),
             quit_id: quit_item.id().0.clone(),
-            notif_id: notifications_item.id().0.clone(),
-            sound_id: sound_item.id().0.clone(),
-            debug_id: debug_item.id().0.clone(),
-            screen_vocab_id: screen_vocab_item.id().0.clone(),
             setup_id: setup_item.id().0.clone(),
             perm_items,
             perms_submenu,
+            engine_submenu,
             model_items,
             update_item,
             report_item,
@@ -775,9 +913,8 @@ impl App {
             dict_add_id,
             dict_open_id,
             dict_reload_id,
-            dict_enabled_id,
-            dict_forget_voice_id,
-            dict_entry_items,
+            dict_forget_voice_item,
+            dict_entry_items: Vec::new(),
             license_submenu,
             license_status_item,
             license_subscription_item,
@@ -795,29 +932,33 @@ impl App {
             sound_item,
             debug_item,
             screen_vocab_item,
-            hotkey_ids,
             hotkey_items,
             hotkey_submenu,
             custom_hotkey_item,
-            custom_hotkey_id,
-            input_ids,
             input_device_items,
             input_submenu,
-            output_ids,
             output_device_items,
             output_submenu,
             templates_submenu,
             template_add_id,
             template_open_id,
             template_reload_id,
-            template_items,
+            template_items: Vec::new(),
             history_submenu,
             history_open_id,
             history_clear_id,
-            history_entry_items,
+            history_entry_items: Vec::new(),
         });
-        // Apply the enabled/title state of the license items for the current state.
-        self.refresh_license_submenu();
+        // Every dynamic part is written by the same function that later keeps
+        // it current, so nothing is formatted twice.
+        self.sync_hotkey_menu();
+        if let Some(mi) = &self.menu_items {
+            render_model_rows(mi, &cfg.model);
+        }
+        self.refresh_dict_submenu();
+        self.refresh_templates_submenu();
+        self.refresh_history_submenu();
+        self.refresh_license_submenu(); // also syncs the menu head
 
         // Build tray
         let mut builder = TrayIconBuilder::new()
@@ -843,7 +984,7 @@ impl App {
                 // still dictates, but its only UI is gone — say so, or it looks
                 // like nothing launched.
                 #[cfg(target_os = "linux")]
-                crate::notify::app(
+                crate::notify::alert(
                     "Whisper Push is running, but your desktop shows no tray icon. \
                      On GNOME, install the AppIndicator extension \
                      (gnome-shell-extension-appindicator) and log back in. \
@@ -872,32 +1013,67 @@ impl App {
         info!("Tray icon created");
     }
 
-    /// Rebuild just the listed word items (after add/remove/correct/reload).
-    /// Action items above keep their stable IDs; only the trailing entries are
-    /// removed and re-appended. Runs on the main thread (menu is closed).
+    /// Rebuild the listed words, the count in the title and the voiceprint
+    /// item. Action items above keep their stable IDs; only the trailing
+    /// entries are replaced. Runs on the main thread.
     fn refresh_dict_submenu(&mut self) {
         let Some(mi) = self.menu_items.as_mut() else {
             return;
         };
-        let old = std::mem::take(&mut mi.dict_entry_items);
-        for (it, _) in old {
-            let _ = mi.dict_submenu.remove(&it);
-        }
-        mi.dict_entry_items = populate_dict_entries(&mi.dict_submenu);
-        let n = crate::dictionary::entry_count();
-        mi.dict_submenu.set_text(format!("Dictionary ({n})"));
+        let entries = crate::dictionary::list_entries();
+        rebuild_list(
+            &mi.dict_submenu,
+            &mut mi.dict_entry_items,
+            None,
+            entries.len(),
+            entries.iter().map(|e| {
+                let star = if e.starred { "\u{2605} " } else { "" };
+                let label = if e.variants.is_empty() {
+                    format!("  {star}{}", e.term)
+                } else {
+                    format!("  {star}{}  \u{2190}  {}", e.term, e.variants.join(", "))
+                };
+                (label, e.term.clone())
+            }),
+            40,
+            "  (empty: your corrections will appear here)",
+        );
+        mi.dict_submenu
+            .set_text(format!("Dictionary ({})", entries.len()));
+        let voiceprints = crate::acoustic::len();
+        mi.dict_forget_voice_item
+            .set_text(voiceprint_label(voiceprints));
+        mi.dict_forget_voice_item.set_enabled(voiceprints > 0);
     }
 
-    /// Rebuild the recent-dictation entries in the History submenu.
+    /// Rebuild the recent-dictation entries in the History submenu. Each row is
+    /// a one-line preview; a click copies the full (possibly multi-line) text.
+    /// They sit between the header (index 0) and the trailing actions, so they
+    /// are inserted right after the header.
     fn refresh_history_submenu(&mut self) {
+        const PREVIEW: usize = 48;
         let Some(mi) = self.menu_items.as_mut() else {
             return;
         };
-        let old = std::mem::take(&mut mi.history_entry_items);
-        for (it, _) in old {
-            let _ = mi.history_submenu.remove(&it);
-        }
-        mi.history_entry_items = populate_history_entries(&mi.history_submenu);
+        let recent = crate::history::recent();
+        rebuild_list(
+            &mi.history_submenu,
+            &mut mi.history_entry_items,
+            Some(1),
+            recent.len(),
+            recent.iter().map(|text| {
+                let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                if preview.chars().count() > PREVIEW {
+                    preview = format!(
+                        "{}\u{2026}",
+                        preview.chars().take(PREVIEW).collect::<String>()
+                    );
+                }
+                (format!("  {preview}"), text.clone())
+            }),
+            12,
+            "  (empty: your dictations will appear here)",
+        );
     }
 
     /// Rebuild the trigger list + count in the Templates submenu.
@@ -905,26 +1081,37 @@ impl App {
         let Some(mi) = self.menu_items.as_mut() else {
             return;
         };
-        let old = std::mem::take(&mut mi.template_items);
-        for (it, _) in old {
-            let _ = mi.templates_submenu.remove(&it);
-        }
-        mi.template_items = populate_template_items(&mi.templates_submenu);
+        let triggers = crate::templates::triggers();
+        rebuild_list(
+            &mi.templates_submenu,
+            &mut mi.template_items,
+            None,
+            triggers.len(),
+            triggers
+                .iter()
+                .map(|t| (format!("  \u{201c}{t}\u{201d}"), t.clone())),
+            30,
+            "  (none yet: use Add Template\u{2026})",
+        );
         mi.templates_submenu
-            .set_text(format!("Templates ({})", crate::templates::count()));
+            .set_text(format!("Templates ({})", triggers.len()));
     }
 
     /// Refresh every license-dependent menu item from `license::status()` — in
     /// BOTH directions (activation, deactivation, expiry), cheap, no rebuild.
+    /// One `status()` read feeds every text, so they can't disagree when
+    /// license.json is rewritten mid-refresh.
     fn refresh_license_submenu(&mut self) {
         let Some(mi) = self.menu_items.as_ref() else {
             return;
         };
         let st = crate::license::status();
         let licensed = matches!(st, crate::license::LicenseStatus::Licensed(_));
+        self.licensed = licensed;
         mi.license_status_item
-            .set_text(crate::license::status_text());
-        mi.license_submenu.set_text(crate::license::submenu_title());
+            .set_text(crate::license::status_text(&st));
+        mi.license_submenu
+            .set_text(crate::license::submenu_title(&st));
         mi.license_subscription_item.set_text(if licensed {
             "Manage License\u{2026}"
         } else {
@@ -958,35 +1145,67 @@ impl App {
     /// back. Only acts on a list we actually got: when enumeration fails
     /// entirely we keep the pin rather than throw a preference away over a
     /// CoreAudio stall.
-    fn reconcile_device_pins(&mut self) {
-        let (input, output) = {
-            let c = self.config.lock_safe();
-            (c.input_device.clone(), c.output_device.clone())
-        };
-        let gone = |pinned: &str, list: Vec<String>| {
+    fn reconcile_device_pins(&self, inputs: &[String], outputs: &[String]) {
+        let gone = |pinned: &str, list: &[String]| {
             pinned != "auto" && !list.is_empty() && !list.iter().any(|n| n == pinned)
         };
-        let drop_input = gone(&input, crate::audio::list_devices().unwrap_or_default());
-        let drop_output = gone(
-            &output,
-            crate::audio::list_output_devices().unwrap_or_default(),
-        );
+        let (drop_input, drop_output) = {
+            let c = self.config.lock_safe();
+            (
+                gone(&c.input_device, inputs),
+                gone(&c.output_device, outputs),
+            )
+        };
         if !drop_input && !drop_output {
             return;
         }
-        let mut c = self.config.lock_safe();
-        if drop_input {
-            warn!("Input device '{input}' is no longer present \u{2014} falling back to Auto");
-            c.input_device = "auto".into();
-            // A pin the user no longer has can't outrank the auto-fallback.
-            crate::audio::set_input_override("");
+        self.update_config(|c| {
+            if drop_input {
+                let input = &c.input_device;
+                warn!("Input device '{input}' is no longer present \u{2014} falling back to Auto");
+                c.input_device = "auto".into();
+                // A pin the user no longer has can't outrank the auto-fallback.
+                crate::audio::set_input_override("");
+            }
+            if drop_output {
+                let output = &c.output_device;
+                warn!(
+                    "Output device '{output}' is no longer present \u{2014} falling back to Auto"
+                );
+                c.output_device = "auto".into();
+                crate::audio::playback::set_output_device("auto");
+            }
+        });
+    }
+
+    /// A scan came back (`spawn_device_scan`): rebuild whichever picker's
+    /// list actually changed. An empty list is a failed enumeration, never "no
+    /// devices", and is ignored.
+    ///
+    /// Pins are NOT reconciled here (only at startup): mid-session a pinned
+    /// device is often just away for a moment — AirPods in their case, a busy
+    /// ALSA card — and dropping the pin would forget the user's choice for good.
+    /// Recording already falls back to the default while it's missing.
+    fn refresh_device_submenus(&mut self, inputs: &[String], outputs: &[String]) {
+        let (cur_in, cur_out) = {
+            let c = self.config.lock_safe();
+            (c.input_device.clone(), c.output_device.clone())
+        };
+        let Some(mi) = self.menu_items.as_mut() else {
+            return;
+        };
+        // Row 0 is "Auto"; the rest are the devices as last listed.
+        let stale = |items: &[(CheckMenuItem, String)], names: &[String]| {
+            !names.is_empty() && !items.iter().skip(1).map(|(_, n)| n).eq(names)
+        };
+        if stale(&mi.input_device_items, inputs) {
+            let (sub, items) = (&mi.input_submenu, &mut mi.input_device_items);
+            fill_device_picker(sub, items, "Input", &cur_in, inputs);
         }
-        if drop_output {
-            warn!("Output device '{output}' is no longer present \u{2014} falling back to Auto");
-            c.output_device = "auto".into();
+        if stale(&mi.output_device_items, outputs) {
+            let (sub, items) = (&mi.output_submenu, &mut mi.output_device_items);
+            fill_device_picker(sub, items, "Output", &cur_out, outputs);
         }
-        let _ = c.save();
-        crate::audio::playback::set_output_device(&c.output_device);
     }
 
     /// Put exactly the head items that carry information into the menu, in
@@ -996,17 +1215,25 @@ impl App {
     /// there only while unlicensed (once licensed, managing happens in the
     /// License submenu — a second entry point at the top was just clutter), and
     /// the state line only while the app is doing something the rest of the menu
-    /// doesn't already say. When both are gone the separator goes too, so the
-    /// menu opens straight onto its real contents.
+    /// doesn't already say — and it says which. When both are gone the
+    /// separator goes too, so the menu opens straight onto its real contents.
     fn sync_menu_head(&mut self) {
+        // Time alone lapses a license (trial ends, offline grace runs out) and
+        // no event says so: re-read it here, where the CTA is decided. A flip
+        // rebuilds the License submenu, which calls back in with it up to date.
+        let st = crate::license::status();
+        if matches!(st, crate::license::LicenseStatus::Licensed(_)) != self.licensed {
+            return self.refresh_license_submenu();
+        }
         let Some(mi) = self.menu_items.as_ref() else {
             return;
         };
-        let licensed = matches!(
-            crate::license::status(),
-            crate::license::LicenseStatus::Licensed(_)
-        );
-        let busy = self.state.current() != State::Idle;
+        let state_line = match self.state.current() {
+            State::Idle => None,
+            State::Loading => Some("\u{231b} Loading model\u{2026}"),
+            State::Recording => Some("Recording\u{2026}"),
+            State::Processing => Some("Transcribing\u{2026}"),
+        };
 
         // Remove first (harmless if absent), then re-insert what applies: the
         // order of a menu is its indices, so rebuilding the head wholesale is
@@ -1016,11 +1243,13 @@ impl App {
         let _ = mi.menu.remove(&mi.head_separator);
 
         let mut at = 0;
-        if !licensed {
+        if !self.licensed {
+            mi.unlock_item.set_text(crate::license::cta_text(&st)); // "N days left" ticks
             let _ = mi.menu.insert(&mi.unlock_item, at);
             at += 1;
         }
-        if busy {
+        if let Some(text) = state_line {
+            mi.status_item.set_text(format!("Whisper Push: {text}"));
             let _ = mi.menu.insert(&mi.status_item, at);
             at += 1;
         }
@@ -1060,10 +1289,6 @@ impl App {
     }
 
     fn process_event(&mut self, event: Event) {
-        if matches!(event, Event::DictChanged) {
-            self.refresh_dict_submenu();
-            return;
-        }
         if matches!(event, Event::LicenseChanged) {
             self.refresh_license_submenu();
             return;
@@ -1072,27 +1297,26 @@ impl App {
             self.open_license_window(start_activate);
             return;
         }
+        if let Event::DevicesChanged {
+            ref inputs,
+            ref outputs,
+            first,
+        } = event
+        {
+            // Startup scan only: a pin to a device gone since last session
+            // drops to Auto before the pickers are rebuilt from the config.
+            if first {
+                self.reconcile_device_pins(inputs, outputs);
+            }
+            self.refresh_device_submenus(inputs, outputs);
+            return;
+        }
         let mi = match &self.menu_items {
             Some(m) => m,
             None => return,
         };
 
         match event {
-            Event::ModelReady => {
-                self.state.set(State::Idle);
-                let disp = format_hotkey_display(
-                    &self.state.config.hotkey,
-                    &self.state.config.hotkey_mode,
-                );
-                mi.status_item.set_text(&format!("Whisper Push ({disp})"));
-                self.sync_menu_head(); // no longer loading → the state line goes
-                set_tray_icon(&self.tray, State::Idle);
-                if self.config.lock_safe().notifications {
-                    crate::notify::app("Model loaded and ready!");
-                }
-                info!("Ready");
-            }
-
             Event::MenuClicked(ref id) => {
                 if id == &mi.quit_id {
                     crate::util::exit_clean();
@@ -1116,20 +1340,20 @@ impl App {
                     return;
                 }
                 if id == &mi.template_reload_id {
-                    crate::templates::reload(); // sets the dirty flag → submenu refresh
-                    crate::notify::app(&format!(
-                        "Templates reloaded \u{2014} {} template(s).",
-                        crate::templates::count()
-                    ));
+                    // Sets the dirty flag → submenu refresh.
+                    match crate::templates::reload() {
+                        Ok(n) => crate::notify::app(&format!(
+                            "Templates reloaded \u{2014} {n} template(s)."
+                        )),
+                        Err(e) => {
+                            crate::notify::alert(&format!("templates.toml has an error: {e}"))
+                        }
+                    }
                     return;
                 }
                 // Click a template trigger → edit (open file) or delete.
-                if let Some((_, trigger)) = mi
-                    .template_items
-                    .iter()
-                    .find(|(it, t)| !t.is_empty() && id == &it.id().0)
-                {
-                    let trigger = trigger.clone();
+                if let Some(trigger) = hit(&mi.template_items, id) {
+                    let trigger = trigger.to_string();
                     std::thread::spawn(move || template_action_dialog(&trigger));
                     return;
                 }
@@ -1142,17 +1366,15 @@ impl App {
                     crate::notify::app("History cleared.");
                     return;
                 }
-                // Click a history entry → copy that dictation to the clipboard.
-                if let Some((_, text)) = mi
-                    .history_entry_items
-                    .iter()
-                    .find(|(it, t)| !t.is_empty() && id == &it.id().0)
-                {
-                    if let Ok(mut cb) = arboard::Clipboard::new() {
-                        if cb.set_text(text.clone()).is_ok() {
-                            crate::notify::app("Copied to clipboard.");
-                        }
-                    }
+                // Click a history entry → copy that dictation to the clipboard,
+                // off this thread: the write retries while another app holds
+                // the clipboard.
+                if let Some(text) = hit(&mi.history_entry_items, id) {
+                    let text = text.to_string();
+                    std::thread::spawn(move || match crate::paste::copy_text(&text) {
+                        Ok(()) => crate::notify::app("Copied to clipboard."),
+                        Err(e) => crate::notify::alert(&format!("Couldn't copy: {e}")),
+                    });
                     return;
                 }
                 // A permission row: take the user where it is granted. On
@@ -1183,7 +1405,7 @@ impl App {
                                 {
                                     tracing::error!("Update failed: {e}");
                                     // Can't send event here because process may exit on success
-                                    crate::notify::app(&format!("Update failed: {e}"));
+                                    crate::notify::alert(&format!("Update failed: {e}"));
                                 }
                             })
                             .ok();
@@ -1226,7 +1448,7 @@ impl App {
                                     }
                                     Err(e) => {
                                         tracing::error!("Update check failed: {e}");
-                                        crate::notify::app(&format!("Update check failed: {e}"));
+                                        crate::notify::alert(&format!("Update check failed: {e}"));
                                         let _ = tx.send(Event::UpdateFailed(e.to_string()));
                                     }
                                 }
@@ -1239,30 +1461,22 @@ impl App {
                     crate::report::open_report();
                     return;
                 }
-                if id == &mi.notif_id {
-                    let mut c = self.config.lock_safe();
-                    c.notifications = !c.notifications;
-                    let _ = c.save();
+                if id == &mi.notifications_item.id().0 {
+                    crate::notify::set_enabled(
+                        self.toggle(&mi.notifications_item, |c| &mut c.notifications),
+                    );
                     return;
                 }
-                if id == &mi.sound_id {
-                    let mut c = self.config.lock_safe();
-                    c.sound_feedback = !c.sound_feedback;
-                    let _ = c.save();
+                if id == &mi.sound_item.id().0 {
+                    self.toggle(&mi.sound_item, |c| &mut c.sound_feedback);
                     return;
                 }
-                if id == &mi.debug_id {
-                    let mut c = self.config.lock_safe();
-                    c.debug = !c.debug;
-                    let _ = c.save();
+                if id == &mi.debug_item.id().0 {
+                    crate::util::set_debug_logging(self.toggle(&mi.debug_item, |c| &mut c.debug));
                     return;
                 }
-                if id == &mi.screen_vocab_id {
-                    let mut c = self.config.lock_safe();
-                    c.screen_vocab_enabled = !c.screen_vocab_enabled;
-                    let on = c.screen_vocab_enabled;
-                    let _ = c.save();
-                    drop(c);
+                if id == &mi.screen_vocab_item.id().0 {
+                    let on = self.toggle(&mi.screen_vocab_item, |c| &mut c.screen_vocab_enabled);
                     crate::notify::app(if on {
                         "Screen vocabulary capture ON \u{2014} every dictation now captures \
                          and OCRs your screen(s) into a local log."
@@ -1273,13 +1487,11 @@ impl App {
                 }
                 if id == &mi.dict_correct_last_id {
                     // osascript blocks until the user answers → run off the UI thread.
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || correct_last_dialog(tx));
+                    std::thread::spawn(correct_last_dialog);
                     return;
                 }
                 if id == &mi.dict_add_id {
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || add_word_dialog(tx));
+                    std::thread::spawn(add_word_dialog);
                     return;
                 }
                 if id == &mi.dict_open_id {
@@ -1287,27 +1499,27 @@ impl App {
                     return;
                 }
                 if id == &mi.dict_reload_id {
-                    let _ = crate::dictionary::reload();
-                    crate::notify::app(&format!(
-                        "Dictionary reloaded \u{2014} {} word(s).",
-                        crate::dictionary::entry_count()
-                    ));
-                    let _ = self.state.tx.send(Event::DictChanged);
+                    match crate::dictionary::reload() {
+                        Ok(()) => crate::notify::app(&format!(
+                            "Dictionary reloaded \u{2014} {} word(s).",
+                            crate::dictionary::entry_count()
+                        )),
+                        Err(e) => {
+                            crate::notify::alert(&format!("Couldn't reload dictionary.toml: {e}"))
+                        }
+                    }
+                    crate::dictionary::mark_menu_dirty();
                     return;
                 }
-                if id == &mi.dict_forget_voice_id {
+                if id == &mi.dict_forget_voice_item.id().0 {
                     crate::acoustic::clear();
                     crate::notify::app("Forgot all learned voiceprints.");
-                    let _ = self.state.tx.send(Event::DictChanged);
+                    crate::dictionary::mark_menu_dirty();
                     return;
                 }
-                if id == &mi.dict_enabled_id {
-                    let mut c = self.config.lock_safe();
-                    c.dictionary_enabled = !c.dictionary_enabled;
-                    let on = c.dictionary_enabled;
-                    let _ = c.save();
-                    drop(c);
-                    crate::dictionary::init(on);
+                if id == &mi.dict_enabled_item.id().0 {
+                    let on = self.toggle(&mi.dict_enabled_item, |c| &mut c.dictionary_enabled);
+                    crate::dictionary::init(on); // marks the submenu for a refresh
                     crate::notify::app(if on {
                         "Adaptive correction ON"
                     } else {
@@ -1315,9 +1527,7 @@ impl App {
                     });
                     return;
                 }
-                if (!mi.unlock_id.is_empty() && id == &mi.unlock_id)
-                    || id == &mi.license_subscription_id
-                {
+                if id == &mi.unlock_id || id == &mi.license_subscription_id {
                     // Buy-forward (plans screen; a licensed user gets the
                     // "manage" screen instead — the modal reads the state).
                     self.open_license_window(false);
@@ -1334,36 +1544,24 @@ impl App {
                     return;
                 }
                 // Click a listed word → edit (open the file) or delete.
-                if let Some((_, term)) = mi
-                    .dict_entry_items
-                    .iter()
-                    .find(|(it, t)| !t.is_empty() && id == &it.id().0)
-                {
-                    let term = term.clone();
-                    let tx = self.state.tx.clone();
-                    std::thread::spawn(move || dict_action_dialog(&term, tx));
+                if let Some(term) = hit(&mi.dict_entry_items, id) {
+                    let term = term.to_string();
+                    std::thread::spawn(move || dict_action_dialog(&term));
                     return;
                 }
-                for (item_id, hotkey, mode) in &mi.hotkey_ids {
-                    if id == item_id {
-                        let mut c = self.config.lock_safe();
-                        c.hotkey = hotkey.clone();
-                        c.hotkey_mode = mode.clone();
-                        let _ = c.save();
-                        for (item, hk, m) in &mi.hotkey_items {
-                            item.set_checked(hk == hotkey && m == mode);
-                        }
-                        let disp = format_hotkey_display(hotkey, mode);
-                        mi.status_item.set_text(&format!("Whisper Push ({disp})"));
-                        mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
-                        // Live on every platform: the listeners hold a mutable
-                        // matcher, so no restart is needed anywhere.
-                        crate::hotkey::rebind(hotkey, mode);
-                        crate::notify::app(&format!("Hotkey set to {disp}"));
-                        return;
-                    }
+                if let Some((_, hotkey, mode)) =
+                    mi.hotkey_items.iter().find(|(it, _, _)| id == &it.id().0)
+                {
+                    // Live on every platform: the listeners hold a mutable
+                    // matcher, so no restart is needed anywhere. Also disarms a
+                    // pending "Set Custom Hotkey…" capture.
+                    let (hotkey, mode) = (*hotkey, *mode);
+                    self.apply_hotkey(hotkey, mode);
+                    let disp = format_hotkey_display(hotkey, mode);
+                    crate::notify::app(&format!("Hotkey set to {disp}"));
+                    return;
                 }
-                if !mi.custom_hotkey_id.is_empty() && id == &mi.custom_hotkey_id {
+                if id == &mi.custom_hotkey_item.id().0 {
                     if self.capturing {
                         self.end_hotkey_capture(); // clicked again = cancel
                         return;
@@ -1374,10 +1572,9 @@ impl App {
                     // The prompt goes in the MENU: the notification below rides
                     // on the deprecated NSUserNotification path, which recent
                     // macOS often delivers invisibly — the item looked dead.
-                    if let Some(it) = &mi.custom_hotkey_item {
-                        it.set_text("\u{2328} Press your shortcut now\u{2026} (click to cancel)");
-                        it.set_checked(false);
-                    }
+                    mi.custom_hotkey_item
+                        .set_text("\u{2328} Press your shortcut now\u{2026} (click to cancel)");
+                    mi.custom_hotkey_item.set_checked(false);
                     crate::notify::app(
                         "Press your shortcut now: tap a modifier (e.g. Right \u{2318}) to hold, or a combo like \u{2318}\u{21e7}D to toggle.",
                     );
@@ -1389,71 +1586,74 @@ impl App {
                     });
                     return;
                 }
-                for (item_id, name) in &mi.input_ids {
-                    if id == item_id {
-                        let mut c = self.config.lock_safe();
-                        c.input_device = name.clone();
-                        let _ = c.save();
-                        // An explicit pick overrides any silent auto-fallback.
-                        crate::audio::set_input_override("");
-                        crate::audio::clear_dead_mics();
-                        for (item, n) in &mi.input_device_items {
-                            item.set_checked(n == name);
-                        }
-                        mi.input_submenu.set_text(device_title("Input", name));
-                        return;
-                    }
+                if let Some((_, name)) = mi
+                    .input_device_items
+                    .iter()
+                    .find(|(it, _)| id == &it.id().0)
+                {
+                    self.update_config(|c| c.input_device = name.clone());
+                    // An explicit pick overrides any silent auto-fallback.
+                    crate::audio::set_input_override("");
+                    crate::audio::clear_dead_mics();
+                    pick_device(&mi.input_device_items, &mi.input_submenu, "Input", name);
+                    return;
                 }
-                for (item_id, name) in &mi.output_ids {
-                    if id == item_id {
-                        let mut c = self.config.lock_safe();
-                        c.output_device = name.clone();
-                        let _ = c.save();
-                        crate::audio::playback::set_output_device(name);
-                        for (item, n) in &mi.output_device_items {
-                            item.set_checked(n == name);
-                        }
-                        mi.output_submenu.set_text(device_title("Output", name));
-                        return;
-                    }
+                if let Some((_, name)) = mi
+                    .output_device_items
+                    .iter()
+                    .find(|(it, _)| id == &it.id().0)
+                {
+                    self.update_config(|c| c.output_device = name.clone());
+                    crate::audio::playback::set_output_device(name);
+                    pick_device(&mi.output_device_items, &mi.output_submenu, "Output", name);
+                    return;
                 }
                 // Model selection — `id` matches a model row in the Engine submenu.
-                for (item, model_name) in &mi.model_items {
-                    if id == &item.id().0 {
-                        {
-                            let mut c = self.config.lock_safe();
-                            c.model = model_name.clone();
-                            let _ = c.save();
-                        }
-                        // Re-render every row: ● on the picked model, ⤓ on any not
-                        // (yet) downloaded — recomputed from the live model list.
-                        let models = crate::model_manager::list_models();
-                        for (bi, bv) in &mi.model_items {
-                            if let Some(m) = models.iter().find(|m| m.name == bv.as_str()) {
-                                let active = if bv == model_name {
-                                    "\u{25CF} "
-                                } else {
-                                    "    "
-                                };
-                                let dl = if m.is_downloaded { "" } else { " \u{2913}" };
-                                bi.set_text(format!("{active}{}{dl}", m.label));
-                            }
-                        }
-                        // Send LoadModel to the pipeline thread — it unloads the old
-                        // model and loads (downloading if needed) the new one on its
-                        // own thread (WGPU/Metal same-thread constraint).
-                        if let Some(ref tx) = self.pipeline_tx {
-                            let _ = tx.send(Event::LoadModel(model_name.clone()));
-                        }
-                        let label = models
-                            .iter()
-                            .find(|m| m.name == model_name.as_str())
-                            .map(|m| m.label)
-                            .unwrap_or(model_name.as_str());
-                        crate::notify::app(&format!("Loading {label}..."));
+                if let Some((_, name)) = mi.model_items.iter().find(|(it, _)| id == &it.id().0) {
+                    // The engine already running: nothing to do but undo the
+                    // tick muda just flipped.
+                    if self.loaded_model.as_deref() == Some(name.as_str()) {
+                        render_model_rows(mi, name);
                         return;
                     }
+                    // Ticked now so the click shows; the config only follows
+                    // once it has loaded (`ModelLoaded`), so a failed load never
+                    // becomes the saved choice.
+                    render_model_rows(mi, name);
+                    // Send LoadModel to the pipeline thread — it unloads the old
+                    // model and loads (downloading if needed) the new one on its
+                    // own thread (WGPU/Metal same-thread constraint).
+                    // Nothing counts as loaded until `ModelLoaded`: the pipeline
+                    // unloads first, so a click back to the old engine must load it.
+                    self.loaded_model = None;
+                    self.requested_model = Some(name.clone());
+                    if let Some(ref tx) = self.pipeline_tx {
+                        let _ = tx.send(Event::LoadModel(name.clone()));
+                    }
+                    let label = crate::model_manager::find_model(name)
+                        .map(|m| m.label)
+                        .unwrap_or(name.as_str());
+                    crate::notify::app(&format!("Loading {label}\u{2026}"));
                 }
+            }
+
+            // A load finished. Success already made it the saved model (the
+            // pipeline writes it before any dictation can read it); a failure
+            // falls back to the saved one, rather than leave nothing loaded —
+            // unless the user has already picked another engine since, which is
+            // queued behind this one and must not be overridden by the fallback.
+            Event::ModelLoaded { ref name, ok } => {
+                let saved = self.config.lock_safe().model.clone();
+                if !ok
+                    && *name != saved
+                    && self.requested_model.as_deref() == Some(name.as_str())
+                    && let Some(ref tx) = self.pipeline_tx
+                {
+                    self.requested_model = Some(saved.clone());
+                    let _ = tx.send(Event::LoadModel(saved.clone()));
+                }
+                self.loaded_model = ok.then(|| name.clone());
+                render_model_rows(mi, &saved);
             }
 
             Event::StateChanged(State::Recording) => {
@@ -1462,47 +1662,29 @@ impl App {
                 // regardless of how recording started). The start sound is
                 // played at each trigger point, never here, to avoid doubling.
                 self.state.set(State::Recording);
+                self.sync_menu_head(); // the "Recording…" state line
                 set_tray_icon(&self.tray, State::Recording);
                 crate::overlay::set_state(crate::overlay::OverlayState::Recording);
             }
 
-            // Pill-only events (the tray icon stays on StateChanged). ShowOverlay
-            // fires on key-down so the pill appears with the start sound, ahead of
-            // the hold-delay gate + mic open; HideOverlay covers the early exits.
-            Event::ShowOverlay => {
-                crate::overlay::set_state(crate::overlay::OverlayState::Recording);
-            }
-            Event::HideOverlay => {
-                crate::overlay::set_state(crate::overlay::OverlayState::Idle);
+            // Pill-only events (the tray icon stays on StateChanged): shown on
+            // key-down ahead of the hold-delay gate + mic open, hidden on the
+            // early exits, flipped to Loading by a cold-start mid-dictation. That
+            // flag comes from a watcher thread and can land after the dictation
+            // already ended — it must not resurrect the pill once back to Idle.
+            Event::Overlay(s)
+                if s != crate::overlay::OverlayState::Loading
+                    || self.state.current() == State::Processing =>
+            {
+                crate::overlay::set_state(s);
             }
 
             Event::HotkeyCaptured(hotkey, mode) => {
                 info!("Custom hotkey captured: '{hotkey}' ({mode})");
-                {
-                    let mut c = self.config.lock_safe();
-                    c.hotkey = hotkey.clone();
-                    c.hotkey_mode = mode.clone();
-                    let _ = c.save();
-                }
-                self.capturing = false;
-                self.capture_gen += 1; // any pending timeout is now stale
-                // Tap already rebound the live listener; just sync the UI.
-                let mut matched_preset = false;
-                for (item, hk, m) in &mi.hotkey_items {
-                    let on = hk == &hotkey && m == &mode;
-                    matched_preset |= on;
-                    item.set_checked(on);
-                }
+                // The listener only reports the capture; rebinding it live
+                // happens here, the same path as a preset pick.
+                self.apply_hotkey(&hotkey, &mode);
                 let disp = format_hotkey_display(&hotkey, &mode);
-                // A combo that is none of the presets now appears in the list as
-                // a checked "Custom: …" entry, instead of vanishing into the
-                // submenu title.
-                if let Some(it) = &mi.custom_hotkey_item {
-                    it.set_text(custom_hotkey_label((!matched_preset).then(|| disp.clone())));
-                    it.set_checked(!matched_preset);
-                }
-                mi.status_item.set_text(&format!("Whisper Push ({disp})"));
-                mi.hotkey_submenu.set_text(format!("Hotkey: {disp}"));
                 crate::notify::app(&format!("Custom hotkey set: {disp}"));
             }
 
@@ -1534,14 +1716,12 @@ impl App {
 
             Event::RefreshPermissions => {
                 let status = crate::permissions::check_all();
-                if let Some(mi) = &self.menu_items {
-                    for (item, kind) in &mi.perm_items {
-                        let state = status.state(*kind);
-                        item.set_text(perm_label(*kind, state));
-                        item.set_enabled(state != crate::permissions::PermState::Granted);
-                    }
-                    mi.perms_submenu.set_text(perms_title(&status));
+                for (item, kind) in &mi.perm_items {
+                    let state = status.state(*kind);
+                    item.set_text(perm_label(*kind, state));
+                    item.set_enabled(state != crate::permissions::PermState::Granted);
                 }
+                mi.perms_submenu.set_text(perms_title(&status));
                 info!("Permissions refreshed: {} missing", status.missing_count());
                 // Re-check again in 5s if still not all granted
                 if !status.all_granted() {
@@ -1561,11 +1741,9 @@ impl App {
                 // An installable update supersedes any "open the releases page"
                 // state — the two click behaviours must never both be armed.
                 self.pending_release_page = None;
-                if self.config.lock_safe().notifications {
-                    crate::notify::app(&format!(
-                        "Version {version} available! Click the menu to update."
-                    ));
-                }
+                crate::notify::app(&format!(
+                    "Version {version} available! Click the menu to update."
+                ));
                 info!("Update available: v{version}");
             }
 
@@ -1609,12 +1787,19 @@ impl App {
             }
 
             Event::StateChanged(s) => {
+                // Back to idle (a dictation or a model load ended): a cheap
+                // moment to notice a device plugged in or out meanwhile. Only
+                // a changed device list costs a real scan.
+                if s == State::Idle {
+                    spawn_device_scan(self.state.tx.clone());
+                }
                 self.state.set(s);
                 self.sync_menu_head(); // busy ⇄ idle decides the state line
                 set_tray_icon(&self.tray, s); // also refreshes the tooltip
                 crate::overlay::set_state(match s {
                     State::Processing => crate::overlay::OverlayState::Processing,
-                    _ => crate::overlay::OverlayState::Idle, // Idle / Loading
+                    State::Loading => crate::overlay::OverlayState::Loading,
+                    _ => crate::overlay::OverlayState::Idle,
                 });
             }
 
@@ -1674,7 +1859,7 @@ impl ApplicationHandler<UserEvent> for App {
             // it. Tell the user instead of looking silently broken.
             if let Err(e) = crate::hotkey::start_listener(&hotkey_cfg, &hotkey_mode, ptx) {
                 warn!("Hotkey listener failed to start: {e}");
-                crate::notify::app(&format!(
+                crate::notify::alert(&format!(
                     "Couldn't start the {hotkey_cfg} hotkey ({e}). Pick another in the menu."
                 ));
             }
@@ -1772,6 +1957,7 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
     // with a live citron waveform while recording.
     crate::overlay::set_enabled(state.config.overlay_enabled);
     crate::overlay::init();
+    crate::notify::set_enabled(state.config.notifications);
 
     let mut app = App::new(state, rx);
 
@@ -1782,10 +1968,13 @@ pub fn run(state: AppState, rx: Receiver<Event>) -> Result<()> {
 
 /// Poll interval for the state watchdog.
 const WATCHDOG_TICK: Duration = Duration::from_secs(10);
-/// Force Idle if `Processing` has lasted longer than this — a real transcription
-/// (even a cold-start page-in) finishes in well under 10 s, so this only ever
-/// fires on a genuine wedge, never on a legitimately slow dictation.
-const WATCHDOG_MAX_PROCESSING: u64 = 30;
+/// Force Idle if `Processing` has lasted longer than this. A warm transcription
+/// takes ~1 s, but a cold one is far slower: an evicted model re-faulting under
+/// memory pressure measured 11–18 s, and a fresh Voxtral compiles its shaders on
+/// the first dictation (15 s+). Forcing Idle then would hide the "Loading" pill
+/// mid-wait — the pipeline keeps working, so this only resets the UI — hence
+/// the wide margin: it should fire on a genuine wedge, never on a slow dictation.
+const WATCHDOG_MAX_PROCESSING: u64 = 90;
 /// End a recording that has lasted longer than this. No real push-to-talk hold
 /// runs for minutes; this only trips when a `HotkeyUp` was lost (e.g. the
 /// CGEventTap died) and the mic is stuck open. We end it via the *normal* stop
@@ -2108,7 +2297,7 @@ fn handle_pipeline_event(
                 Ok(c) => c,
                 Err(e) => {
                     warn!("Capture failed: {e}");
-                    crate::notify::app(
+                    crate::notify::alert(
                         "Couldn't start recording — check your microphone is connected.",
                     );
                     return;
@@ -2123,7 +2312,10 @@ fn handle_pipeline_event(
             }
             // Confirmed hold — commit. Show the pill + turn the icon citron only
             // now, so a quick tap / Ctrl-click never flashes the pill.
-            notify_ui(ui_tx, Event::ShowOverlay);
+            notify_ui(
+                ui_tx,
+                Event::Overlay(crate::overlay::OverlayState::Recording),
+            );
             *capture = Some(cap);
             *recording = true;
             // Arm the mid-recording dead-mic check: if this mic turns out to be
@@ -2171,7 +2363,10 @@ fn handle_pipeline_event(
                 };
                 let device = crate::audio::effective_input_device(&configured);
                 // Pill up before the (synchronous) mic open, like the hold path.
-                notify_ui(ui_tx, Event::ShowOverlay);
+                notify_ui(
+                    ui_tx,
+                    Event::Overlay(crate::overlay::OverlayState::Recording),
+                );
                 match crate::audio::capture::AudioCapture::start(&device) {
                     Ok(cap) => {
                         *capture = Some(cap);
@@ -2193,8 +2388,8 @@ fn handle_pipeline_event(
                     }
                     Err(e) => {
                         warn!("Capture failed: {e}");
-                        notify_ui(ui_tx, Event::HideOverlay);
-                        crate::notify::app(
+                        notify_ui(ui_tx, Event::Overlay(crate::overlay::OverlayState::Idle));
+                        crate::notify::alert(
                             "Couldn't start recording — check your microphone is connected.",
                         );
                     }
@@ -2250,16 +2445,34 @@ fn handle_pipeline_event(
 
             let elapsed = start.elapsed();
             let name = backend.name();
+            let ok = load_result.is_ok();
             match load_result {
                 Ok(()) => {
                     info!("{name} model loaded ({:.1}s)", elapsed.as_secs_f64());
                     crate::notify::app(&format!("{name} ready! ({:.0}s)", elapsed.as_secs_f64()));
+                    // Only a model that loaded becomes the saved choice — and it
+                    // is written HERE, before this thread handles the next
+                    // dictation, which reads `config.model`.
+                    let mut c = config.lock_safe();
+                    if c.model != model_name {
+                        c.model = model_name.clone();
+                        if let Err(e) = c.save() {
+                            warn!("config save failed: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("{name} load failed: {e}");
-                    crate::notify::app(&format!("Failed to load {name}: {e}"));
+                    crate::notify::alert(&format!("Failed to load {name}: {e}"));
                 }
             }
+            notify_ui(
+                ui_tx,
+                Event::ModelLoaded {
+                    name: model_name,
+                    ok,
+                },
+            );
 
             // Back to idle — hotkeys work again
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
@@ -2292,7 +2505,7 @@ fn handle_pipeline_event(
                         *capture = Some(new_cap);
                         crate::audio::set_input_override(&next);
                         info!("Mid-recording input switch: '{dead}' → '{next}'");
-                        crate::notify::app(&format!(
+                        crate::notify::alert(&format!(
                             "“{dead}” went silent — now recording on “{next}”. \
                              Please restart your sentence."
                         ));
@@ -2480,7 +2693,7 @@ fn notify_systemic_mic_failure() {
         crate::permissions::open_settings_for(crate::permissions::PermKind::Microphone)
     });
     #[cfg(not(target_os = "macos"))]
-    crate::notify::app(body);
+    crate::notify::alert(body);
 }
 
 /// Dead-mic recovery choke point: find a verified replacement for `dead`, make
@@ -2494,12 +2707,63 @@ fn recover_dead_mic(what_happened: &str, dead: &str, ui_tx: &Sender<Event>) {
         Some(next) => {
             crate::audio::set_input_override(&next);
             warn!("Input auto-switch: '{dead}' → '{next}'");
-            crate::notify::app(&format!(
+            crate::notify::alert(&format!(
                 "{what_happened} — switched to “{next}”. Press your key and dictate again."
             ));
             notify_ui(ui_tx, Event::InputSwitched(next));
         }
         None => notify_systemic_mic_failure(),
+    }
+}
+
+/// Major page faults within one inference that mean the weights are being paged
+/// back in (evicted under memory pressure) rather than computed on: a warm
+/// inference takes ~0 major faults, a cold one thousands (measured 18.7k, 11–18 s).
+const COLD_MAJOR_FAULTS: i64 = 256;
+/// How often `ColdWatch` samples the fault counter while an inference runs.
+const COLD_POLL: Duration = Duration::from_millis(150);
+
+/// While an inference runs, flip the pill to "Loading" when the model turns out
+/// to be cold — weights evicted under memory pressure (major page faults
+/// climbing; keep-warm can lose that race under acute pressure) or a Voxtral
+/// that still has to load / compile its shaders — so a 10–20 s wait reads as
+/// what it is, not as a hung transcription. Measured, never timed: a long but
+/// warm inference doesn't flip. Stops when dropped.
+struct ColdWatch(Arc<AtomicBool>);
+
+impl ColdWatch {
+    fn start(backend: &crate::transcribe::Backend, ui_tx: &Sender<Event>) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        if !(cfg!(target_os = "macos") && crate::overlay::is_enabled()) {
+            return Self(done); // no pill to drive
+        }
+        let loading = Event::Overlay(crate::overlay::OverlayState::Loading);
+        if *backend == crate::transcribe::Backend::VoxtralLocal
+            && crate::transcribe::voxtral_local::is_cold()
+        {
+            notify_ui(ui_tx, loading);
+            return Self(done);
+        }
+        let (stop, tx) = (done.clone(), ui_tx.clone());
+        let (maj0, _) = crate::transcribe::page_faults();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(COLD_POLL);
+                let paged_in = crate::transcribe::page_faults().0 - maj0;
+                if paged_in >= COLD_MAJOR_FAULTS && !stop.load(Ordering::Relaxed) {
+                    info!("Cold model ({paged_in} major faults so far) — showing Loading");
+                    notify_ui(&tx, loading);
+                    return;
+                }
+            }
+        });
+        Self(done)
+    }
+}
+
+impl Drop for ColdWatch {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -2524,7 +2788,7 @@ fn stop_and_transcribe(
 
     if audio.len() < crate::audio::MIN_AUDIO_SAMPLES {
         if device_lost {
-            crate::notify::app("Recording stopped — the microphone disconnected.");
+            crate::notify::alert("Recording stopped — the microphone disconnected.");
             // Line up a verified replacement in the background so the NEXT press
             // just works. Probing takes ~1–2 s — never on this thread, where the
             // user may already be re-pressing the key.
@@ -2584,7 +2848,9 @@ fn stop_and_transcribe(
     let start = std::time::Instant::now();
     // Panics are already caught inside transcribe_with_backend (the choke point)
     // and returned as Err, so no extra catch_unwind is needed here.
+    let cold_watch = ColdWatch::start(&backend, ui_tx);
     let result = crate::transcribe::transcribe_with_backend(&audio, &cfg.language, &backend);
+    drop(cold_watch);
     // Did we actually produce text? Drives the wording of the device-lost recap
     // below, so it never claims "transcribed" when nothing came out.
     let mut transcribed = false;
@@ -2618,7 +2884,7 @@ fn stop_and_transcribe(
                 && rms < crate::audio::LOW_SIGNAL_RMS
                 && let Some(dev) = used_device.as_deref()
             {
-                crate::notify::app(&format!(
+                crate::notify::alert(&format!(
                     "Heard {secs:.1} s from “{dev}” but it was too quiet to transcribe — \
                      speak closer to the mic or pick another one in the menu."
                 ));
@@ -2626,14 +2892,14 @@ fn stop_and_transcribe(
         }
         Err(e) => {
             tracing::error!("Transcription: {e}");
-            crate::notify::app(&format!("Error: {e}"));
+            crate::notify::alert(&format!("Error: {e}"));
         }
     }
 
     // The mic died partway through: recap what actually happened so a truncated
     // (or missing) paste isn't a mystery. Word it by whether text came out.
     if device_lost && let Some(dev) = used_device.as_deref() {
-        crate::notify::app(&if transcribed {
+        crate::notify::alert(&if transcribed {
             format!(
                 "“{dev}” disconnected mid-dictation — transcribed the {secs:.1} s \
                  captured before the drop."
@@ -2650,71 +2916,6 @@ fn stop_and_transcribe(
 /// Open a file with the OS default handler.
 fn open_path(path: &std::path::Path) {
     crate::util::open_external(path);
-}
-
-/// Build the recent-dictation entries for the History submenu. Returns
-/// (item, full text) so a click can copy the full (possibly multi-line) text;
-/// the label is a one-line preview. A disabled placeholder (empty text) shows
-/// when there's no history yet.
-fn populate_history_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
-    const MAX: usize = 12;
-    const PREVIEW: usize = 48;
-    // Entries live between the header (index 0) and the trailing separator +
-    // actions, so they're inserted right after the header — refresh removes the
-    // old entries and re-inserts here without touching the stable items.
-    let mut pos = 1;
-    let recent = crate::history::recent();
-    let mut items = Vec::new();
-    if recent.is_empty() {
-        let ph = MenuItem::new("  (empty: your dictations will appear here)", false, None);
-        let _ = submenu.insert(&ph, pos);
-        items.push((ph, String::new()));
-        return items;
-    }
-    for text in recent.iter().take(MAX) {
-        let mut preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if preview.chars().count() > PREVIEW {
-            preview = format!(
-                "{}\u{2026}",
-                preview.chars().take(PREVIEW).collect::<String>()
-            );
-        }
-        let it = MenuItem::new(&format!("  {preview}"), true, None);
-        let _ = submenu.insert(&it, pos);
-        pos += 1;
-        items.push((it, text.clone()));
-    }
-    items
-}
-
-/// Build the trigger labels for the Templates submenu (disabled — the live
-/// actions are Add / Open). Returns (item, trigger).
-fn populate_template_items(submenu: &Submenu) -> Vec<(MenuItem, String)> {
-    const MAX: usize = 30;
-    let triggers = crate::templates::triggers();
-    let mut items = Vec::new();
-    if triggers.is_empty() {
-        let ph = MenuItem::new("  (none yet: use Add Template\u{2026})", false, None);
-        let _ = submenu.append(&ph);
-        items.push((ph, String::new()));
-        return items;
-    }
-    for t in triggers.iter().take(MAX) {
-        // Enabled so a click opens the edit/delete dialog.
-        let it = MenuItem::new(&format!("  \u{201c}{t}\u{201d}"), true, None);
-        let _ = submenu.append(&it);
-        items.push((it, t.clone()));
-    }
-    if triggers.len() > MAX {
-        let more = MenuItem::new(
-            &format!("  \u{2026} +{} more (use Open file)", triggers.len() - MAX),
-            false,
-            None,
-        );
-        let _ = submenu.append(&more);
-        items.push((more, String::new()));
-    }
-    items
 }
 
 /// "Add Template…" dialog: ask for the trigger, then the content, then save.
@@ -2738,7 +2939,7 @@ fn add_template_dialog() {
     };
     match crate::templates::add(&trigger, &content) {
         Ok(()) => crate::notify::app(&format!("Template \u{201c}{trigger}\u{201d} saved.")),
-        Err(e) => crate::notify::app(&format!("Couldn't save template: {e}")),
+        Err(e) => crate::notify::alert(&format!("Couldn't save template: {e}")),
     }
 }
 
@@ -2751,11 +2952,11 @@ fn template_action_dialog(trigger: &str) {
     )
     .as_deref()
     {
-        Some("Delete") => {
-            if crate::templates::remove(trigger) {
-                crate::notify::app(&format!("Deleted template \u{201c}{trigger}\u{201d}."));
-            }
-        }
+        Some("Delete") => match crate::templates::remove(trigger) {
+            Ok(true) => crate::notify::app(&format!("Deleted template \u{201c}{trigger}\u{201d}.")),
+            Ok(false) => {}
+            Err(e) => crate::notify::alert(&format!("Couldn't delete template: {e}")),
+        },
         // "Edit" (and any non-Delete) opens the file — multi-line content with
         // the user's own formatting is edited there (TOML triple-quotes).
         Some("Edit") => open_path(&crate::templates::ensure_file()),
@@ -2764,7 +2965,7 @@ fn template_action_dialog(trigger: &str) {
 }
 
 /// Per-word dictionary menu click → Edit (open the file) or Delete.
-fn dict_action_dialog(term: &str, tx: crossbeam_channel::Sender<Event>) {
+fn dict_action_dialog(term: &str) {
     match crate::dialog::choice(
         &format!("Dictionary word \u{201c}{term}\u{201d}"),
         &["Cancel", "Edit", "Delete"],
@@ -2774,7 +2975,7 @@ fn dict_action_dialog(term: &str, tx: crossbeam_channel::Sender<Event>) {
         Some("Delete") => {
             if let Ok(true) = crate::dictionary::remove_entry(term) {
                 crate::notify::app(&format!("Removed \u{201c}{term}\u{201d} from dictionary"));
-                let _ = tx.send(Event::DictChanged);
+                crate::dictionary::mark_menu_dirty();
             }
         }
         Some("Edit") => open_path(&crate::dictionary::ensure_file()),
@@ -2782,45 +2983,11 @@ fn dict_action_dialog(term: &str, tx: crossbeam_channel::Sender<Event>) {
     }
 }
 
-/// shown when the dictionary is empty or truncated.
-fn populate_dict_entries(submenu: &Submenu) -> Vec<(MenuItem, String)> {
-    const MAX: usize = 40;
-    let entries = crate::dictionary::list_entries();
-    let mut items = Vec::new();
-    if entries.is_empty() {
-        let ph = MenuItem::new("  (empty: your corrections will appear here)", false, None);
-        let _ = submenu.append(&ph);
-        items.push((ph, String::new()));
-        return items;
-    }
-    for e in entries.iter().take(MAX) {
-        let star = if e.starred { "\u{2605} " } else { "" };
-        let label = if e.variants.is_empty() {
-            format!("  {star}{}", e.term)
-        } else {
-            format!("  {star}{}  \u{2190}  {}", e.term, e.variants.join(", "))
-        };
-        let it = MenuItem::new(&label, true, None);
-        let _ = submenu.append(&it);
-        items.push((it, e.term.clone()));
-    }
-    if entries.len() > MAX {
-        let more = MenuItem::new(
-            &format!("  \u{2026} +{} more (use Open file)", entries.len() - MAX),
-            false,
-            None,
-        );
-        let _ = submenu.append(&more);
-        items.push((more, String::new()));
-    }
-    items
-}
-
 /// Native dialog prefilled with the last dictation; on Save, learn from the
 /// user's correction. Runs on its own thread (the dialog blocks on input).
-fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
+fn correct_last_dialog() {
     let Some(last) = crate::dictionary::last_dictation() else {
-        crate::notify::app("No recent dictation to correct.");
+        crate::notify::alert("No recent dictation to correct.");
         return;
     };
     let corrected = match crate::dialog::text_input(
@@ -2856,16 +3023,16 @@ fn correct_last_dialog(tx: crossbeam_channel::Sender<Event>) {
                 "Noted — nothing to learn (rewrite / everyday words ignored).".to_string()
             };
             crate::notify::app(&msg);
-            let _ = tx.send(Event::DictChanged);
+            crate::dictionary::mark_menu_dirty();
         }
-        Correction::NoLast => crate::notify::app("Nothing to correct yet."),
-        Correction::NotReady => crate::notify::app("Dictionary is off."),
-        Correction::SaveError(e) => crate::notify::app(&format!("Save failed: {e}")),
+        Correction::NoLast => crate::notify::alert("Nothing to correct yet."),
+        Correction::NotReady => crate::notify::alert("Dictionary is off."),
+        Correction::SaveError(e) => crate::notify::alert(&format!("Save failed: {e}")),
     }
 }
 
 /// Native dialog to add a word manually: "Correct = heard1, heard2".
-fn add_word_dialog(tx: crossbeam_channel::Sender<Event>) {
+fn add_word_dialog() {
     let Some(input) = crate::dialog::text_input(
         "Add a word — just type the correct spelling; the app catches misheard \
          versions by sound. (Optional: Word = misheard1, misheard2)",
@@ -2893,13 +3060,13 @@ fn add_word_dialog(tx: crossbeam_channel::Sender<Event>) {
     match crate::dictionary::add_entry(&term, &variants, false, None) {
         Ok(()) => {
             crate::notify::app(&format!("Added \u{201c}{term}\u{201d}"));
-            let _ = tx.send(Event::DictChanged);
+            crate::dictionary::mark_menu_dirty();
         }
-        Err(e) => crate::notify::app(&format!("Add failed: {e}")),
+        Err(e) => crate::notify::alert(&format!("Add failed: {e}")),
     }
 }
 
-/// Two-step dialog (key, then email) → activate. Runs off the UI thread.
+/// Ask for the key → activate. Runs off the UI thread.
 fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
     let Some(key) = crate::dialog::text_input("Enter your Whisper Push license key:", "") else {
         return;
@@ -2913,7 +3080,7 @@ fn license_activate_dialog(tx: crossbeam_channel::Sender<Event>) {
         Rejected(r) => format!("Activation failed: {r}"),
         Offline => "Couldn't reach the license server. Check your connection and retry.".into(),
     };
-    crate::notify::app(&msg);
+    crate::notify::alert(&msg);
     let _ = tx.send(Event::LicenseChanged);
 }
 
@@ -2932,7 +3099,7 @@ fn license_deactivate_dialog(tx: crossbeam_channel::Sender<Event>) {
             "Couldn't reach the server \u{2014} deactivate from your account page instead.".into()
         }
     };
-    crate::notify::app(&msg);
+    crate::notify::alert(&msg);
     let _ = tx.send(Event::LicenseChanged);
 }
 
@@ -2959,13 +3126,21 @@ fn uninstall_dialog() {
     }
     // Free the server-side device slot before wiping local state.
     let _ = crate::license::deactivate();
-    let data_dir = crate::config::data_dir();
-    if data_dir.exists() {
-        let _ = std::fs::remove_dir_all(&data_dir);
-        info!("Removed data dir: {}", data_dir.display());
+    // Two directories off macOS: models/logs/license live in the data dir, while
+    // config, dictionary, templates and history (every dictation, in plain
+    // text) live beside config.toml — ~/.config or Roaming AppData. On macOS
+    // both are the same Application Support folder, so the second is a no-op.
+    let config_dir = crate::config::config_path()
+        .parent()
+        .map(|p| p.to_path_buf());
+    for dir in std::iter::once(crate::config::data_dir()).chain(config_dir) {
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(&dir);
+            info!("Removed {}", dir.display());
+        }
     }
     crate::autostart::disable();
-    crate::notify::app(&format!("Whisper Push data removed. {removal}"));
+    crate::notify::alert(&format!("Whisper Push data removed. {removal}"));
     crate::util::exit_clean();
 }
 

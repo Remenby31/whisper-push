@@ -20,6 +20,9 @@ keywords = ["whisper", "dictation", "speech-to-text", "push-to-talk"]
 [workspace]
 members = ["crates/whisper-push-dict", "crates/whisper-push-acoustic"]
 resolver = "3"
+# vendor/ holds patched third-party crates (see [patch.crates-io]); they are
+# path dependencies, not members we build and test as our own.
+exclude = ["vendor"]
 
 [features]
 # Cross-platform default — NO GPU backend here, so a plain `cargo build` works on
@@ -151,6 +154,11 @@ objc2-app-kit = { version = "0.3", features = [
     "NSBox",
     "NSColor",
     "NSScreen",
+    # The pill's "Loading" label.
+    "NSControl",
+    "NSTextField",
+    "NSFont",
+    "NSFontDescriptor",
     "block2",
 ] }
 block2 = "0.6"
@@ -237,6 +245,17 @@ strip = true
 lto = true
 codegen-units = 1
 opt-level = 3
+
+# whisper.cpp 1.8.3 -> 1.9.4. whisper-rs-sys 0.15.0 (the latest on crates.io,
+# upstream dormant) bundles 1.8.3, which has a heap OOB read in
+# log_mel_spectrogram on very short audio (#3956) and reads uninitialised mel
+# frames (#3981) — both hit push-to-talk clips. vendor/whisper-rs-sys is the
+# crates.io 0.15.0 source with its whisper.cpp/ swapped for the v1.9.4 tag
+# (pruned to what the cmake build uses) and build.rs taught 1.9's version
+# declaration. The C API change is additive, so whisper-rs 0.16 is untouched.
+# Drop this once a whisper-rs-sys release ships >= 1.9.4.
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
 
 # ─── Packaging ────────────────────────────────────────────────────────────────
 

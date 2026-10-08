@@ -37,27 +37,22 @@ pub enum Event {
     HotkeyToggle,
     /// A custom hotkey was captured (hotkey string, mode)
     HotkeyCaptured(String, String),
-    /// Model loaded and ready
-    ModelReady,
     /// State changed (for tray icon update)
     StateChanged(State),
-    /// Show the "listening" overlay pill *now* — sent from the pipeline thread on
-    /// key-down (before the hold-delay gate / mic open) so the pill appears with
-    /// the start sound instead of lagging behind `StateChanged(Recording)`. The
-    /// tray icon stays driven by `StateChanged`. macOS-only effect (no-op pill
-    /// elsewhere).
-    ShowOverlay,
-    /// Hide the overlay pill — sent on the early-exit paths (quick-tap cancel,
-    /// model-switch re-queue, mic-open failure) so a shown pill never sticks.
-    HideOverlay,
+    /// Drive the overlay pill directly from the pipeline thread, without
+    /// touching the app state or tray icon (those stay on `StateChanged`):
+    /// `Recording` on key-down so the pill appears with the start sound instead
+    /// of lagging behind `StateChanged(Recording)`; `Idle` on the early exits
+    /// (quick-tap cancel, model-switch re-queue, mic-open failure) so a shown
+    /// pill never sticks; `Loading` when a dictation hits a cold model.
+    /// macOS-only effect (no-op pill elsewhere).
+    Overlay(crate::overlay::OverlayState),
     /// Menu item clicked (menu item id string)
     MenuClicked(String),
     /// Prompt for missing permissions (after event loop is running)
     PromptPermissions,
     /// Refresh permission status in the menu
     RefreshPermissions,
-    /// The dictionary changed (add/remove/correct/reload) — refresh its submenu
-    DictChanged,
     /// The license state changed (activate/deactivate) — refresh its submenu
     LicenseChanged,
     /// Open the license / subscription modal (the one surface for buying,
@@ -82,6 +77,17 @@ pub enum Event {
     HotkeyCaptureTimeout(u64),
     /// Load model on the pipeline thread (needed for WGPU same-thread requirement)
     LoadModel(String),
+    /// A background device scan finished — the pickers follow devices plugged
+    /// in or out after launch. `first` marks the startup scan, the only one
+    /// stale device pins are reconciled against.
+    DevicesChanged {
+        inputs: Vec<String>,
+        outputs: Vec<String>,
+        first: bool,
+    },
+    /// A `LoadModel` finished (model name, success) — the Engine rows and the
+    /// saved model follow what actually loaded.
+    ModelLoaded { name: String, ok: bool },
     /// A new version is available (version, download_url)
     UpdateAvailable(String, String),
     /// Show a manual-check result as the update menu item's text — the menu is
