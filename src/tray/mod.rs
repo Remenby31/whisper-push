@@ -1866,9 +1866,17 @@ fn start_screen_vocab_capture(gate: &mut ScreenVocabGate, config: &Arc<Mutex<Con
 /// toggle was off (nothing pending). Logs the `Outcome` — including
 /// `WriteFailed`, which `screen_vocab` exists specifically to surface — since
 /// this daemon path is otherwise the only caller that never inspected it.
-fn finish_screen_vocab_capture(gate: &mut ScreenVocabGate) {
+///
+/// Also the point where the recognized text is handed to the correction layer
+/// for the dictation about to be transcribed — this runs after the press-time
+/// `update_session_context`, which is exactly the ordering we want (see
+/// `arm_session_context_from_screen`).
+fn finish_screen_vocab_capture(gate: &mut ScreenVocabGate, config: &Arc<Mutex<Config>>) {
     gate.finish(|rx| match rx.recv_timeout(SCREEN_VOCAB_JOIN_TIMEOUT) {
-        Ok(outcome) => log_screen_vocab_outcome(&outcome),
+        Ok(outcome) => {
+            arm_session_context_from_screen(&outcome, config);
+            log_screen_vocab_outcome(&outcome);
+        }
         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
             warn!(
                 "screen_vocab: capture still running after {SCREEN_VOCAB_JOIN_TIMEOUT:?} — \
@@ -1882,20 +1890,46 @@ fn finish_screen_vocab_capture(gate: &mut ScreenVocabGate) {
     });
 }
 
+/// Append this dictation's OCR text to the transient session context, on top of
+/// whatever the focused field, selection and clipboard already armed at press
+/// time. Appending (never replacing) is deliberate: those sources are things
+/// the user deliberately typed or copied, so they get the term budget first,
+/// and the ambient screen takes what's left. Where accessibility text is
+/// unavailable — GPU-rendered terminals expose no `AXValue` — they contribute
+/// nothing and the screen inherits the whole budget on its own.
+fn arm_session_context_from_screen(
+    outcome: &crate::screen_vocab::Outcome,
+    config: &Arc<Mutex<Config>>,
+) {
+    use crate::screen_vocab::Outcome;
+    // A failed log write still yields usable text — arm from it anyway.
+    let (Outcome::Logged { texts, .. } | Outcome::WriteFailed { texts, .. }) = outcome else {
+        return;
+    };
+    if texts.is_empty() || !whisper_push_dict::is_enabled() {
+        return;
+    }
+    let lang = config.lock_safe().language.clone();
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    whisper_push_dict::append_session_context_from_texts(&refs, &lang);
+    debug!(
+        "screen_vocab: session context armed to {} term(s)",
+        whisper_push_dict::session_context_len()
+    );
+}
+
 fn log_screen_vocab_outcome(outcome: &crate::screen_vocab::Outcome) {
     use crate::screen_vocab::Outcome;
     match outcome {
-        Outcome::Logged {
-            path,
-            displays,
-            words,
-        } => {
+        Outcome::Logged { path, texts } => {
+            let chars: usize = texts.iter().map(|t| t.chars().count()).sum();
             debug!(
-                "screen_vocab: {displays} display(s), {words} word(s) appended to {}",
+                "screen_vocab: {} display(s), {chars} char(s) appended to {}",
+                texts.len(),
                 path.display()
             );
         }
-        Outcome::WriteFailed { path, error } => {
+        Outcome::WriteFailed { path, error, .. } => {
             warn!(
                 "screen_vocab: failed to append to {}: {error}",
                 path.display()
@@ -2155,7 +2189,7 @@ fn handle_pipeline_event(
             // Wait (bounded) for any still-in-flight screen-vocab capture (#19)
             // before transcription starts — a no-op if the toggle was off or
             // the pipeline already finished.
-            finish_screen_vocab_capture(screen_vocab_gate);
+            finish_screen_vocab_capture(screen_vocab_gate, config);
             stop_and_transcribe(config, capture, ui_tx);
             notify_ui(ui_tx, Event::StateChanged(State::Idle));
         }
@@ -2204,7 +2238,7 @@ fn handle_pipeline_event(
                 notify_ui(ui_tx, Event::StateChanged(State::Processing));
                 // Wait (bounded) for any still-in-flight screen-vocab capture
                 // (#19), same as the hold path.
-                finish_screen_vocab_capture(screen_vocab_gate);
+                finish_screen_vocab_capture(screen_vocab_gate, config);
                 stop_and_transcribe(config, capture, ui_tx);
                 notify_ui(ui_tx, Event::StateChanged(State::Idle));
             }

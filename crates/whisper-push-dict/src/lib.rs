@@ -15,7 +15,6 @@
 //! The crate is pure (no ASR/GPU deps) so its tests compile in ~1–2s.
 
 mod compiled;
-mod extract;
 mod finalize;
 mod learn;
 mod model;
@@ -23,7 +22,6 @@ mod normalize;
 mod phonetic;
 
 pub use compiled::{CommonWords, Compiled};
-pub use extract::extract_words;
 pub use finalize::{Applied, finalize, finalize_traced};
 pub use learn::{EditClass, EditKind, LastDictation, LearnReport, Pair, classify, learn};
 pub use model::{Dictionary, Entry, LoadError, Source};
@@ -195,21 +193,34 @@ pub fn last_dictation() -> Option<LastDictation> {
     last_slot().clone()
 }
 
-/// Arm the **session context** for the next dictation from raw text the user is
-/// looking at (focused field, selection, clipboard, app name). Proper-noun-like
-/// words (capitalized, ≥4 chars, not everyday words) become high-priority,
-/// relaxed-threshold correction targets — so a name on screen gets recognized
-/// even though it was never explicitly taught. Transient, in-RAM, never saved.
-pub fn set_session_context_from_texts(texts: &[&str], lang: &str) {
-    const MAX_TERMS: usize = 80;
-    let Some(state) = read_state() else {
-        return; // need the common-word guard to filter candidates
-    };
+/// Upper bound on how many terms the transient session context can hold at
+/// once, across every source that contributes to it. Enforced in reading
+/// order: the sources handed over first fill the budget first.
+const MAX_SESSION_TERMS: usize = 80;
+
+/// Pull proper-noun-like candidates out of `texts`, in reading order, skipping
+/// any whose normalized key is already in `seen`, and stop once `budget` terms
+/// are collected. Returns `None` when the engine isn't initialized — the
+/// common-word guard is required to filter candidates, and callers must leave
+/// the existing context untouched rather than clobber it with an empty set.
+///
+/// Acquires and releases the `STATE` lock internally and never touches
+/// `SESSION`: `finalize_and_record` takes `STATE` before `SESSION`, so a caller
+/// holding `SESSION` across this call would invert the lock order.
+fn harvest_session_terms(
+    texts: &[&str],
+    lang: &str,
+    budget: usize,
+    seen: &mut std::collections::HashSet<String>,
+) -> Option<Vec<crate::compiled::FuzzyTerm>> {
+    let state = read_state()?;
     let common = state.common.clone();
     drop(state);
 
     let mut out: Vec<crate::compiled::FuzzyTerm> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    if budget == 0 {
+        return Some(out);
+    }
     'outer: for text in texts {
         for tok in crate::normalize::tokenize(text) {
             let crate::normalize::Tok::Word(w) = tok else {
@@ -235,12 +246,65 @@ pub fn set_session_context_from_texts(texts: &[&str], lang: &str) {
                 context: Vec::new(),
                 lang: (lang != "auto").then(|| lang.to_string()),
             });
-            if out.len() >= MAX_TERMS {
+            if out.len() >= budget {
                 break 'outer;
             }
         }
     }
-    *SESSION.write().unwrap_or_else(|e| e.into_inner()) = out;
+    Some(out)
+}
+
+/// Arm the **session context** for the next dictation from raw text the user is
+/// looking at (focused field, selection, clipboard, app name). Proper-noun-like
+/// words (capitalized, ≥4 chars, not everyday words) become high-priority,
+/// relaxed-threshold correction targets — so a name on screen gets recognized
+/// even though it was never explicitly taught. Transient, in-RAM, never saved.
+///
+/// Replaces the whole context. Sources that arrive later in the same dictation
+/// (screen OCR, which can't finish before the press) use
+/// [`append_session_context_from_texts`] instead, so they add to this rather
+/// than wipe it.
+pub fn set_session_context_from_texts(texts: &[&str], lang: &str) {
+    let mut seen = std::collections::HashSet::new();
+    let Some(terms) = harvest_session_terms(texts, lang, MAX_SESSION_TERMS, &mut seen) else {
+        return; // engine not initialized — leave the existing context alone
+    };
+    *SESSION.write().unwrap_or_else(|e| e.into_inner()) = terms;
+}
+
+/// Add to the session context without disturbing what's already armed, up to
+/// the same [`MAX_SESSION_TERMS`] ceiling. For sources that only become
+/// available mid-dictation — screen OCR is captured concurrently with the
+/// recording and lands at release, long after [`set_session_context_from_texts`]
+/// has run with the focused field and clipboard.
+///
+/// Appending (rather than prepending) is what makes deliberate signals win: the
+/// field the user is typing in and the text they copied fill the budget first,
+/// and the ambient screen only claims what's left. On a host that exposes no
+/// accessibility text at all (GPU-rendered terminals), the earlier sources
+/// contribute nothing and the screen inherits the full budget by itself.
+pub fn append_session_context_from_texts(texts: &[&str], lang: &str) {
+    // Snapshot under a read lock and release it before harvesting: harvesting
+    // takes `STATE`, and `finalize_and_record` takes `STATE` before `SESSION`.
+    let (budget, mut seen) = {
+        let guard = SESSION.read().unwrap_or_else(|e| e.into_inner());
+        let seen: std::collections::HashSet<String> =
+            guard.iter().map(|t| t.norm.clone()).collect();
+        (MAX_SESSION_TERMS.saturating_sub(guard.len()), seen)
+    };
+    if budget == 0 {
+        return;
+    }
+    let Some(terms) = harvest_session_terms(texts, lang, budget, &mut seen) else {
+        return;
+    };
+    if terms.is_empty() {
+        return;
+    }
+    let mut guard = SESSION.write().unwrap_or_else(|e| e.into_inner());
+    // Re-check the ceiling: the snapshot above was taken without the write lock.
+    let room = MAX_SESSION_TERMS.saturating_sub(guard.len());
+    guard.extend(terms.into_iter().take(room));
 }
 
 /// Number of session-context terms currently armed (diagnostics).
@@ -404,6 +468,63 @@ pub fn default_path_beside(config_file: &Path, filename: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// `STATE` and `SESSION` are process-global and every test below calls
+    /// `init`, so they must not interleave.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn init_empty_dict(tag: &str) {
+        let dir = std::env::temp_dir().join(format!("wpdict_{tag}"));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("dictionary.toml");
+        let _ = std::fs::remove_file(&path);
+        init(path).unwrap();
+    }
+
+    #[test]
+    fn appending_screen_text_keeps_what_the_earlier_sources_armed() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        init_empty_dict("session_append");
+
+        // Press time: focused field / clipboard.
+        set_session_context_from_texts(&["Message from Kasar about the build"], "en");
+        let after_set = session_context_len();
+        assert!(after_set >= 1, "clipboard term should be armed");
+
+        // Release time: screen OCR lands and adds to it.
+        append_session_context_from_texts(&["Ghostty  Souge  README"], "en");
+        assert!(
+            session_context_len() > after_set,
+            "screen terms must be added, not replace the earlier ones"
+        );
+
+        // Both sources are live for the dictation that follows.
+        assert_eq!(finalize_and_record("casar", "en"), "Kasar");
+        assert_eq!(finalize_and_record("gostty", "en"), "Ghostty");
+
+        clear_session_context();
+    }
+
+    #[test]
+    fn the_term_ceiling_is_shared_across_sources() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        init_empty_dict("session_cap");
+
+        // 100 candidates from the first source alone overflow the budget.
+        let filler: String = (0..100).map(|i| format!("Term{i:04} ")).collect();
+        set_session_context_from_texts(&[&filler], "en");
+        assert_eq!(session_context_len(), MAX_SESSION_TERMS);
+
+        // The screen gets nothing, rather than pushing the total past the cap.
+        append_session_context_from_texts(&["Ghostty Souge"], "en");
+        assert_eq!(
+            session_context_len(),
+            MAX_SESSION_TERMS,
+            "append must never exceed the ceiling"
+        );
+
+        clear_session_context();
+    }
+
     #[test]
     fn finalize_without_init_is_identity() {
         // STATE is process-global; this test only asserts the pre-init contract.
@@ -414,6 +535,7 @@ mod tests {
 
     #[test]
     fn hot_reload_picks_up_external_writes() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join("wpdict_reload_test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("dictionary.toml");

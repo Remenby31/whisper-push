@@ -30,15 +30,17 @@ use objc2_vision::{VNImageRequestHandler, VNRecognizeTextRequest, VNRequest};
 /// the fixed-size buffer [`CGGetActiveDisplayList`] writes into.
 const MAX_DISPLAYS: usize = 16;
 
-/// Outcome of the native capture attempt, before word extraction (which is
-/// the platform-agnostic pure step — see `whisper_push_dict::extract_words`).
+/// Outcome of the native capture attempt. The recognized text is handed on
+/// verbatim: tokenizing and filtering belong to the consumer
+/// (`whisper_push_dict::append_session_context_from_texts`), which needs the
+/// surface form this stage must therefore not touch.
 pub(super) enum Capture {
     /// Screen Recording permission isn't granted.
     PermissionDenied,
     /// No connected displays were found.
     NoDisplays,
     /// One raw OCR text string per display (a display with no readable text
-    /// contributes `""` — `extract_words` handles that fine).
+    /// contributes `""`, which every consumer tolerates).
     Ok(Vec<String>),
 }
 

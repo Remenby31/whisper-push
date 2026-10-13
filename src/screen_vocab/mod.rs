@@ -1,9 +1,9 @@
 //! Screen-vocabulary capture (issue #18): a self-contained, macOS-only
 //! pipeline that captures every connected display, runs Vision OCR (French +
-//! English) on each, extracts candidate words via
-//! `whisper_push_dict::extract_words`, and appends one timestamped record to
-//! a local JSONL log — a sibling of `dictionary.toml`, but never merged into
-//! it (that's deferred; see the issue). No screenshot is ever written to
+//! English) on each, arms the transient session context with the recognized
+//! text, and appends one timestamped record to a local JSONL log — a sibling
+//! of `dictionary.toml`, but never merged into it (that's deferred; see the
+//! issue). No screenshot is ever written to
 //! disk: each captured image lives only long enough for OCR to run on it
 //! (see `macos::capture_and_ocr_all_displays`).
 //!
@@ -21,6 +21,15 @@
 //! recording, and whether release must wait for it — see the tray pipeline's
 //! `handle_pipeline_event` (`Event::HotkeyDown`/`HotkeyUp`/`HotkeyToggle`) for
 //! the actual wiring.
+//!
+//! The OCR text is handed over **raw**, exactly as Vision returned it:
+//! `whisper_push_dict::append_session_context_from_texts` does its own
+//! tokenizing and filtering and keeps each term's surface form, which is what
+//! the correction layer needs (its proper-noun filter keys off capitalization).
+//! Pre-splitting into normalized words here would lowercase everything and
+//! strip accents, and nothing would survive that filter. The same raw text is
+//! what lands in the log, so a future promotion pass can still recover a
+//! correctly-cased dictionary entry from it.
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -29,15 +38,15 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// One JSONL record: a timestamped capture's extracted candidate words.
+/// One JSONL record: a timestamped capture's raw OCR text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VocabRecord {
     /// Milliseconds since the Unix epoch when the capture was taken.
     pub ts_ms: u64,
-    /// Deduplicated, normalized candidate words (see
-    /// `whisper_push_dict::extract_words`). No relevance filtering — that's
-    /// deliberate for this ticket, see the module docs.
-    pub words: Vec<String>,
+    /// Raw recognized text, one entry per display, in capture order. Stored
+    /// verbatim — no tokenizing, no normalization, no filtering — so surface
+    /// form (case and accents) survives for a later promotion pass.
+    pub texts: Vec<String>,
 }
 
 /// What one [`capture_and_log`] call did. The CLI dev-trigger prints this to
@@ -54,18 +63,22 @@ pub enum Outcome {
     PermissionDenied,
     /// No connected displays were found.
     NoDisplays,
-    /// Capture + OCR ran; one record was appended to `path`.
-    Logged {
-        path: PathBuf,
-        displays: usize,
-        words: usize,
-    },
+    /// Capture + OCR ran; one record was appended to `path`. Carries the raw
+    /// per-display text so the caller can also arm the session context with it
+    /// — the dictation path does, the CLI trigger just reports on it.
+    Logged { path: PathBuf, texts: Vec<String> },
     /// Capture + OCR ran, but the record could not be appended to `path`
     /// (disk full, permission denied, …) — the extracted words are lost.
     /// Distinct from [`Outcome::Logged`] so a caller (the CLI trigger today,
     /// a future daemon caller tomorrow) can actually notice a persistently
-    /// failing write instead of it looking like silent success.
-    WriteFailed { path: PathBuf, error: String },
+    /// failing write instead of it looking like silent success. Still carries
+    /// the recognized text: a log that can't be written must not also cost the
+    /// user the correction help for the dictation in flight.
+    WriteFailed {
+        path: PathBuf,
+        error: String,
+        texts: Vec<String>,
+    },
 }
 
 /// `screen-vocab.jsonl` lives next to `dictionary.toml` / `config.toml` — a
@@ -86,10 +99,9 @@ pub fn capture_and_log() -> Outcome {
             macos::Capture::NoDisplays => return Outcome::NoDisplays,
             macos::Capture::Ok(texts) => texts,
         };
-        let words = whisper_push_dict::extract_words(&raw_texts);
         let record = VocabRecord {
             ts_ms: now_ms(),
-            words,
+            texts: raw_texts,
         };
         let path = log_path();
         if let Err(e) = append_record(&path, &record) {
@@ -97,12 +109,12 @@ pub fn capture_and_log() -> Outcome {
             return Outcome::WriteFailed {
                 path,
                 error: e.to_string(),
+                texts: record.texts,
             };
         }
         Outcome::Logged {
             path,
-            displays: raw_texts.len(),
-            words: record.words.len(),
+            texts: record.texts,
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -288,7 +300,7 @@ mod tests {
         let path = temp_log("create");
         let record = VocabRecord {
             ts_ms: 1_700_000_000_000,
-            words: vec!["kasar".into(), "onnx".into()],
+            texts: vec!["Kasar ONNX".into()],
         };
         append_record(&path, &record).unwrap();
 
@@ -306,11 +318,11 @@ mod tests {
         let path = temp_log("append");
         let first = VocabRecord {
             ts_ms: 1,
-            words: vec!["first".into()],
+            texts: vec!["First".into()],
         };
         let second = VocabRecord {
             ts_ms: 2,
-            words: vec!["second".into()],
+            texts: vec!["Second".into()],
         };
         append_record(&path, &first).unwrap();
         append_record(&path, &second).unwrap();
@@ -339,7 +351,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
         let record = VocabRecord {
             ts_ms: 42,
-            words: vec![],
+            texts: vec![],
         };
         append_record(&path, &record).unwrap();
         assert!(path.exists());

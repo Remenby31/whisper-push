@@ -1156,14 +1156,11 @@ mod cli_screen_vocab {
                 println!("No connected displays found — nothing captured.");
                 Ok(())
             }
-            Outcome::Logged {
-                path,
-                displays,
-                words,
-            } => {
+            Outcome::Logged { path, texts } => {
+                let chars: usize = texts.iter().map(|t| t.chars().count()).sum();
                 println!(
-                    "Captured {displays} display(s), extracted {words} candidate word(s), \
-                     appended to {}",
+                    "Captured {} display(s), {chars} character(s) of text, appended to {}",
+                    texts.len(),
                     path.display()
                 );
                 Ok(())
@@ -1172,7 +1169,7 @@ mod cli_screen_vocab {
             // the record was lost, so this is the one case worth a non-zero
             // exit — a caller scripting this command can tell it apart from
             // "nothing to capture".
-            Outcome::WriteFailed { path, error } => {
+            Outcome::WriteFailed { path, error, .. } => {
                 bail!(
                     "captured OK, but failed to write {}: {error}",
                     path.display()
