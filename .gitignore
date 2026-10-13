@@ -7,6 +7,8 @@ venv/
 
 # Runtime
 *.lock
+# Cargo.lock is committed: this is a binary, and CI must build what was tested
+!Cargo.lock
 
 # Audio (but allow sounds/)
 *.wav
