@@ -44,11 +44,11 @@ No cloud, no account, no latency. A **35MB native binary** that transcribes spee
 
 **Easiest — download the DMG** (lightweight — the speech model downloads automatically on first launch):
 
-1. Grab **[Whisper-Push-macOS-arm64.dmg](https://github.com/Remenby31/whisper-push/releases/latest)** (~18 MB)
+1. Grab **[Whisper-Push-macOS-arm64.dmg](https://github.com/Remenby31/whisper-push/releases/latest)** (~23 MB)
 2. Open it and drag **Whisper Push** to **Applications**
 3. Launch from Launchpad / Applications — a guided setup opens to walk you through the three macOS permissions (Microphone, Accessibility, Input Monitoring). It detects when you toggle each one and restarts the app automatically.
 
-> Ad-hoc signed for now. On first launch macOS shows "unverified" — open **System Settings → Privacy & Security → Open Anyway**, or, if you prefer the command line: `xattr -dr com.apple.quarantine "/Applications/Whisper Push.app"`. A notarized build (Developer ID) is on the roadmap.
+> Signed with a Developer ID and notarized by Apple, so it opens like any other app — no Gatekeeper warning.
 
 **Build from source instead:**
 
@@ -85,7 +85,7 @@ of the flyout once to keep it in view.
 
 > Not code-signed yet, so SmartScreen shows "Windows protected your PC" the
 > first time: click **More info → Run anyway**. A signing certificate is on the
-> roadmap, same as notarization on macOS.
+> roadmap.
 
 > Upgrading from **1.2.7 or earlier**? Those installed machine-wide into
 > `Program Files`. Uninstall that one first (Settings → Apps → whisper-push);
