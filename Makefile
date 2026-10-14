@@ -1,5 +1,5 @@
 # Whisper Push — Rust build helpers
-.PHONY: dmg-artwork windows-icon setup-shots build release onboarding onboarding-preview bundle sign dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
+.PHONY: dmg-artwork windows-icon setup-shots build release onboarding onboarding-preview bundle sign sign-dist dmg zip notarize notarize-ci release-macos clean check deploy install uninstall
 
 APP_NAME = Whisper Push
 APP_DIR = build/$(APP_NAME).app
@@ -113,13 +113,18 @@ sign: bundle
 		"$(APP_DIR)"
 	@echo "✓ App signed with Developer ID"
 
-# Create a distributable DMG. Uses SIGN_ID for signing — set to "-" for
-# ad-hoc (local dev) or "Developer ID Application: ..." for production.
-# Bottom-up: wizard sub-bundle first, then daemon, then outer .app wrap.
-dmg: bundle
+# Sign for distribution — what both the DMG and the updater ZIP ship. Uses
+# SIGN_ID: "-" for ad-hoc (local dev) or "Developer ID Application: ..." for
+# production. Bottom-up: wizard sub-bundle first, then daemon, then outer .app
+# wrap. Every piece gets the hardened runtime and a secure timestamp, which
+# notarization rejects the bundle without — `sign` above relies on --deep and
+# leaves the wizard's executable without either, so it is for dev builds only.
+sign-dist: bundle
 	@codesign --force --options runtime -s "$(SIGN_ID)" \
+		--timestamp \
 		"$(WIZARD_BUNDLE)/Contents/MacOS/Onboarding"
 	@codesign --force --options runtime -s "$(SIGN_ID)" \
+		--timestamp \
 		"$(WIZARD_BUNDLE)"
 	@codesign --force --options runtime -s "$(SIGN_ID)" \
 		-i "$(BUNDLE_ID)" \
@@ -135,6 +140,9 @@ dmg: bundle
 	else \
 		echo "✓ App signed with Developer ID (DMG path)"; \
 	fi
+
+# Create a distributable DMG.
+dmg: sign-dist
 	@# Package the DMG with the pixel-perfect drag-to-Applications layout via
 	@# create-dmg (install it with `brew install create-dmg`). If it's missing or
 	@# fails, fall back to a plain image that STILL carries an Applications
@@ -215,22 +223,28 @@ setup-shots:
 	@echo "✓ wizard screens → build/setup-shots/"
 
 # Create a ZIP of the signed .app bundle (for auto-updater downloads).
-# Uses ditto to preserve code signatures and extended attributes.
-zip: sign
+# Uses ditto to preserve code signatures and extended attributes. Signed like
+# the DMG, never by `sign`: Apple rejects that signature at notarization.
+ZIP_APP = cd build && rm -f "dist/Whisper-Push-macOS-arm64.zip" && ditto -c -k --sequesterRsrc --keepParent "$(APP_NAME).app" "dist/Whisper-Push-macOS-arm64.zip"
+zip: sign-dist
 	@mkdir -p build/dist
-	@cd build && ditto -c -k --sequesterRsrc --keepParent "$(APP_NAME).app" "dist/Whisper-Push-macOS-arm64.zip"
+	@$(ZIP_APP)
 	@echo "✓ ZIP created at build/dist/Whisper-Push-macOS-arm64.zip"
 
-# Notarize the DMG (local: uses keychain-profile)
+# Notarize the DMG and staple the updater ZIP (local: uses keychain-profile)
 notarize: dmg
 	@echo "Notarizing..."
 	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
 		--keychain-profile "whisper-push" \
 		--wait
 	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
-	@echo "✓ DMG notarized and stapled"
+	@# The app in build/ is the one inside the DMG, so the DMG's ticket covers
+	@# it: staple it and re-zip, or the updater ZIP ships without a ticket.
+	@xcrun stapler staple "$(APP_DIR)"
+	@$(ZIP_APP)
+	@echo "✓ DMG + ZIP notarized and stapled"
 
-# Notarize the DMG (CI: uses API key file)
+# Notarize the DMG and staple the updater ZIP (CI: uses API key file)
 notarize-ci: dmg
 	@echo "Notarizing (CI)..."
 	@xcrun notarytool submit "build/dist/Whisper-Push-macOS-arm64.dmg" \
@@ -239,7 +253,11 @@ notarize-ci: dmg
 		--issuer "$(APPLE_API_ISSUER_ID)" \
 		--wait
 	@xcrun stapler staple "build/dist/Whisper-Push-macOS-arm64.dmg"
-	@echo "✓ DMG notarized and stapled (CI)"
+	@# The app in build/ is the one inside the DMG, so the DMG's ticket covers
+	@# it: staple it and re-zip, or the updater ZIP ships without a ticket.
+	@xcrun stapler staple "$(APP_DIR)"
+	@$(ZIP_APP)
+	@echo "✓ DMG + ZIP notarized and stapled (CI)"
 
 # Full release: build + sign + DMG + notarize
 release-macos: notarize
