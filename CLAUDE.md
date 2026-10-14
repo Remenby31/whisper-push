@@ -130,9 +130,25 @@ TOML format, compatible with Python version. Platform-default paths:
 ```bash
 # Developer ID: Baptiste Cruvellier (3SNT64YKAS)
 # Permissions TCC persist across rebuilds with this certificate
-make sign    # sign the .app bundle
+make sign    # sign the .app bundle (dev only — see below)
 make dmg     # create distributable DMG
 ```
+
+- **Ship only what `sign-dist` signed.** `make sign` relies on `--deep` and
+  leaves the Onboarding helper without hardened runtime or a secure timestamp:
+  fine to run locally, rejected by notarization. `dmg` and `zip` both go
+  through `sign-dist`, and `notarize`/`notarize-ci` staple the app and re-zip
+  it, so the updater ZIP carries a ticket too. Until v1.2.8 the ZIP was built
+  by `sign` and never notarized; Apple returned "Invalid" the first time it was.
+- **Notarization 403 "A required agreement is missing or has expired"** is not
+  an expired key or certificate: Apple published a new Developer Program
+  agreement that the account holder must accept on developer.apple.com. It can
+  take ~15 min after accepting before notarytool stops returning 403. CI's
+  notarize step is `continue-on-error`, so a green release can still ship
+  un-notarized — check with `spctl -a -vv` on the published app.
+- **`Cargo.lock` is committed.** It used to be ignored (a Python-era `*.lock`
+  rule), so CI resolved fresh: v1.2.8 first failed on every platform when
+  `ort 2.0.0-rc.14` changed `Session::builder()` under `parakeet-rs`.
 
 ## Pièges
 
