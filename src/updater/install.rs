@@ -16,6 +16,10 @@ use tracing::{info, warn};
 pub fn download_and_install(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
+        // Decide where it goes before spending minutes on a download that
+        // would have nowhere to land (a dev build refuses here).
+        let target = super::bundle::update_target()?;
+
         info!("Downloading update from {url}");
         let zip_path = download_zip(url)?;
 
@@ -26,7 +30,7 @@ pub fn download_and_install(url: &str) -> Result<()> {
         verify_codesign(&app_path)?;
 
         info!("Installing update...");
-        install_and_relaunch(&app_path)
+        install_and_relaunch(&app_path, &target)
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -142,48 +146,10 @@ fn verify_codesign(app_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Atomic swap: backup current app, copy new one, relaunch.
+/// Swap the verified bundle in where the running app lives (or into
+/// Applications when that copy can't be updated), then relaunch it.
 #[cfg(target_os = "macos")]
-fn install_and_relaunch(new_app: &Path) -> Result<()> {
-    let installed = PathBuf::from("/Applications/Whisper Push.app");
-    let backup = PathBuf::from("/Applications/Whisper Push.app.old");
-
-    if !installed.exists() {
-        anyhow::bail!("App not found at /Applications/Whisper Push.app — is it installed?");
-    }
-
-    // Remove stale backup if it exists
-    if backup.exists() {
-        std::fs::remove_dir_all(&backup).context("removing old backup")?;
-    }
-
-    // Step 1: Rename current → backup
-    std::fs::rename(&installed, &backup).context("backing up current app")?;
-
-    // Step 2: Copy new app to /Applications
-    let status = std::process::Command::new("ditto")
-        .arg(new_app)
-        .arg(&installed)
-        .status()
-        .context("copying new app")?;
-    if !status.success() {
-        // Rollback: restore backup
-        warn!("Copy failed, rolling back...");
-        let _ = std::fs::rename(&backup, &installed);
-        anyhow::bail!("Failed to copy new app to /Applications");
-    }
-
-    info!("Update installed to /Applications/Whisper Push.app");
-
-    // Step 3: Relaunch the new version with --post-update flag
-    let _ = std::process::Command::new("open")
-        .arg(&installed)
-        .arg("--args")
-        .arg("--post-update")
-        .spawn();
-
-    // Exit cleanly (skip C++ dtors → no ggml-metal teardown abort; the relaunch
-    // above brings up the new version). A clean code 0 also means the LaunchAgent's
-    // KeepAlive{SuccessfulExit:false} won't fight the handoff.
-    crate::util::exit_clean();
+fn install_and_relaunch(new_app: &Path, target: &Path) -> Result<()> {
+    super::bundle::swap_in(new_app, target)?;
+    super::bundle::relaunch_and_exit(target, &["--post-update"], None);
 }

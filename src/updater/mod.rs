@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+pub mod bundle;
 pub mod install;
 
 use crate::config;
@@ -128,6 +130,13 @@ pub fn check_for_update() -> anyhow::Result<UpdateCheck> {
 pub fn spawn_check(tx: Sender<Event>, check_updates: bool) {
     if !check_updates {
         info!("Update checking disabled");
+        return;
+    }
+    // A `make deploy` bundle is updated from source; announcing releases to it
+    // only offers an install that `bundle::update_target` will refuse.
+    #[cfg(target_os = "macos")]
+    if bundle::running_bundle().is_some_and(|b| bundle::classify(&b) == bundle::Location::Dev) {
+        info!("Development build — skipping the automatic update check");
         return;
     }
 

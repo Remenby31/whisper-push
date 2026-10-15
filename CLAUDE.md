@@ -146,6 +146,14 @@ make dmg     # create distributable DMG
   take ~15 min after accepting before notarytool stops returning 403. CI's
   notarize step is `continue-on-error`, so a green release can still ship
   un-notarized — check with `spctl -a -vv` on the published app.
+- **The updater never assumes `/Applications`** (`src/updater/bundle.rs`). It
+  replaces the bundle it is running from, staged beside it and renamed in
+  (atomic, `.old` deleted by the relaunched copy). At launch, an app running off
+  the DMG, a translocated copy or `~/Downloads` installs itself into
+  `/Applications` (or `~/Applications` if not writable — never a prompt) and
+  relaunches with `--moved-from`. A `make deploy` bundle (`build/` beside
+  `Cargo.toml`) is `Location::Dev`: never moved, never auto-updated — until this
+  existed, the dev build got "App not found at /Applications/…".
 - **`Cargo.lock` is committed.** It used to be ignored (a Python-era `*.lock`
   rule), so CI resolved fresh: v1.2.8 first failed on every platform when
   `ort 2.0.0-rc.14` changed `Session::builder()` under `parakeet-rs`.

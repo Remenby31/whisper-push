@@ -89,6 +89,11 @@ struct Cli {
     #[arg(long, hide = true)]
     post_update: bool,
 
+    /// Relaunched after moving into Applications from this bundle path (see
+    /// updater::bundle) — re-points auto-start if it still aims there.
+    #[arg(long, hide = true, value_name = "PATH")]
+    moved_from: Option<std::path::PathBuf>,
+
     /// Run the setup UI in this process and exit. The daemon spawns itself with
     /// this flag (see src/setup) because a winit event loop can only be built
     /// once per process and the tray owns the daemon's.
@@ -366,12 +371,13 @@ fn main() -> Result<()> {
     // Post-update cleanup: remove old app backup + show notification
     if cli.post_update {
         info!("Post-update cleanup");
-        let backup = std::path::PathBuf::from("/Applications/Whisper Push.app.old");
-        if backup.exists() {
-            let _ = std::fs::remove_dir_all(&backup);
-            info!("Removed old version backup");
-        }
+        #[cfg(target_os = "macos")]
+        updater::bundle::cleanup_backup();
         notify::app(&format!("Updated to v{}!", env!("CARGO_PKG_VERSION")));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(from) = &cli.moved_from {
+        updater::bundle::after_move(from);
     }
 
     // Run the app (tray mode on macOS/Windows, or daemon on Linux)
@@ -1254,6 +1260,12 @@ mod app {
     pub fn run(mut cfg: Config) -> Result<()> {
         // Ensure single instance
         let _lock = crate::state::acquire_lock()?;
+
+        // Running off the DMG, a translocated copy or ~/Downloads: install into
+        // Applications and relaunch from there (doesn't return when it moves),
+        // so updates, auto-start and permissions all attach to a stable path.
+        #[cfg(target_os = "macos")]
+        crate::updater::bundle::move_to_applications_if_needed();
 
         // Claim our Windows identity before anything can notify: a toast sent
         // before the AppUserModelID is registered is attributed to PowerShell,
