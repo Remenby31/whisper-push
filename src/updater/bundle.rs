@@ -71,17 +71,16 @@ pub fn classify(bundle: &Path) -> Location {
         return Location::Translocated;
     }
     let parent = bundle.parent();
-    if parent.and_then(|p| p.file_name()).is_some_and(|n| n == "build")
+    if parent
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n == "build")
         && parent
             .and_then(|p| p.parent())
             .is_some_and(|root| root.join("Cargo.toml").exists())
     {
         return Location::Dev;
     }
-    if bundle
-        .components()
-        .any(|c| c.as_os_str() == "Applications")
-    {
+    if bundle.components().any(|c| c.as_os_str() == "Applications") {
         return Location::Installed;
     }
     if s.starts_with("/Volumes/") {
@@ -154,7 +153,10 @@ pub fn swap_in(src: &Path, dest: &Path) -> Result<()> {
     let backup = sibling(dest, ".old");
 
     if !writable(dir) {
-        info!("{} isn't writable — asking for administrator rights", dir.display());
+        info!(
+            "{} isn't writable — asking for administrator rights",
+            dir.display()
+        );
         return swap_in_as_admin(src, dest, &staged, &backup);
     }
 
@@ -244,7 +246,10 @@ pub fn relaunch_and_exit(app: &Path, args: &[&str], detach: Option<&Path>) -> ! 
             shell_quote(&vol.to_string_lossy())
         ));
     }
-    script.push_str(&format!("exec /usr/bin/open {}", shell_quote(&app.to_string_lossy())));
+    script.push_str(&format!(
+        "exec /usr/bin/open {}",
+        shell_quote(&app.to_string_lossy())
+    ));
     if !args.is_empty() {
         script.push_str(" --args");
         for a in args {
@@ -320,7 +325,10 @@ pub fn move_to_applications_if_needed() {
             }
         }
     } else {
-        info!("{} is already as new — launching it instead", dest.display());
+        info!(
+            "{} is already as new — launching it instead",
+            dest.display()
+        );
     }
 
     let moved_from = bundle.to_string_lossy().into_owned();
@@ -363,24 +371,41 @@ mod tests {
     #[test]
     fn bundle_of_walks_up_from_the_binary() {
         assert_eq!(
-            bundle_of(Path::new("/Applications/Whisper Push.app/Contents/MacOS/whisper-push")),
+            bundle_of(Path::new(
+                "/Applications/Whisper Push.app/Contents/MacOS/whisper-push"
+            )),
             Some(PathBuf::from("/Applications/Whisper Push.app"))
         );
-        assert_eq!(bundle_of(Path::new("/repo/target/debug/whisper-push")), None);
+        assert_eq!(
+            bundle_of(Path::new("/repo/target/debug/whisper-push")),
+            None
+        );
     }
 
     #[test]
     fn classifies_install_locations() {
         let c = |p: &str| classify(Path::new(p));
         assert_eq!(c("/Applications/Whisper Push.app"), Location::Installed);
-        assert_eq!(c("/Users/a/Applications/Whisper Push.app"), Location::Installed);
-        assert_eq!(c("/Applications/Utilities/Whisper Push.app"), Location::Installed);
-        assert_eq!(c("/Volumes/Whisper Push/Whisper Push.app"), Location::Volume);
+        assert_eq!(
+            c("/Users/a/Applications/Whisper Push.app"),
+            Location::Installed
+        );
+        assert_eq!(
+            c("/Applications/Utilities/Whisper Push.app"),
+            Location::Installed
+        );
+        assert_eq!(
+            c("/Volumes/Whisper Push/Whisper Push.app"),
+            Location::Volume
+        );
         assert_eq!(
             c("/private/var/folders/xy/T/AppTranslocation/1234/d/Whisper Push.app"),
             Location::Translocated
         );
-        assert_eq!(c("/Users/a/Downloads/Whisper Push.app"), Location::Elsewhere);
+        assert_eq!(
+            c("/Users/a/Downloads/Whisper Push.app"),
+            Location::Elsewhere
+        );
     }
 
     #[test]
@@ -438,7 +463,12 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("v"), "old").unwrap();
 
-        let script = swap_script(&src, &dest, &sibling(&dest, ".new"), &sibling(&dest, ".old"));
+        let script = swap_script(
+            &src,
+            &dest,
+            &sibling(&dest, ".new"),
+            &sibling(&dest, ".old"),
+        );
         let ok = std::process::Command::new("/bin/sh")
             .args(["-c", &script])
             .status()
