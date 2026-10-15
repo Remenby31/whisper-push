@@ -38,6 +38,10 @@ pub fn registered_exe() -> Option<std::path::PathBuf> {
 pub fn repair() {
     let registered = registered_exe();
     if !needs_repair(registered.as_deref()) {
+        // Still ours to keep current: an agent written by an older version
+        // may lack keys that matter (macOS: KeepAlive).
+        #[cfg(target_os = "macos")]
+        macos::refresh();
         return;
     }
     let (Some(registered), Ok(current)) = (registered, std::env::current_exe()) else {
@@ -70,21 +74,28 @@ pub fn disable() {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::path::{Path, PathBuf};
     use tracing::{info, warn};
 
     const PLIST_LABEL: &str = "com.whisper-push.app";
 
-    pub fn enable() {
-        let Some(home) = dirs::home_dir() else {
-            warn!("Auto-start: can't resolve home directory");
-            return;
-        };
-        let plist_dir = home.join("Library/LaunchAgents");
-        let plist_path = plist_dir.join(format!("{PLIST_LABEL}.plist"));
+    fn plist_path() -> Option<PathBuf> {
+        Some(
+            dirs::home_dir()?
+                .join("Library/LaunchAgents")
+                .join(format!("{PLIST_LABEL}.plist")),
+        )
+    }
 
-        let app_path = std::env::current_exe().unwrap_or_default();
-
-        let content = format!(
+    /// The LaunchAgent that starts `exe` at login. ONE definition: `make
+    /// install` writes the same keys. `KeepAlive{SuccessfulExit:false}` is what
+    /// brings the app back after macOS kills it under memory pressure (jetsam)
+    /// or it crashes — without it the app just disappears until the next login.
+    /// The stdout/stderr files catch panics that happen before tracing is up.
+    pub(super) fn plist_content(exe: &Path) -> String {
+        let logs = crate::config::data_dir().join("logs");
+        let x = |p: &Path| xml_escape(&p.to_string_lossy());
+        format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -93,7 +104,7 @@ mod macos {
     <string>{PLIST_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
+        <string>{exe}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -106,39 +117,90 @@ mod macos {
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>{out}</string>
+    <key>StandardErrorPath</key>
+    <string>{err}</string>
 </dict>
-</plist>"#,
-            app_path.display()
-        );
+</plist>
+"#,
+            exe = x(exe),
+            out = x(&logs.join("launchd-stdout.log")),
+            err = x(&logs.join("launchd-stderr.log")),
+        )
+    }
 
-        let _ = std::fs::create_dir_all(&plist_dir);
-        if let Err(e) = std::fs::write(&plist_path, content) {
-            warn!("Failed to write LaunchAgent: {e}");
-        } else {
-            info!("Auto-start enabled: {}", plist_path.display());
+    fn write(exe: &Path) -> bool {
+        let Some(plist_path) = plist_path() else {
+            warn!("Auto-start: can't resolve home directory");
+            return false;
+        };
+        if let Some(dir) = plist_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::create_dir_all(crate::config::data_dir().join("logs"));
+        match std::fs::write(&plist_path, plist_content(exe)) {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("Failed to write LaunchAgent: {e}");
+                false
+            }
+        }
+    }
+
+    pub fn enable() {
+        let app_path = std::env::current_exe().unwrap_or_default();
+        if write(&app_path) {
+            info!("Auto-start enabled: {}", app_path.display());
+        }
+    }
+
+    /// Bring an outdated LaunchAgent up to the current definition, keeping the
+    /// binary it points at (never re-pointing it here: that is `repair`'s
+    /// call, and only for a binary that is gone). Agents written by older
+    /// versions lack `KeepAlive`, so a jetsam kill left the app dead for the
+    /// rest of the session. launchd reads the new file at the next login.
+    pub fn refresh() {
+        let (Some(path), Some(exe)) = (plist_path(), registered_exe()) else {
+            return;
+        };
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        if current != plist_content(&exe) && write(&exe) {
+            info!(
+                "Auto-start agent updated to the current definition ({})",
+                exe.display()
+            );
         }
     }
 
     /// The path recorded in the LaunchAgent, if it exists.
-    pub fn registered_exe() -> Option<std::path::PathBuf> {
-        let plist = dirs::home_dir()?
-            .join("Library/LaunchAgents")
-            .join(format!("{PLIST_LABEL}.plist"));
-        let content = std::fs::read_to_string(plist).ok()?;
+    pub fn registered_exe() -> Option<PathBuf> {
+        let content = std::fs::read_to_string(plist_path()?).ok()?;
         // ProgramArguments holds one <string> — the binary path.
         let after = content.split("<array>").nth(1)?;
         let inner = after.split("<string>").nth(1)?;
-        Some(std::path::PathBuf::from(inner.split("</string>").next()?))
+        Some(PathBuf::from(xml_unescape(
+            inner.split("</string>").next()?,
+        )))
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    fn xml_unescape(s: &str) -> String {
+        s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
     }
 
     pub fn disable() {
-        let Some(home) = dirs::home_dir() else {
+        let Some(plist_path) = plist_path() else {
             warn!("Auto-start: can't resolve home directory");
             return;
         };
-        let plist_path = home
-            .join("Library/LaunchAgents")
-            .join(format!("{PLIST_LABEL}.plist"));
         let _ = std::fs::remove_file(&plist_path);
         info!("Auto-start disabled");
     }
@@ -342,5 +404,20 @@ mod tests {
         let missing = existing.with_file_name("whisper-push-not-here");
         assert!(!missing.exists());
         assert!(needs_repair(Some(&missing)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launch_agent_keeps_the_app_alive_and_round_trips_its_path() {
+        let exe =
+            std::path::Path::new("/Apps & Tools/Whisper Push.app/Contents/MacOS/whisper-push");
+        let plist = macos::plist_content(exe);
+        assert!(plist.contains("<key>KeepAlive</key>"));
+        assert!(plist.contains("<key>StandardErrorPath</key>"));
+        assert!(plist.contains("/Apps &amp; Tools/"));
+        let after = plist.split("<array>").nth(1).unwrap();
+        let inner = after.split("<string>").nth(1).unwrap();
+        let raw = inner.split("</string>").next().unwrap();
+        assert_eq!(raw.replace("&amp;", "&"), exe.to_string_lossy());
     }
 }
