@@ -82,9 +82,9 @@ pub fn play_sound(name: &str) {
                 if let Some(path) = extracted_sound_path(name, wav_data, lead_ms, peak) {
                     // Loudness is baked into the file, so no `-v` (afplay's -v
                     // doesn't reliably amplify above 1.0 anyway).
-                    let _ = std::process::Command::new("/usr/bin/afplay")
-                        .arg(path)
-                        .spawn();
+                    let _ = crate::util::spawn_detached(
+                        std::process::Command::new("/usr/bin/afplay").arg(path),
+                    );
                     return;
                 }
             }

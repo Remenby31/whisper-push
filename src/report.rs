@@ -187,10 +187,11 @@ pub fn install_panic_hook() {
             let safe_msg = crate::notify::applescript_escape(&format!("Crashed: {payload}"));
             let script =
                 format!(r#"display notification "{safe_msg}" with title "Whisper Push Crashed""#);
-            let _ = std::process::Command::new("osascript")
-                .arg("-e")
-                .arg(&script)
-                .spawn();
+            let _ = crate::util::spawn_detached(
+                std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(&script),
+            );
         }
 
         // Call default hook for stderr output

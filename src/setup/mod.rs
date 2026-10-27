@@ -1599,11 +1599,12 @@ fn grant(kind: PermKind) {
     #[cfg(target_os = "macos")]
     {
         if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new(exe)
-                .args(["--permissions-request", kind.cli_name()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            let _ = crate::util::spawn_detached(
+                std::process::Command::new(exe)
+                    .args(["--permissions-request", kind.cli_name()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            );
         }
         // Accessibility / Input Monitoring are manual toggles: open the pane too.
         if kind != PermKind::Microphone {

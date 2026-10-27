@@ -238,13 +238,13 @@ fn osascript_notify(title: &str, body: &str) {
         applescript_escape(body),
         applescript_escape(title),
     );
-    if let Err(e) = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+    if let Err(e) = crate::util::spawn_detached(
+        std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    ) {
         warn!("Notification failed: {e}");
     }
 }

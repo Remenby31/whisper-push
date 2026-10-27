@@ -57,14 +57,6 @@ impl<T> LockSafe<T> for Mutex<T> {
     }
 }
 
-/// Exit the process immediately **without** running C/C++ static destructors.
-///
-/// whisper.cpp / ggml-metal aborts in a static destructor at normal exit
-/// (`GGML_ASSERT … ggml_abort` → "Abort trap: 6"); `process::exit` and returning
-/// from `main` both run those dtors. `_exit` skips them, giving a clean exit
-/// code 0. This matters now that the LaunchAgent uses
-/// `KeepAlive{SuccessfulExit:false}`: an *abnormal* abort on a user-requested
-/// Quit would otherwise make launchd resurrect the app instead of staying down.
 /// A `Command` that never flashes a console window on Windows.
 ///
 /// The daemon is a GUI-subsystem binary, so every console program it spawns
@@ -84,6 +76,25 @@ pub fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Com
     cmd
 }
 
+/// Spawn a program we don't wait on (a sound cue, a notification, `open`) and
+/// reap it once it exits. The one way to fire-and-forget a child process.
+///
+/// A plain `Command::spawn()` whose `Child` is dropped never collects the exit
+/// status, so on macOS and Linux every such child stays behind as a zombie for
+/// the daemon's whole life. `afplay` runs twice per dictation: after twelve
+/// days of uptime the app was parent to ~1100 `<defunct>` processes. A short
+/// thread blocks in `wait()` instead, so the hot path still returns at once.
+/// (Windows has no zombies, only the handle, which `wait` closes the same way.)
+pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::Builder::new()
+        .name("reap-child".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })?;
+    Ok(())
+}
+
 /// Hand a file, folder or URL to the OS default handler — the one place that
 /// knows how, so the five copies of this (tray, wizard, report, updater,
 /// permissions) can't drift apart.
@@ -94,12 +105,10 @@ pub fn quiet_command<S: AsRef<std::ffi::OsStr>>(program: S) -> std::process::Com
 pub fn open_external<P: AsRef<std::ffi::OsStr>>(target: P) {
     let target = target.as_ref();
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("/usr/bin/open")
-        .arg(target)
-        .spawn();
+    let _ = spawn_detached(std::process::Command::new("/usr/bin/open").arg(target));
 
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    let _ = spawn_detached(std::process::Command::new("xdg-open").arg(target));
 
     #[cfg(target_os = "windows")]
     {
@@ -121,6 +130,14 @@ pub fn open_external<P: AsRef<std::ffi::OsStr>>(target: P) {
     }
 }
 
+/// Exit the process immediately **without** running C/C++ static destructors.
+///
+/// whisper.cpp / ggml-metal aborts in a static destructor at normal exit
+/// (`GGML_ASSERT … ggml_abort` → "Abort trap: 6"); `process::exit` and returning
+/// from `main` both run those dtors. `_exit` skips them, giving a clean exit
+/// code 0. This matters now that the LaunchAgent uses
+/// `KeepAlive{SuccessfulExit:false}`: an *abnormal* abort on a user-requested
+/// Quit would otherwise make launchd resurrect the app instead of staying down.
 pub fn exit_clean() -> ! {
     // SAFETY: `_exit` simply terminates the process; no Rust/C dtors or atexit
     // handlers run. We accept losing any buffered (non-blocking) log lines.
@@ -179,4 +196,45 @@ pub fn percent_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// Zombie children of this process, by pid (`ps` STAT starting with `Z`).
+    fn zombie_children() -> Vec<u32> {
+        let me = std::process::id();
+        let out = std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,stat="])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                let (pid, ppid, stat) = (f.first()?, f.get(1)?, f.get(2)?);
+                (ppid.parse::<u32>().ok()? == me && stat.starts_with('Z'))
+                    .then(|| pid.parse().ok())?
+            })
+            .collect()
+    }
+
+    #[test]
+    fn spawn_detached_leaves_no_zombies() {
+        let mut pids = Vec::new();
+        for _ in 0..20 {
+            let mut cmd = std::process::Command::new("true");
+            spawn_detached(&mut cmd).expect("spawn true");
+        }
+        // `true` exits at once; give the reaper threads time to collect it.
+        for _ in 0..50 {
+            pids = zombie_children();
+            if pids.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(pids.is_empty(), "unreaped children: {pids:?}");
+    }
 }

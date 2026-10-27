@@ -172,6 +172,12 @@ make dmg     # create distributable DMG
   `find_input_device` / playback's `output_device` use `devices()` too, because
   they run on the record/playback path where a hang means no dictation at all.
 - **whisper-rs build**: requires cmake for whisper.cpp compilation
+- **Never drop a spawned `Child`.** A fire-and-forget `Command::spawn()` whose
+  `Child` is dropped is never reaped: on macOS/Linux it stays a zombie for the
+  daemon's lifetime. `afplay` runs twice per dictation, so a dev build up for
+  12 days was parent to ~1100 `<defunct>` processes (load average ~300).
+  Fire-and-forget goes through `util::spawn_detached` (spawn + a thread that
+  `wait()`s); everything else uses `.output()` / `.status()` / `wait()`.
 - **macOS keyboard CGEventTap**: needs **Accessibility AND Input Monitoring** (kTCCServiceListenEvent). Accessibility alone is not enough — the tap silently receives nothing. The app checks both via `IOHIDCheckAccess` and requests them via `IOHIDRequestAccess`. The tap must be born *after* the grants → `permissions::guided_setup()` restarts the daemon (`launchctl kickstart -k`) once everything is granted.
 - **Ad-hoc TCC reset**: every rebuild changes the binary's cdhash, so macOS invalidates the TCC grants. `guided_setup` is what makes the re-grant tolerable — it opens the right panes, polls, and auto-restarts. A real Developer ID would stop the resets entirely.
 - **evdev on Linux**: requires user in 'input' group (`sudo usermod -aG input $USER`).
