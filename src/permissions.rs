@@ -325,10 +325,11 @@ fn finish_guided_setup() {
         crate::notify::alert("\u{2713} All set! Restarting to enable the hotkey\u{2026}");
         std::thread::sleep(Duration::from_millis(1500));
         // Detached so it survives this process being killed by `-k`.
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("launchctl kickstart -k gui/$(id -u)/com.whisper-push.app")
-            .spawn();
+        let _ = crate::util::spawn_detached(
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("launchctl kickstart -k gui/$(id -u)/com.whisper-push.app"),
+        );
     }
     #[cfg(target_os = "linux")]
     crate::notify::alert(
