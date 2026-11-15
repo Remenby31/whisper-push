@@ -10,6 +10,7 @@
 mod acoustic;
 mod audio;
 mod autostart;
+mod cli_audio_bench;
 mod config;
 mod dialog;
 mod dictionary;
@@ -149,10 +150,43 @@ enum Commands {
     /// the dictation lifecycle (not wired to press/release yet — see #19) —
     /// this is how to invoke and verify it on its own.
     ScreenVocabCapture,
+    /// Measure transcription accuracy/latency on noisy audio, raw vs macOS
+    /// voice processing (see src/cli_audio_bench.rs, tools/audio_bench/).
+    #[command(hide = true)]
+    AudioBench {
+        #[command(subcommand)]
+        action: AudioBenchAction,
+    },
     /// Manage the Lemon Squeezy license (activate, validate, status, …).
     License {
         #[command(subcommand)]
         action: LicenseAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum AudioBenchAction {
+    /// Transcribe a TSV manifest (wav, condition, reference) → WER + latency.
+    Run {
+        manifest: PathBuf,
+        /// Model name (default: the configured one).
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value = "fr")]
+        language: String,
+        /// Only the first N rows (quick check).
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Record from the mic (raw, or through VoiceProcessingIO with --vp) to a WAV.
+    Record {
+        out: PathBuf,
+        #[arg(long)]
+        vp: bool,
+        #[arg(long, default_value_t = 6.0)]
+        secs: f32,
+        #[arg(long, default_value = "auto")]
+        device: String,
     },
 }
 
@@ -317,6 +351,23 @@ fn main() -> Result<()> {
     if let Some(Commands::CaptureSelfTest) = &cli.command {
         init_logging(false);
         return cli_capture_selftest::run();
+    }
+    if let Some(Commands::AudioBench { action }) = &cli.command {
+        init_logging(false);
+        return match action {
+            AudioBenchAction::Run {
+                manifest,
+                model,
+                language,
+                limit,
+            } => cli_audio_bench::run(manifest, model.as_deref(), language, *limit),
+            AudioBenchAction::Record {
+                out,
+                vp,
+                secs,
+                device,
+            } => cli_audio_bench::record(out, *vp, *secs, device),
+        };
     }
     if let Some(Commands::ScreenVocabCapture) = &cli.command {
         init_logging(false);

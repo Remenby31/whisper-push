@@ -1,6 +1,6 @@
 [package]
 name = "whisper-push"
-version = "1.2.10"
+version = "1.3.0"
 edition = "2024"
 # eframe 0.36 (the setup wizard) sets the floor; without this, a older
 # toolchain fails somewhere inside egui instead of saying what it needs.
@@ -189,6 +189,8 @@ objc2-vision = { version = "0.3", default-features = false, features = [
 core-foundation = { version = "0.10", features = ["mac_os_10_7_support"] }
 core-graphics = "0.24"
 core-foundation-sys = "0.8"
+# VoiceProcessingIO (src/audio/vpio.rs). Same version cpal already links.
+coreaudio-rs = { version = "0.11", default-features = false, features = ["audio_unit", "core_audio"] }
 # `default-features = false`: objc2-core-foundation's default set pulls
 # `dispatch2`, whose generated bitflags macro blows past the default rustc
 # macro recursion limit (128) and breaks every macOS CI job. We only need

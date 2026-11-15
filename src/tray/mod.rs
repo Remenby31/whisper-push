@@ -492,6 +492,7 @@ struct MenuItems {
     sound_item: CheckMenuItem,
     debug_item: CheckMenuItem,
     screen_vocab_item: CheckMenuItem,
+    voice_processing_item: CheckMenuItem,
     quit_id: String,
     uninstall_id: String,
     update_item: MenuItem,
@@ -744,6 +745,10 @@ impl App {
         // press, feeding a separate local vocabulary log — see src/screen_vocab.
         let screen_vocab_item =
             CheckMenuItem::new("Screen Vocabulary", true, cfg.screen_vocab_enabled, None);
+        // Off by default: macOS VoiceProcessingIO (echo cancellation of what the
+        // Mac plays, noise suppression, AGC). Takes effect on the next dictation.
+        let voice_processing_item =
+            CheckMenuItem::new("Voice Processing", true, cfg.voice_processing, None);
         let update_item = MenuItem::new("Check for Updates\u{2026}", true, None);
         let report_item = MenuItem::new("Report a Problem\u{2026}", true, None);
         let uninstall_item = MenuItem::new("Uninstall\u{2026}", true, None);
@@ -853,6 +858,8 @@ impl App {
         let _ = settings_submenu.append(&sound_item);
         let _ = settings_submenu.append(&debug_item);
         let _ = settings_submenu.append(&screen_vocab_item);
+        #[cfg(target_os = "macos")]
+        let _ = settings_submenu.append(&voice_processing_item);
         let _ = settings_submenu.append(&PredefinedMenuItem::separator());
         let _ = settings_submenu.append(&uninstall_item);
 
@@ -932,6 +939,7 @@ impl App {
             sound_item,
             debug_item,
             screen_vocab_item,
+            voice_processing_item,
             hotkey_items,
             hotkey_submenu,
             custom_hotkey_item,
@@ -1483,6 +1491,11 @@ impl App {
                     } else {
                         "Screen vocabulary capture OFF"
                     });
+                    return;
+                }
+                if id == &mi.voice_processing_item.id().0 {
+                    let on = self.toggle(&mi.voice_processing_item, |c| &mut c.voice_processing);
+                    info!("Voice processing {}", if on { "ON" } else { "OFF" });
                     return;
                 }
                 if id == &mi.dict_correct_last_id {
@@ -2265,6 +2278,7 @@ fn handle_pipeline_event(
             let device = crate::audio::effective_input_device(&cfg.input_device);
             let delay = cfg.hold_delay;
             let sound_feedback = cfg.sound_feedback;
+            let voice_processing = cfg.voice_processing;
             let language = cfg.language.clone();
             drop(cfg);
 
@@ -2293,16 +2307,17 @@ fn handle_pipeline_event(
             // Ctrl tap (e.g. Ctrl+click) now briefly opens+closes the mic, so the
             // macOS mic indicator blinks — harmless on a built-in/wired mic; on a
             // Bluetooth mic it also blips the audio mode, so prefer a local mic.
-            let cap = match crate::audio::capture::AudioCapture::start(&device) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!("Capture failed: {e}");
-                    crate::notify::alert(
-                        "Couldn't start recording — check your microphone is connected.",
-                    );
-                    return;
-                }
-            };
+            let cap =
+                match crate::audio::capture::AudioCapture::start_with(&device, voice_processing) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!("Capture failed: {e}");
+                        crate::notify::alert(
+                            "Couldn't start recording — check your microphone is connected.",
+                        );
+                        return;
+                    }
+                };
             // Hold-delay gate, with the mic already capturing. A release within
             // hold_delay is a quick tap → discard the pre-rolled audio and close.
             if hold_gate(rx, self_tx, delay) {
@@ -2357,9 +2372,13 @@ fn handle_pipeline_event(
                 if !crate::license::gate() {
                     return;
                 }
-                let (configured, language) = {
+                let (configured, language, voice_processing) = {
                     let c = config.lock_safe();
-                    (c.input_device.clone(), c.language.clone())
+                    (
+                        c.input_device.clone(),
+                        c.language.clone(),
+                        c.voice_processing,
+                    )
                 };
                 let device = crate::audio::effective_input_device(&configured);
                 // Pill up before the (synchronous) mic open, like the hold path.
@@ -2367,7 +2386,7 @@ fn handle_pipeline_event(
                     ui_tx,
                     Event::Overlay(crate::overlay::OverlayState::Recording),
                 );
-                match crate::audio::capture::AudioCapture::start(&device) {
+                match crate::audio::capture::AudioCapture::start_with(&device, voice_processing) {
                     Ok(cap) => {
                         *capture = Some(cap);
                         *recording = true;

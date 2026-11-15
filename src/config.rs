@@ -50,6 +50,12 @@ pub struct Config {
     /// before transcription starts. Off ⇒ no screen capture or OCR ever runs —
     /// today's dictation behaviour is unchanged. macOS-only; a no-op elsewhere.
     pub screen_vocab_enabled: bool,
+    /// Opt-in, off by default: record through macOS's VoiceProcessingIO unit
+    /// (echo cancellation of what the Mac plays, noise suppression, AGC) instead
+    /// of the raw microphone. Other apps' audio is ducked as little as macOS
+    /// allows. Falls back to raw capture if the unit can't open. macOS-only;
+    /// ignored elsewhere. See src/audio/vpio.rs and docs/audit-audio.md.
+    pub voice_processing: bool,
 }
 
 impl Default for Config {
@@ -71,6 +77,7 @@ impl Default for Config {
             overlay_enabled: true,
             keep_model_resident: true,
             screen_vocab_enabled: false,
+            voice_processing: false,
         }
     }
 }
@@ -304,6 +311,9 @@ mod tests {
         assert_eq!(cfg.hotkey_mode, "hold");
         assert_eq!(cfg.model, "ggml-large-v3-turbo-q5_0.bin");
         assert!(cfg.notifications);
+        // A pre-1.3 config.toml has no `voice_processing`: upgrading must leave
+        // it off, i.e. capture exactly as before.
+        assert!(!cfg.voice_processing);
     }
 
     #[test]

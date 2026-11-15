@@ -50,6 +50,19 @@ No cloud, no account, no latency. A **35MB native binary** that transcribes spee
 
 > Signed with a Developer ID and notarized by Apple, so it opens like any other app — no Gatekeeper warning.
 
+**Or with Homebrew:**
+
+```bash
+brew install --cask remenby31/whisper-push/whisper-push
+```
+
+**Updating.** The app checks for a new version every few hours and offers it from
+the menu bar (**⬆ Update to vX**, or **Check for Updates…**). It installs in place,
+keeps your settings and relaunches itself. Other ways to update:
+
+- Homebrew: `brew update && brew upgrade --cask whisper-push`
+- DMG: download the [latest DMG](https://github.com/Remenby31/whisper-push/releases/latest), quit Whisper Push, and drag the new copy over the old one in Applications.
+
 **Build from source instead:**
 
 ```bash
@@ -106,6 +119,7 @@ of the flyout once to keep it in view.
 | **Switch engine** | Menu → **Engine** → Parakeet / Voxtral / Whisper |
 | **Pick microphone / output** | Menu → **Input Device** / **Output Device** |
 | **Fix permissions** | Menu → **Permissions → ⚙ Run Guided Setup…** (opens the right Settings panes + auto-restarts). macOS asks for Microphone, Accessibility and Input Monitoring; Windows for the microphone; Linux for `input` group access. |
+| **Dictate over music / a video (macOS)** | Menu → **Settings → Voice Processing**. Off by default. Removes what the Mac is playing from the mic, reduces noise, evens out the level (macOS voice processing, on-device). Useless with headphones. |
 | **Test** | Menu → "Test (record 3s + transcribe)" |
 | **Check setup** | `whisper-push --doctor` |
 | **Transcribe file** | `whisper-push --transcribe audio.mp3` |

@@ -3,6 +3,8 @@ pub mod decode;
 pub mod playback;
 pub mod silence;
 pub mod stream;
+#[cfg(target_os = "macos")]
+pub mod vpio;
 
 use crate::util::run_with_timeout;
 use anyhow::Result;
@@ -274,17 +276,21 @@ pub fn best_working_mic(dead: &str) -> Option<String> {
 
 /// Create a resampler from device sample rate to 16kHz, if needed.
 pub fn create_resampler(device_sr: u32) -> Result<Option<Arc<Mutex<FftFixedIn<f32>>>>> {
+    Ok(new_resampler(device_sr)?.map(|r| Arc::new(Mutex::new(r))))
+}
+
+/// device rate → 16 kHz mono resampler; `None` when the device is already 16 kHz.
+pub fn new_resampler(device_sr: u32) -> Result<Option<FftFixedIn<f32>>> {
     if device_sr == SAMPLE_RATE {
         return Ok(None);
     }
-    let resampler = FftFixedIn::<f32>::new(
+    Ok(Some(FftFixedIn::<f32>::new(
         device_sr as usize,
         SAMPLE_RATE as usize,
         RESAMPLE_CHUNK_SIZE,
         1,
         1,
-    )?;
-    Ok(Some(Arc::new(Mutex::new(resampler))))
+    )?))
 }
 
 /// Downmix interleaved multi-channel audio to mono.
