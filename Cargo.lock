@@ -9009,6 +9009,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "core-graphics 0.24.0",
+ "coreaudio-rs",
  "cpal",
  "crossbeam-channel",
  "dirs",

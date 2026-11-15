@@ -52,7 +52,8 @@ whisper-push/
 │   ├── notify.rs             # Cross-platform notifications (notify-rust)
 │   ├── audio/
 │   │   ├── mod.rs            # Device listing
-│   │   ├── capture.rs        # cpal input → 16kHz mono f32 (rubato resampling)
+│   │   ├── capture.rs        # cpal/VPIO input → Sink (downmix, rubato, tail flush, clamp) → 16kHz mono f32
+│   │   ├── vpio.rs           # macOS VoiceProcessingIO (AEC/NS/AGC), opt-in `voice_processing`
 │   │   └── playback.rs       # Start/stop sounds (embedded via include_bytes!)
 │   ├── transcribe/
 │   │   └── mod.rs            # whisper-rs load/unload/transcribe + HF model download
@@ -171,6 +172,15 @@ make dmg     # create distributable DMG
   able to choose one, and that is exactly when classification stalls; (2)
   `find_input_device` / playback's `output_device` use `devices()` too, because
   they run on the record/playback path where a hang means no dictation at all.
+- **Voice processing (`src/audio/vpio.rs`) is opt-in and never load-bearing.**
+  Any VPIO failure falls back to the raw cpal stream. The output element stays
+  enabled and renders silence, because the echo canceller is built around it.
+  Ducking of other apps is set to `Min` via property 2108 (macOS 14+, hard-coded:
+  `coreaudio-sys` predates it). The offline bench (`audio-bench run` +
+  `tools/audio_bench/make_corpus.py`, see `docs/voice-processing-bench.md`) shows that
+  instrumental music barely hurts, but **a voice in what the Mac plays** (video,
+  podcast) takes the WER from ~2 % to ~50 % at equal loudness. Only
+  `tools/audio_bench/live.sh`, run by a human with a mic, measures the real VPIO.
 - **whisper-rs build**: requires cmake for whisper.cpp compilation
 - **Never drop a spawned `Child`.** A fire-and-forget `Command::spawn()` whose
   `Child` is dropped is never reaped: on macOS/Linux it stays a zombie for the

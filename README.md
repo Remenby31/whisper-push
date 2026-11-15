@@ -106,6 +106,7 @@ of the flyout once to keep it in view.
 | **Switch engine** | Menu → **Engine** → Parakeet / Voxtral / Whisper |
 | **Pick microphone / output** | Menu → **Input Device** / **Output Device** |
 | **Fix permissions** | Menu → **Permissions → ⚙ Run Guided Setup…** (opens the right Settings panes + auto-restarts). macOS asks for Microphone, Accessibility and Input Monitoring; Windows for the microphone; Linux for `input` group access. |
+| **Dictate over music / a video (macOS)** | Menu → **Settings → Voice Processing**. Off by default. Removes what the Mac is playing from the mic, reduces noise, evens out the level (macOS voice processing, on-device). Useless with headphones. |
 | **Test** | Menu → "Test (record 3s + transcribe)" |
 | **Check setup** | `whisper-push --doctor` |
 | **Transcribe file** | `whisper-push --transcribe audio.mp3` |

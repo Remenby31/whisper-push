@@ -299,12 +299,24 @@ jobs:
     needs: [macos, linux-cpu, linux-cuda, windows-cpu, windows-cuda]
     runs-on: ubuntu-latest
     steps:
+      # Hand-written notes for this tag (docs/release-notes/<tag>.md), shown
+      # above the generated PR list. Optional: no file ⇒ generated notes only
+      # (an empty body_path is ignored by the action).
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: docs/release-notes
+      - name: Release notes for this tag
+        id: notes
+        run: |
+          f="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$f" ]; then echo "path=$f" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ steps.notes.outputs.path }}
           # Only real deliverables — not stray build logs (e.g. the CUDA
           # installer log) that would otherwise leak in as release assets.
           files: |
