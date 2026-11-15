@@ -1,7 +1,8 @@
 # Homebrew Cask for Whisper Push
-# Usage:
-#   brew tap Remenby31/whisper-push
-#   brew install --cask whisper-push
+# Usage (the fully-qualified name also trusts the cask: Homebrew 7 refuses
+# untrusted third-party taps, so `brew tap` + a bare name fails):
+#   brew install --cask remenby31/whisper-push/whisper-push
+#   brew update && brew upgrade --cask whisper-push
 #
 # The tap repo (Remenby31/homebrew-whisper-push) should contain this file at:
 #   Casks/whisper-push.rb
@@ -15,14 +16,10 @@ cask "whisper-push" do
   desc "Push-to-talk voice dictation, 100% local"
   homepage "https://github.com/Remenby31/whisper-push"
 
-  depends_on macos: ">= :ventura"
   depends_on arch: :arm64
+  depends_on macos: :ventura
 
   app "Whisper Push.app"
-
-  postflight do
-    ohai "Whisper Push downloads a speech model (~550 MB) on first launch."
-  end
 
   uninstall launchctl: "com.whisper-push.app",
             quit:      "com.whisper-push.app"
@@ -31,4 +28,6 @@ cask "whisper-push" do
     "~/Library/Application Support/whisper-push",
     "~/Library/LaunchAgents/com.whisper-push.app.plist",
   ]
+
+  caveats "Whisper Push downloads a speech model (~550 MB) on first launch."
 end
