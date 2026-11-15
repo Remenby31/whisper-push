@@ -50,6 +50,19 @@ No cloud, no account, no latency. A **35MB native binary** that transcribes spee
 
 > Signed with a Developer ID and notarized by Apple, so it opens like any other app — no Gatekeeper warning.
 
+**Or with Homebrew:**
+
+```bash
+brew install --cask remenby31/whisper-push/whisper-push
+```
+
+**Updating.** The app checks for a new version every few hours and offers it from
+the menu bar (**⬆ vX available**, or **Check for Updates…**). It installs in place,
+keeps your settings and relaunches itself. Other ways to update:
+
+- Homebrew: `brew update && brew upgrade --cask whisper-push`
+- DMG: download the [latest DMG](https://github.com/Remenby31/whisper-push/releases/latest), quit Whisper Push, and drag the new copy over the old one in Applications.
+
 **Build from source instead:**
 
 ```bash
