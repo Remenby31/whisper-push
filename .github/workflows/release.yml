@@ -25,14 +25,19 @@ env:
     libgtk-3-dev libglib2.0-dev libxdo-dev libayatana-appindicator3-dev
     libxkbcommon-dev libwayland-dev
 
+# Toolchain pinned to 1.99.1: Rust 1.100 (2026-11-09) moved build scripts' OUT_DIR
+# to target/<profile>/build/<pkg>/<hash>/out, and ort-sys 2.0.0-rc.13's
+# copy_dylibs (Windows) assumes the old depth, so it copies the DirectML DLLs into
+# target/debug/build/examples, a path that doesn't exist, and fails. Unpin when ort-sys/
+# parakeet-rs ship a fix. macos-15: GitHub retired the macos-14 image.
 jobs:
   # ─── macOS (Apple Silicon, Metal + all models) ─────
   macos:
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'macos'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
 
       # Import Developer ID certificate into a temporary CI keychain
       - name: Import code signing certificate
@@ -120,7 +125,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -150,7 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: '12.4.0'
@@ -183,7 +188,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install WiX Toolset 3.14
         # GitHub removed WiX from the runner images; cargo-wix needs candle/light
         # on PATH. Fetch the WiX 3.14 binaries and add them.
@@ -237,7 +242,7 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Jimver/cuda-toolkit@v0.2.16
         with:
           cuda: '12.4.0'

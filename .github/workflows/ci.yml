@@ -5,6 +5,11 @@ on:
     branches: [main, rust-rewrite]
   pull_request:
 
+# Toolchain pinned to 1.99.1: Rust 1.100 (2026-11-09) moved build scripts' OUT_DIR
+# to target/<profile>/build/<pkg>/<hash>/out, and ort-sys 2.0.0-rc.13's
+# copy_dylibs (Windows) assumes the old depth, so it copies the DirectML DLLs into
+# target/debug/build/examples, a path that doesn't exist, and fails. Unpin when ort-sys/
+# parakeet-rs ship a fix. macos-15: GitHub retired the macos-14 image.
 jobs:
   check:
     strategy:
@@ -14,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             cargo_flags: ""
             name: "macOS (Metal)"
           - os: ubuntu-latest
@@ -27,7 +32,7 @@ jobs:
     name: Check — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: Install deps (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -81,11 +86,11 @@ jobs:
           Write-Host "✓ MSI authoring compiles, links and passes ICE validation"
 
   test:
-    runs-on: macos-14
+    runs-on: macos-15
     name: Tests (macOS)
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - name: Run unit tests
         # `cargo test` runs lib+bin unit tests and every test target under tests/.
         # The previous `--test integration` referenced a file that no longer
@@ -93,11 +98,11 @@ jobs:
         run: cargo test --features metal --lib -- --nocapture
 
   clippy:
-    runs-on: macos-14
+    runs-on: macos-15
     name: Clippy
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: clippy
       - name: Clippy
@@ -108,7 +113,7 @@ jobs:
     name: Format
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt
       - name: Check format
