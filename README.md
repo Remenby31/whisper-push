@@ -57,7 +57,7 @@ brew install --cask remenby31/whisper-push/whisper-push
 ```
 
 **Updating.** The app checks for a new version every few hours and offers it from
-the menu bar (**⬆ vX available**, or **Check for Updates…**). It installs in place,
+the menu bar (**⬆ Update to vX**, or **Check for Updates…**). It installs in place,
 keeps your settings and relaunches itself. Other ways to update:
 
 - Homebrew: `brew update && brew upgrade --cask whisper-push`
